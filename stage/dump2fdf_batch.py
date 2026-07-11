@@ -4,6 +4,8 @@ from typing import List, Tuple, Optional
 
 import numpy as np
 
+import logkit as L
+
 # type 映射：1->C, 2->H
 TYPE_TO_SPECIES = {
     1: ("C", 1, 6),  # symbol, species_id, Z
@@ -265,10 +267,10 @@ def main():
 
     dumps = find_dump_files(args.root, args.dump_name)
     if not dumps:
-        raise SystemExit(f"[ERR] No dump file matched '{args.dump_name}' under {os.path.abspath(args.root)}")
+        raise SystemExit(f"[ERROR] 未找到匹配 '{args.dump_name}' 的 dump 文件，目录: {os.path.abspath(args.root)}")
 
     total_frames = 0
-    print(f"[INFO] Found {len(dumps)} dump file(s).")
+    L.info(f"找到 dump 文件: {len(dumps)} 个")
 
     root_abs = os.path.abspath(args.root)
     outroot_abs = os.path.abspath(args.outroot)
@@ -289,10 +291,10 @@ def main():
             skip_zero=(not args.no_skip_zero),
         )
         total_frames += n
-        print(f"[OK] {dump_path} -> {out_base_dir}/<timestep>/STRUCT.fdf   frames={n}")
+        L.ok(f"{dump_path} -> {out_base_dir}/<timestep>/STRUCT.fdf   frames={n}")
 
-    print(f"[DONE] Total frames written: {total_frames}")
-    print(f"[DONE] Output root: {outroot_abs}")
+    L.info(f"共写出帧数: {total_frames}")
+    L.info(f"输出根目录: {outroot_abs}")
 
 
 if __name__ == "__main__":

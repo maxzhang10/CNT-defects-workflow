@@ -4,6 +4,8 @@ from ase.build import sort
 import math
 from math import gcd
 
+import logkit as L
+
 def clean_cnt_by_shift_wrap_anchor(tube, z_shift=0.1, anchor_index=0):
     """
     对完整 CNT 做 z 方向 clean：
@@ -145,12 +147,12 @@ def geo_info(m, n, r_max, l_def):
     # 2PL-2PL-defects-2PL-2PL
     length = l_PL * 8 + l_def
 
-    print("结构为 2PL-2PL-defects-2PL-2PL")
-    print("defects区 为", l_def, "个uc")
-    print("unit cell长度为 T =", T)
-    print("unit cell 原子数N_uc =", N_uc)
-    print("PL由 l_PL =", l_PL, "个unit cell 组成")
-    print("总体由 length =", length, "个unit cell 组成")
-    print("总体原子数 =", N_uc * length)
+    L.debug("结构为 2PL-2PL-defects-2PL-2PL")
+    L.debug(f"defects区 为 {l_def} 个uc")
+    L.debug(f"unit cell长度为 T = {T}")
+    L.debug(f"unit cell 原子数N_uc = {N_uc}")
+    L.debug(f"PL由 l_PL = {l_PL} 个unit cell 组成")
+    L.debug(f"总体由 length = {length} 个unit cell 组成")
+    L.debug(f"总体原子数 = {N_uc * length}")
 
     return T, N_uc, l_PL, length

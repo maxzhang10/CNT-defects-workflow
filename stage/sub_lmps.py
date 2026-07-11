@@ -4,6 +4,8 @@ import subprocess
 import sys
 import time
 
+import logkit as L
+
 
 def check_required_files(workdir: Path):
     required = [
@@ -31,7 +33,7 @@ def run_lammps_local(workdir: Path) -> str:
         bash run.sh
     """
 
-    print(f"[INFO] Running LAMMPS locally in {workdir}")
+    L.info(f"本地运行 LAMMPS: {workdir}")
 
     start_time = time.strftime("%Y-%m-%d %H:%M:%S")
     (workdir / "lammps_started.flag").write_text(start_time + "\n")
@@ -78,7 +80,7 @@ def write_submit_record(workdir: Path, job_id: str):
 
 def main():
     if len(sys.argv) != 2:
-        print("Usage: python sub_lmps.py /path/to/lammps_workdir")
+        L.error("用法: python sub_lmps.py /path/to/lammps_workdir")
         sys.exit(1)
 
     workdir = Path(sys.argv[1]).resolve()
@@ -93,21 +95,21 @@ def main():
 
     # 已经成功完成：直接跳过
     if done_flag.exists():
-        print(f"[SKIP] LAMMPS already finished: {workdir}")
+        L.skip(f"LAMMPS 已完成，跳过: {workdir}")
         return
 
     # 上一次失败：默认不自动重跑，避免反复炸
     if failed_flag.exists():
-        print(f"[WARN] Previous LAMMPS run failed: {workdir}")
-        print(f"[WARN] Remove {failed_flag} if you want to rerun.")
+        L.warn(f"上次 LAMMPS 运行失败: {workdir}")
+        L.warn(f"如需重跑请删除 {failed_flag}")
         return
 
     # 已经提交/启动过但没 done：容器本地模式下，这通常说明上次中断了
     if submitted_flag.exists() and job_id_file.exists():
         job_id = job_id_file.read_text().strip()
-        print(f"[WARN] LAMMPS was started before. job_id = {job_id}")
-        print("[WARN] No lammps_done.flag found.")
-        print("[WARN] Remove lammps_submitted.flag and job_id.txt if you want to rerun.")
+        L.warn(f"LAMMPS 之前已启动。job_id = {job_id}")
+        L.warn("未找到 lammps_done.flag。")
+        L.warn("如需重跑请删除 lammps_submitted.flag 和 job_id.txt。")
         return
 
     check_required_files(workdir)
@@ -116,10 +118,10 @@ def main():
 
     write_submit_record(workdir, job_id)
 
-    print("LAMMPS finished successfully.")
-    print(f"workdir = {workdir}")
-    print(f"job_id  = {job_id}")
-    print(f"done    = {workdir / 'lammps_done.flag'}")
+    L.ok("LAMMPS 运行成功。")
+    L.info(f"workdir = {workdir}")
+    L.info(f"job_id  = {job_id}")
+    L.info(f"done    = {workdir / 'lammps_done.flag'}")
 
 
 if __name__ == "__main__":

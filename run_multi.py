@@ -7,8 +7,14 @@ import shutil
 import json
 from pathlib import Path
 
+# 让编排层与各 stage 脚本共用同一份 logkit
+_STAGE_DIR = Path(__file__).resolve().parent / "stage"
+if str(_STAGE_DIR) not in sys.path:
+    sys.path.insert(0, str(_STAGE_DIR))
+import logkit as L
+
 def run_cmd(cmd, dry_run=False, env=None):
-    print("\n[RUN]", " ".join(map(str, cmd)))
+    L.run(" ".join(map(str, cmd)))
     if dry_run:
         return
     subprocess.run(cmd, check=True, env=env)
@@ -203,7 +209,7 @@ def clean_dpnegf_output_cache(root):
     root = Path(root).resolve()
 
     if not root.exists():
-        print(f"[CLEAN] root not found: {root}")
+        L.error(f"清理缓存时 root 不存在: {root}")
         return
 
     removed_dirs = 0
@@ -222,7 +228,7 @@ def clean_dpnegf_output_cache(root):
         # 1. 删除 self_energy 目录
         self_energy_dir = output_dir / "self_energy"
         if self_energy_dir.is_dir():
-            print(f"[CLEAN] rm -r {self_energy_dir}")
+            L.clean(f"rm -r {self_energy_dir}")
             shutil.rmtree(self_energy_dir)
             removed_dirs += 1
 
@@ -230,12 +236,11 @@ def clean_dpnegf_output_cache(root):
         for fname in hs_files:
             fpath = output_dir / fname
             if fpath.is_file():
-                print(f"[CLEAN] rm {fpath}")
+                L.clean(f"rm {fpath}")
                 fpath.unlink()
                 removed_files += 1
 
-    print(f"[CLEAN] removed self_energy dirs: {removed_dirs}")
-    print(f"[CLEAN] removed HS files: {removed_files}")
+    L.clean(f"已清理 self_energy 目录: {removed_dirs} 个，HS 文件: {removed_files} 个")
 
 def main():
     parser = argparse.ArgumentParser(
@@ -334,14 +339,15 @@ def main():
 
     env["CNT_CONFIG"] = str(config_path)
 
-    print(f"[INFO] CNT_CONFIG = {config_path}")
-    print(f"[INFO] root       = {root}")
-    print(f"[INFO] stage      = {stage}")
+    L.info(f"CNT_CONFIG = {config_path}")
+    L.info(f"root       = {root}")
+    L.info(f"stage      = {stage}")
 
     # ============================================================
     # 0. 先运行 eledefects.py
     # ============================================================
     if not args.skip_ele:
+        L.phase(1, 6, "生成缺陷几何 (eledefects)")
         run_cmd(
             [
                 py,
@@ -353,6 +359,7 @@ def main():
         # ============================================================
         # 0.5 运行lammps任务
         # ============================================================
+        L.phase(2, 6, "LAMMPS 退火")
         lammps_workdirs = find_lammps_workdirs(root)
 
         if not lammps_workdirs:
@@ -362,9 +369,9 @@ def main():
                 f"并且其中包含 data.lmp / in.lammps / CH.airebo-m / run.sh"
             )
 
-        print(f"[INFO] found LAMMPS workdirs: {len(lammps_workdirs)}")
-        for w in lammps_workdirs:
-            print("  -", w)
+        L.info(f"找到 LAMMPS 工作目录: {len(lammps_workdirs)} 个")
+        for i, w in enumerate(lammps_workdirs, 1):
+            L.item(i, len(lammps_workdirs), w)
 
         for workdir in lammps_workdirs:
             run_cmd(
@@ -379,6 +386,7 @@ def main():
     # ============================================================
     # 1. 查找含 dump 的结构目录
     # ============================================================
+    L.phase(3, 6, "dump -> fdf")
     structure_dirs = find_structure_dirs(root)
 
     if not structure_dirs:
@@ -387,9 +395,9 @@ def main():
             f"注意：eledefects.py 通常只生成 lammps 输入文件；如果还没运行 LAMMPS，就不会有 dump。"
         )
 
-    print(f"[INFO] found structure dirs: {len(structure_dirs)}")
-    for d in structure_dirs:
-        print("  -", d)
+    L.info(f"找到结构目录: {len(structure_dirs)} 个")
+    for i, d in enumerate(structure_dirs, 1):
+        L.item(i, len(structure_dirs), d)
 
     # ============================================================
     # 2. 每个结构目录单独 dump -> fdf
@@ -420,11 +428,12 @@ def main():
     # ============================================================
     # 3. 对每个结构的 dpnegf 目录做 fdf -> xyz
     # ============================================================
+    L.phase(4, 6, "fdf -> xyz")
     for struct_dir in structure_dirs:
         dpnegf_dir = struct_dir / "dpnegf"
 
         if not dpnegf_dir.exists():
-            print(f"[WARN] dpnegf dir not found, skip fdf2xyz: {dpnegf_dir}")
+            L.warn(f"dpnegf 目录不存在，跳过 fdf2xyz: {dpnegf_dir}")
             continue
 
         run_cmd(
@@ -445,6 +454,7 @@ def main():
     # ============================================================
     # 4. 复制 dpnegf 输入文件
     # ============================================================
+    L.phase(5, 6, "复制 DPNEGF 输入")
     project_root = Path(__file__).resolve().parent
     dpnegf_input_dir = project_root / "input_files" / "dpnegf"
 
@@ -467,13 +477,13 @@ def main():
 
     model_file = model_files[0].name
 
-    print(f"[INFO] dpnegf model file = {model_file}")
+    L.info(f"DPNEGF 模型文件 = {model_file}")
 
     for struct_dir in structure_dirs:
         dpnegf_dir = struct_dir / "dpnegf"
 
         if not dpnegf_dir.exists():
-            print(f"[WARN] dpnegf dir not found, skip copy_input: {dpnegf_dir}")
+            L.warn(f"dpnegf 目录不存在，跳过 copy_input: {dpnegf_dir}")
             continue
 
         run_cmd(
@@ -497,6 +507,7 @@ def main():
     # 5. 运行所有刚刚建立好的 DPNEGF 工作目录
     # ============================================================
     if not args.skip_dpnegf:
+        L.phase(6, 6, "运行 DPNEGF")
         dpnegf_workdirs = find_dpnegf_workdirs_from_structures(structure_dirs)
 
         if not dpnegf_workdirs:
@@ -507,9 +518,9 @@ def main():
                 "  data/300K/5_5/DV_DV/dpnegf/40000"
             )
 
-        print(f"[INFO] found DPNEGF workdirs: {len(dpnegf_workdirs)}")
-        for w in dpnegf_workdirs:
-            print("  -", w)
+        L.info(f"找到 DPNEGF 工作目录: {len(dpnegf_workdirs)} 个")
+        for i, w in enumerate(dpnegf_workdirs, 1):
+            L.item(i, len(dpnegf_workdirs), w)
 
         for workdir in dpnegf_workdirs:
             run_cmd(

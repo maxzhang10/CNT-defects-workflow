@@ -5,6 +5,8 @@ import sys
 import time
 import glob
 
+import logkit as L
+
 
 def check_required_files(workdir: Path):
     """
@@ -53,7 +55,7 @@ def run_dpnegf_local(workdir: Path) -> str:
         bash run.sh
     """
 
-    print(f"[INFO] Running DPNEGF locally in {workdir}")
+    L.info(f"本地运行 DPNEGF: {workdir}")
 
     start_time = time.strftime("%Y-%m-%d %H:%M:%S")
     (workdir / "dpnegf_started.flag").write_text(start_time + "\n")
@@ -103,7 +105,7 @@ def write_submit_record(workdir: Path, job_id: str):
 
 def main():
     if len(sys.argv) != 2:
-        print("Usage: python sub_dpnegf.py /path/to/dpnegf_workdir")
+        L.error("用法: python sub_dpnegf.py /path/to/dpnegf_workdir")
         sys.exit(1)
 
     workdir = Path(sys.argv[1]).resolve()
@@ -118,21 +120,21 @@ def main():
 
     # 已经成功完成：直接跳过
     if done_flag.exists():
-        print(f"[SKIP] DPNEGF already finished: {workdir}")
+        L.skip(f"DPNEGF 已完成，跳过: {workdir}")
         return
 
     # 上一次失败：默认不自动重跑
     if failed_flag.exists():
-        print(f"[WARN] Previous DPNEGF run failed: {workdir}")
-        print(f"[WARN] Remove {failed_flag} if you want to rerun.")
+        L.warn(f"上次 DPNEGF 运行失败: {workdir}")
+        L.warn(f"如需重跑请删除 {failed_flag}")
         return
 
     # 已经启动过但没有 done：本地模式下通常说明上次中断
     if submitted_flag.exists() and job_id_file.exists():
         job_id = job_id_file.read_text().strip()
-        print(f"[WARN] DPNEGF was started before. job_id = {job_id}")
-        print("[WARN] No dpnegf_done.flag found.")
-        print("[WARN] Remove dpnegf_submitted.flag and job_id.txt if you want to rerun.")
+        L.warn(f"DPNEGF 之前已启动。job_id = {job_id}")
+        L.warn("未找到 dpnegf_done.flag。")
+        L.warn("如需重跑请删除 dpnegf_submitted.flag 和 job_id.txt。")
         return
 
     check_required_files(workdir)
@@ -141,10 +143,10 @@ def main():
 
     write_submit_record(workdir, job_id)
 
-    print("DPNEGF finished successfully.")
-    print(f"workdir = {workdir}")
-    print(f"job_id  = {job_id}")
-    print(f"done    = {workdir / 'dpnegf_done.flag'}")
+    L.ok("DPNEGF 运行成功。")
+    L.info(f"workdir = {workdir}")
+    L.info(f"job_id  = {job_id}")
+    L.info(f"done    = {workdir / 'dpnegf_done.flag'}")
 
 
 if __name__ == "__main__":

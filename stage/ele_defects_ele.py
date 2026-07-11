@@ -17,6 +17,8 @@ import lammps_io
 import json
 from pathlib import Path
 
+import logkit as L
+
 
 def load_config(config_path=None):
     if config_path is None:
@@ -51,11 +53,11 @@ r_max = float(config["r_max"])
 data_root = Path(config.get("data_root", "../data")).resolve()
 l_def = int(config["l_def"])
 
-print("[CONFIG]")
-print("temperature =", temperature)
-print("chirality   =", (m, n))
-print("r_max       =", r_max)
-print("data_root   =", data_root)
+L.info("[CONFIG]")
+L.info(f"temperature = {temperature}")
+L.info(f"chirality   = {(m, n)}")
+L.info(f"r_max       = {r_max}")
+L.info(f"data_root   = {data_root}")
 
 T, N_uc, l_PL, length = cnt_geometry.geo_info(m, n, r_max, l_def)
 
@@ -87,9 +89,6 @@ dtheta  = np.deg2rad(0.0)   # 例如 0 度
 dz      = 3                   # 例如 3 Å
 theta_t = cnt_geometry.wrap_to_pi(theta1 + dtheta)
 z_t     = z1 + dz
-
-print("坐标1",theta1,z1)
-print("坐标2",theta_t,z_t)
 
 # %% [markdown]
 # 生成单、双缺陷管
@@ -151,9 +150,9 @@ structures = {
     for name in selected_structure_names
 }
 
-print("[CONFIG] selected structures:")
-for name in structures:
-    print("  -", name)
+L.info("[CONFIG] selected structures:")
+for i, name in enumerate(structures, 1):
+    L.item(i, len(structures), name)
 # structures = {
 #     # Perfect structure
 #     #"P": tube,
@@ -188,9 +187,9 @@ for folder, atoms in structures.items():
     exporters.write_poscar(poscar_path, atoms_pos)
     exporters.write_lammps(lammps_path, atoms_lmp)
 
-    print(f"[WRITE] {folder}")
-    print(f"  POSCAR   -> {poscar_path}")
-    print(f"  data.lmp -> {lammps_path}")   
+    L.info(f"[WRITE] {folder}")
+    L.info(f"  POSCAR   -> {poscar_path}")
+    L.info(f"  data.lmp -> {lammps_path}")
 
 # %%
 from itertools import chain

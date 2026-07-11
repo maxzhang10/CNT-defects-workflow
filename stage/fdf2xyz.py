@@ -10,6 +10,8 @@ import cnt_geometry
 import argparse
 from pathlib import Path
 
+import logkit as L
+
 def load_config(config_path=None):
     """
     优先级：
@@ -383,7 +385,7 @@ def FDF_to_xyz(
 
         atoms = swap_left_two_pl_order(atoms, n_atoms_per_pl)
 
-        print(
+        L.debug(
             f"Swap left PLs: {fdf_path} | "
             f"m={m}, n={n}, N_uc={N_uc}, l_PL={l_PL}, "
             f"atoms_per_PL={n_atoms_per_pl}"
@@ -411,10 +413,7 @@ def FDF_to_xyz(
     with open(xyz_path, "w", encoding="utf-8") as f:
         f.writelines(lines)
 
-    print(
-        f"Converted: {fdf_path} -> {xyz_path} "
-        f"| natoms={len(atoms)}"
-    )
+    L.ok(f"转换完成: {fdf_path} -> {xyz_path} | natoms={len(atoms)}")
 
 def main():
     parser = argparse.ArgumentParser(
@@ -471,9 +470,9 @@ def main():
     else:
         r_max = float(args.r_max)
 
-    print("[CONFIG]")
-    print(f"chirality = {chirality}")
-    print(f"r_max     = {r_max}")
+    L.info("[CONFIG]")
+    L.info(f"chirality = {chirality}")
+    L.info(f"r_max     = {r_max}")
 
     n_success = 0
     n_failed = 0
@@ -501,12 +500,12 @@ def main():
 
         except Exception as e:
             n_failed += 1
-            print(f"Failed: {fdf_path}")
-            print(f"Reason: {e}")
+            L.error(f"转换失败: {fdf_path}")
+            L.error(f"原因: {e}")
 
-    print(f"[DONE] success={n_success}, failed={n_failed}")
-    print(f"[DONE] input root  = {root_dir}")
-    print(f"[DONE] output root = {outroot}")
+    L.ok(f"fdf2xyz 完成  成功={n_success}  失败={n_failed}")
+    L.info(f"输入根目录 = {root_dir}")
+    L.info(f"输出根目录 = {outroot}")
 
     if n_failed > 0:
         raise SystemExit(1)

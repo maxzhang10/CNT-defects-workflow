@@ -8,6 +8,8 @@ from pathlib import Path
 from fdf2xyz import load_config, get_chirality_from_config
 import cnt_geometry
 
+import logkit as L
+
 
 def clean_line(line):
     return line.split("#", 1)[0].strip()
@@ -103,7 +105,7 @@ def update_run_py_for_leaf(leaf_dir, model_filename, m, n):
     with open(run_py_path, "w", encoding="utf-8") as f:
         f.write(text)
 
-    print(
+    L.debug(
         f"Updated run.py -> {run_py_path}\n"
         f"  model_path = {model_path}\n"
         f"  structure  = {structure_path}"
@@ -163,7 +165,7 @@ def update_input_json_for_leaf(leaf_dir, model_filename, chirality, r_max=6.5, n
         n=n,
     )
 
-    print(
+    L.debug(
         f"Updated input.json -> {leaf_dir}\n"
         f"  m={m}, n={n}\n"
         f"  N_uc={N_uc}, l_PL={l_PL}, atoms_per_PL={n_atoms_per_pl}\n"
@@ -188,10 +190,10 @@ def copy_or_link_file(src: Path, dst: Path, overwrite: bool = True):
 
     if src.suffix == ".pth":
         dst.symlink_to(src)
-        print(f"Linked model: {dst} -> {src}")
+        L.debug(f"软链接模型: {dst} -> {src}")
     else:
         shutil.copy2(src, dst)
-        print(f"Copied: {src} -> {dst}")
+        L.debug(f"复制: {src} -> {dst}")
 
 
 def collect_input_files(input_dir: Path, files_to_copy, model_file=None):
@@ -272,8 +274,8 @@ def copy_inputs_to_leaf_dirs(
         n_leaf += 1
 
         try:
-            print("=" * 80)
-            print(f"Leaf: {current_dir}")
+            L.debug("=" * 80)
+            L.debug(f"Leaf: {current_dir}")
 
             for src in input_files:
                 dst = current_dir / src.name
@@ -291,9 +293,8 @@ def copy_inputs_to_leaf_dirs(
             n_success += 1
 
         except Exception as e:
-            print("=" * 80)
-            print(f"Failed leaf: {current_dir}")
-            print(f"Reason: {e}")
+            L.error(f"leaf 处理失败: {current_dir}")
+            L.error(f"原因: {e}")
             n_failed += 1
 
             # 删除刚复制进去的模板 input.json，避免残留"完整但错误"的 leaf
@@ -302,19 +303,14 @@ def copy_inputs_to_leaf_dirs(
             if stale_input_json.is_file():
                 try:
                     stale_input_json.unlink()
-                    print(f"Removed stale template input.json: {stale_input_json}")
+                    L.warn(f"已删除残留模板 input.json: {stale_input_json}")
                 except OSError as unlink_err:
-                    print(f"[WARN] 无法删除残留 input.json：{stale_input_json}：{unlink_err}")
+                    L.warn(f"无法删除残留 input.json：{stale_input_json}：{unlink_err}")
 
-    print("=" * 80)
-    print("Finished.")
-    print(f"Input dir             : {input_dir}")
-    print(f"Root dir              : {root_dir}")
-    print(f"Model filename        : {model_filename}")
-    print(f"Total leaf directories: {n_leaf}")
-    print(f"Success               : {n_success}")
-    print(f"Failed                : {n_failed}")
-    print("=" * 80)
+    L.ok(f"copy_input 完成  成功={n_success}  失败={n_failed}  (共 {n_leaf} 个 leaf)")
+    L.info(f"输入目录 = {input_dir}")
+    L.info(f"根目录   = {root_dir}")
+    L.info(f"模型文件 = {model_filename}")
 
     return n_failed
 
@@ -397,10 +393,10 @@ def main():
     else:
         r_max = float(args.r_max)
 
-    print("[CONFIG]")
-    print(f"l_def     = {l_def}")
-    print(f"chirality = {chirality}")
-    print(f"r_max     = {r_max}")
+    L.info("[CONFIG]")
+    L.info(f"l_def     = {l_def}")
+    L.info(f"chirality = {chirality}")
+    L.info(f"r_max     = {r_max}")
 
     n_failed = copy_inputs_to_leaf_dirs(
         input_dir=args.input_dir,

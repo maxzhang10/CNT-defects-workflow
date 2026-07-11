@@ -3,6 +3,8 @@ import re
 import shutil
 from pathlib import Path
 
+import logkit as L
+
 
 def prepare_lammps_inputs(
     temperature,
@@ -124,7 +126,7 @@ def prepare_lammps_inputs(
         with open(lammps_file, "w", encoding="utf-8") as f:
             f.writelines(new_lines)
 
-        print(
+        L.info(
             f"已生成 {dst_dir}，"
             f"nfix = {n_fix}，"
             f"T = {temperature} K，"

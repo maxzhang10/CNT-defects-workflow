@@ -17,6 +17,8 @@ import lammps_io
 import json
 from pathlib import Path
 
+import logkit as L
+
 # %%
 def multi_defects_ele(tube, coords, type_list, seed=None):
     rng = np.random.default_rng(seed)
@@ -100,9 +102,9 @@ def generate_defect_coords(
             f"请增大 l_def 或减小 edge_margin。"
         )
 
-    print(f"名义 defects 区间: z = [{z_def_low:.6f}, {z_def_high:.6f}] Å")
-    print(f"实际采样区间:     z = [{z_low:.6f}, {z_high:.6f}] Å")
-    print(f"边界缩进:         {edge_margin:.2f} Å")
+    L.info(f"名义 defects 区间: z = [{z_def_low:.6f}, {z_def_high:.6f}] Å")
+    L.info(f"实际采样区间:     z = [{z_low:.6f}, {z_high:.6f}] Å")
+    L.info(f"边界缩进:         {edge_margin:.2f} Å")
 
     trial = 0
 
@@ -230,15 +232,15 @@ defects_cood_ind, pristine_indices = generate_defect_coords(
 
 Dens = len(defects_cood_ind) / (l_def * T)
 
-print(f"目标缺陷数量: {N}")
-print(f"实际缺陷数量: {len(defects_cood_ind)}")
-print(f"散射区长度: {l_def * T:.2f} Å")
-print(f"线密度: {Dens:.4f} 缺陷/Å")
-print(f"二维柱面最小间距: {min_defect_sep:.2f} Å")
+L.info(f"目标缺陷数量: {N}")
+L.info(f"实际缺陷数量: {len(defects_cood_ind)}")
+L.info(f"散射区长度: {l_def * T:.2f} Å")
+L.info(f"线密度: {Dens:.4f} 缺陷/Å")
+L.info(f"二维柱面最小间距: {min_defect_sep:.2f} Å")
 
-print("缺陷坐标：")
+L.info("缺陷坐标：")
 for coord, idx in zip(defects_cood_ind, pristine_indices):
-    print(
+    L.info(
         f"  index={idx:5d}, "
         f"theta={coord[0]: .6f}, "
         f"z={coord[1]: .6f}"
@@ -264,9 +266,9 @@ tube_multi_defects, defect_log = multi_defects_ele(
     seed=seed,
 )
 
-print("实际生成缺陷记录：")
+L.info("实际生成缺陷记录：")
 for item in defect_log:
-    print(
+    L.info(
         f"  #{item['no']:02d} "
         f"type={item['type']:>4s}, "
         f"index={item['index_when_created']:5d}, "
@@ -298,9 +300,9 @@ for folder, atoms in structures.items():
     exporters.write_poscar(poscar_path, atoms_pos)
     exporters.write_lammps(lammps_path, atoms_lmp)
 
-    print(f"[WRITE] {folder}")
-    print(f"  POSCAR   -> {poscar_path}")
-    print(f"  data.lmp -> {lammps_path}")
+    L.info(f"[WRITE] {folder}")
+    L.info(f"  POSCAR   -> {poscar_path}")
+    L.info(f"  data.lmp -> {lammps_path}")
 
 # %%
 
