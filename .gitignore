@@ -67,3 +67,6 @@ slurm-*.err
 
 # Local agent state
 .claude/
+
+# Notebooks
+*.ipynb
