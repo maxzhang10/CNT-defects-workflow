@@ -1,0 +1,13 @@
+{
+  "temperature": 300,
+  "chirality": [6, 4],
+  "r_max": 6.50,
+  "data_root": "/personal/CNT_defects_package/2Defects_test/data_700",
+  "structures": [
+   
+    "MVH_MVH"
+
+  
+  ],
+  "l_def": 1
+}

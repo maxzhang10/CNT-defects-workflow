@@ -1,0 +1,69 @@
+# Python
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+.venv/
+venv/
+env/
+
+# Secrets / local env
+.env
+*.key
+*.pem
+*_secret*
+*api_key*
+.cline/
+.codex/
+
+# Large calculation data
+data/
+data_*/
+dpnegf_dft/
+soft/
+TB_analyz_tools/
+
+# DFT / NEGF / LAMMPS outputs
+**/self_energy/
+**/output/
+**/*.DM
+**/*.TSHS
+**/*.TBT.*
+**/*.TRANS*
+**/*.HSX
+**/*.WFSX
+**/*.EIG
+**/*.bands
+**/*.XV
+**/*.FA
+**/*.ion
+**/*.nc
+**/*.h5
+
+# Model / array / trajectory files
+**/*.pth
+**/*.pt
+**/*.npy
+**/*.npz
+**/*.traj
+**/*.xyz
+**/*.lmp
+**/*.dump
+**/*.lammpstrj
+
+# Logs
+*.log
+*.out
+*.err
+local_run.stdout
+local_run.stderr
+slurm-*.out
+slurm-*.err
+
+# Archives
+*.tar
+*.tar.gz
+*.zip
+*.7z
+
+# Local agent state
+.claude/

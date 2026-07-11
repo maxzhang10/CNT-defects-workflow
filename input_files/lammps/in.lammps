@@ -1,0 +1,57 @@
+# CNT
+
+units           metal
+boundary        p p p
+atom_style      atomic
+
+neighbor      2.0 bin
+neigh_modify  every 1 delay 0 check yes
+
+read_data	data.lmp
+mass 		1 12
+
+
+pair_style airebo/morse 3.0
+pair_coeff * * ./CH.airebo-m  C
+
+
+# --- 0. 固定原子：受力和速度清零 ---
+variable nfix equal N  
+
+# 计算后端起始原子 ID
+variable natoms equal atoms
+variable istart equal v_natoms-v_nfix+1
+
+# 定义固定组
+group fixed_left  id 1:${nfix}
+group fixed_right id ${istart}:${natoms}
+group fixed union fixed_left fixed_right
+
+# 剩余原子为 mobile
+group mobile subtract all fixed
+
+# 固定原子：受力和速度清零
+fix freeze fixed setforce 0.0 0.0 0.0
+velocity fixed set 0.0 0.0 0.0
+
+
+
+# --- 1. 能量最小化 (防止原子重叠) ---
+thermo          10
+minimize        1.0e-6 1.0e-8 1000 10000
+reset_timestep  0
+# --- 2. 热弛豫 MD ---
+velocity mobile create 50 23456789 mom yes rot yes dist gaussian
+velocity fixed set 0.0 0.0 0.0
+fix 1 mobile nvt temp 50.0 50.0 0.1
+timestep        0.001
+
+thermo_style custom step temp pe etotal press vol
+thermo          1000
+#输出受力
+dump		1 all custom 100 traj.dump id type x y z fx fy fz
+#dump输出时 按照 id 排序，并且按照实际格式输出
+dump_modify 1 sort id
+#控制输出精度
+dump_modify 1 format line "%d %d %.11g %.11g %.11g %.11g %.11g %.11g"
+run             40000
