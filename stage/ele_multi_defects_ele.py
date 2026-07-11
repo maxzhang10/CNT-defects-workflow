@@ -162,7 +162,7 @@ def far_enough_from_existing(candidate, existing_coords, min_sep):
     return True
 
 # %%
-def load_config(config_path="/personal/CNT_defects_package/work_flow_test/config_multi.json"):
+def load_config(config_path=None):
     if config_path is None:
         config_path = os.environ.get("CNT_CONFIG", "../config.json")
 

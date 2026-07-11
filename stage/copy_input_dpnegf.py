@@ -5,38 +5,12 @@ import json
 import shutil
 import argparse
 from pathlib import Path
-from fdf2xyz import load_config
+from fdf2xyz import load_config, get_chirality_from_config
 import cnt_geometry
 
 
 def clean_line(line):
     return line.split("#", 1)[0].strip()
-
-
-def get_chirality_from_fdf(fdf_path):
-    """
-    优先从 STRUCT.fdf 第一行提取 m,n。
-    如果失败，则从文件路径中提取，例如 /300K/5_5/5775/...
-    """
-    fdf_path = Path(fdf_path)
-
-    with open(fdf_path, "r", encoding="utf-8", errors="ignore") as f:
-        first_line = f.readline().strip()
-
-    match = re.search(r"/(\d+)_(\d+)(?:/|$)", first_line)
-    if match is not None:
-        return int(match.group(1)), int(match.group(2))
-
-    path_str = str(fdf_path.resolve())
-    match = re.search(r"/(\d+)_(\d+)(?:/|$)", path_str)
-    if match is not None:
-        return int(match.group(1)), int(match.group(2))
-
-    raise ValueError(
-        f"无法从 STRUCT.fdf 第一行或路径中提取 m,n：\n"
-        f"first_line = {first_line}\n"
-        f"path       = {fdf_path}"
-    )
 
 
 def read_fdf_block(lines, block_name):
@@ -136,7 +110,7 @@ def update_run_py_for_leaf(leaf_dir, model_filename, m, n):
     )
 
 
-def update_input_json_for_leaf(leaf_dir, model_filename, r_max=6.5, n_lead_pl=2, l_def=5):
+def update_input_json_for_leaf(leaf_dir, model_filename, chirality, r_max=6.5, n_lead_pl=2, l_def=5):
     leaf_dir = Path(leaf_dir).resolve()
 
     fdf_path = leaf_dir / "STRUCT.fdf"
@@ -148,7 +122,7 @@ def update_input_json_for_leaf(leaf_dir, model_filename, r_max=6.5, n_lead_pl=2,
     if not input_json_path.is_file():
         raise FileNotFoundError(f"找不到 input.json：{input_json_path}")
 
-    m, n = get_chirality_from_fdf(fdf_path)
+    m, n = chirality
 
     T, N_uc, l_PL, length = cnt_geometry.geo_info(m, n, r_max, l_def)
 
@@ -264,6 +238,7 @@ def copy_inputs_to_leaf_dirs(
     input_dir,
     root_dir,
     files_to_copy,
+    chirality,
     model_file=None,
     r_max=6.5,
     n_lead_pl=2,
@@ -307,6 +282,7 @@ def copy_inputs_to_leaf_dirs(
             update_input_json_for_leaf(
                 leaf_dir=current_dir,
                 model_filename=model_filename,
+                chirality=chirality,
                 r_max=r_max,
                 n_lead_pl=n_lead_pl,
                 l_def=l_def,
@@ -320,6 +296,16 @@ def copy_inputs_to_leaf_dirs(
             print(f"Reason: {e}")
             n_failed += 1
 
+            # 删除刚复制进去的模板 input.json，避免残留"完整但错误"的 leaf
+            # （硬编码电极 id 的模板会被 is_dpnegf_workdir 误判为可运行）
+            stale_input_json = current_dir / "input.json"
+            if stale_input_json.is_file():
+                try:
+                    stale_input_json.unlink()
+                    print(f"Removed stale template input.json: {stale_input_json}")
+                except OSError as unlink_err:
+                    print(f"[WARN] 无法删除残留 input.json：{stale_input_json}：{unlink_err}")
+
     print("=" * 80)
     print("Finished.")
     print(f"Input dir             : {input_dir}")
@@ -329,6 +315,8 @@ def copy_inputs_to_leaf_dirs(
     print(f"Success               : {n_success}")
     print(f"Failed                : {n_failed}")
     print("=" * 80)
+
+    return n_failed
 
 def main():
     parser = argparse.ArgumentParser(
@@ -380,8 +368,8 @@ def main():
     parser.add_argument(
         "--r-max",
         type=float,
-        default=6.5,
-        help="CNT r_max parameter used by cnt_geometry.geo_info."
+        default=None,
+        help="CNT r_max parameter used by cnt_geometry.geo_info. If not given, read from config.json."
     )
 
     parser.add_argument(
@@ -400,20 +388,34 @@ def main():
     args = parser.parse_args()
     config = load_config(args.config)
     l_def = int(config.get("l_def", 5))
+    chirality = get_chirality_from_config(config)
+
+    # r_max 从 config 读取，保证与 fdf2xyz 对同一体系用相同的 PL 划分。
+    # 仅当显式传入 --r-max 时才覆盖（默认 None 表示不覆盖）。
+    if args.r_max is None:
+        r_max = float(config.get("r_max", 6.5))
+    else:
+        r_max = float(args.r_max)
 
     print("[CONFIG]")
-    print(f"l_def = {l_def}")
+    print(f"l_def     = {l_def}")
+    print(f"chirality = {chirality}")
+    print(f"r_max     = {r_max}")
 
-    copy_inputs_to_leaf_dirs(
+    n_failed = copy_inputs_to_leaf_dirs(
         input_dir=args.input_dir,
         root_dir=args.root,
         files_to_copy=args.files,
+        chirality=chirality,
         model_file=args.model_file,
-        r_max=args.r_max,
+        r_max=r_max,
         n_lead_pl=args.n_lead_pl,
         overwrite=(not args.no_overwrite),
         l_def=l_def
     )
+
+    if n_failed > 0:
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

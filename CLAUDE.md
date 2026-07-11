@@ -35,12 +35,9 @@ python run.py --skip-dpnegf
 
 # Override the data root or config
 python run.py --root /path/to/data_root --config /path/to/config.json
-
-# Inspect pipeline progress across all cases (read-only, no side effects)
-python workflow_status.py --config config.json
 ```
 
-`run.py` and `run_multi.py` are near-identical; they differ only in which `ele_*` script and default config they use (`run_multi.py` also cleans DPNEGF caches against `root` rather than each `workdir`). Keep changes to shared helpers in sync between the two.
+`run.py` and `run_multi.py` are near-identical; they differ only in which `ele_*` script and default config they use. They also differ in DPNEGF cache cleaning: `run.py` calls `clean_dpnegf_output_cache(workdir)` per DPNEGF workdir, while `run_multi.py` runs it **once against the whole `root` tree after all DPNEGF runs finish** (doing it per-workdir inside the loop is O(N²) and, once parallelized, would delete caches other workdirs are still using — see the comment in `run_multi.py:main`). Keep changes to shared helpers in sync between the two.
 
 ### Running a single stage script directly
 
@@ -66,7 +63,7 @@ The config path propagates to every stage via the `CNT_CONFIG` environment varia
 
 ## Data layout (the implicit contract)
 
-The entire pipeline coordinates through a directory convention rooted at `data_root`. This layout is *not* configurable — it is hard-coded in path-building logic across `ele_defects_ele.py`, `run.py`'s directory-discovery functions, and `workflow_status.py`:
+The entire pipeline coordinates through a directory convention rooted at `data_root`. This layout is *not* configurable — it is hard-coded in path-building logic across `ele_defects_ele.py` and `run.py`'s directory-discovery functions:
 
 ```
 <data_root>/<temperature>K/<m>_<n>/<STRUCTURE>/
@@ -80,6 +77,8 @@ The entire pipeline coordinates through a directory convention rooted at `data_r
 
 `run.py` discovers work by walking this tree with heuristic predicates (`find_structure_dirs`, `find_lammps_workdirs`, `find_dpnegf_workdirs_from_structures`). A directory "counts" as a given stage's workdir only if specific files exist — e.g. a DPNEGF leaf requires `input.json` + `run.py` + `run.sh` + `*.xyz` + `nnenv*.pth` all present. If you change any output filename, update these predicates or discovery silently skips the directory.
 
+Because a template `input.json` ships with hard-coded electrode index ranges, a leaf where `copy_input_dpnegf.py` fails partway could be left "complete but wrong" and pass the discovery predicate. To prevent this, `copy_inputs_to_leaf_dirs` **deletes the copied `input.json` on any per-leaf failure**, returns the failure count, and `main()` exits non-zero if any leaf failed.
+
 ## Idempotency & re-runs (flag files)
 
 Stages are resumable via sentinel flag files rather than a state DB:
@@ -89,7 +88,7 @@ Stages are resumable via sentinel flag files rather than a state DB:
 - `*_failed.flag` → the stage is **not** auto-retried; you must delete the flag to force a rerun
 - A dangling `*_submitted.flag` without a `done` flag → treated as an interrupted run and skipped with a warning
 
-After each DPNEGF run, `clean_dpnegf_output_cache()` deletes large regenerable caches (`output/self_energy/`, `output/HS_*.h5`) to save disk. `workflow_status.py` reads these same flags/outputs to classify each stage as DONE / FAILED / PARTIAL / SUSPICIOUS / MISSING (SUSPICIOUS = done-flag present but expected output missing).
+After each DPNEGF run, `clean_dpnegf_output_cache()` deletes large regenerable caches (`output/self_energy/`, `output/HS_*.h5`) to save disk.
 
 ## Stage module responsibilities (`stage/`)
 
@@ -105,7 +104,7 @@ After each DPNEGF run, `clean_dpnegf_output_cache()` deletes large regenerable c
 
 ## Gotchas
 
-- **Chirality is read from `config.json`, not parsed from file paths or FDF headers** in the current code path (`fdf2xyz.py`). Older helpers like `get_chirality_from_fdf` still exist but the main flow passes chirality explicitly — do not reintroduce path-based `\d+_\d+` regex parsing, which would misparse structure names like `5775_5775`.
+- **Chirality is read from `config.json`, not parsed from file paths or FDF headers** in the current code path. Both `fdf2xyz.py` and `copy_input_dpnegf.py` get `(m, n)` via `fdf2xyz.get_chirality_from_config` and thread it through explicitly. The old path-based `get_chirality_from_fdf` was removed from `copy_input_dpnegf.py` (a stale copy still lingers in `fdf2xyz.py`) — do not reintroduce path-based `\d+_\d+` regex parsing, which would misparse structure names like `5775_5775`. Likewise `r_max` is read from `config.json` in `copy_input_dpnegf.py` (falling back to the `--r-max` override only when explicitly passed) so its PL partitioning matches `fdf2xyz`'s.
 - The DPNEGF model is expected as **exactly one** `*.pth` in `input_files/dpnegf/`; multiple `.pth` files raise an error unless `--model-file` is given.
 - `input_files/dpnegf/run.py` ships with hard-coded example paths (`model_path`, `structure`); `copy_input_dpnegf.py` rewrites these per-leaf, so edits to those literals in the template are overwritten downstream.
 - Nearly all inline comments and error messages are in Chinese; match that convention when editing existing files.

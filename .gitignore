@@ -70,3 +70,9 @@ slurm-*.err
 
 # Notebooks
 *.ipynb
+
+#pdf
+*.pdf
+
+#claude会生成一些md
+*.md
