@@ -1,13 +1,14 @@
 {
   "temperature": 300,
-  "chirality": [6, 4],
-  "r_max": 6.50,
+  "chirality": [
+    6,
+    4
+  ],
+  "r_max": 6.5,
   "data_root": "/personal/CNT_defects_package/work_flow_test/data",
   "structures": [
-   
     "MVH_DV"
-
-  
   ],
-  "l_def": 1
+  "l_def": 1,
+  "md_steps": 40000
 }

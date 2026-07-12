@@ -14,6 +14,7 @@ def prepare_lammps_inputs(
     N_uc,
     data_root="../data",
     input_dir=None,
+    md_steps=40000,
     files=("in.lammps", "CH.airebo-m", "run.sh")
 ):
     """
@@ -36,6 +37,9 @@ def prepare_lammps_inputs(
     input_dir : str or Path
         LAMMPS 模板输入文件所在目录。
         如果不传，默认使用 lammps_io.py 所在目录的 ../input_files/lammps。
+    md_steps : int
+        热弛豫 MD 的步数，用于替换 in.lammps 末尾的 `run <N>`。
+        必须与 dump2fdf 的 --every 保持一致，否则会破坏"只取最后一帧"。
     files : tuple
         需要复制到每个结构目录中的模板文件。
     """
@@ -105,6 +109,12 @@ def prepare_lammps_inputs(
                 parts[6] = str(float(temperature))
                 line = " ".join(parts) + "\n"
 
+            # 修改热弛豫 MD 步数
+            # 例如：run             40000
+            # 必须与 dump2fdf 的 --every 一致，否则会多抽/漏抽帧。
+            if re.match(r"^\s*run\s+\d+\s*$", line):
+                line = f"run             {int(md_steps)}\n"
+
             # 含 H 结构：在 mass 1 后面加入 mass 2
             if has_hydrogen and re.match(r"^\s*mass\s+1\s+12", line):
                 new_lines.append(line)
@@ -130,5 +140,6 @@ def prepare_lammps_inputs(
             f"已生成 {dst_dir}，"
             f"nfix = {n_fix}，"
             f"T = {temperature} K，"
+            f"md_steps = {md_steps}，"
             f"含H = {has_hydrogen}"
         )

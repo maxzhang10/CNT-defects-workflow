@@ -9,5 +9,6 @@
     "5775"
   ],
   "N_defects": 6,
-  "l_def": 5
+  "l_def": 5,
+  "md_steps": 40000
 }

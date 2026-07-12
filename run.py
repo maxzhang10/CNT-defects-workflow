@@ -305,6 +305,10 @@ def main():
     with open(config_path, "r", encoding="utf-8") as f:
         config = json.load(f)
 
+    # MD 步数：dump2fdf 用它作为 --every，保证只抽出最后一帧。
+    # 必须与 in.lammps 里 `run <N>` 一致（同由 config.md_steps 驱动）。
+    md_steps = int(config.get("md_steps", 40000))
+
     if args.root is not None:
         root = Path(args.root).resolve()
     else:
@@ -420,6 +424,8 @@ def main():
                 str(dump_root),
                 "--outroot",
                 str(outroot),
+                "--every",
+                str(md_steps),
             ],
             dry_run=args.dry_run,
             env=env,

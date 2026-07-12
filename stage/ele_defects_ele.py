@@ -52,6 +52,7 @@ m, n = map(int, config["chirality"])
 r_max = float(config["r_max"])
 data_root = Path(config.get("data_root", "../data")).resolve()
 l_def = int(config["l_def"])
+md_steps = int(config.get("md_steps", 40000))
 
 L.info("[CONFIG]")
 L.info(f"temperature = {temperature}")
@@ -203,6 +204,7 @@ lammps_io.prepare_lammps_inputs(
     structures=structures,
     l_PL=l_PL,
     N_uc=N_uc,
-    data_root=data_root
+    data_root=data_root,
+    md_steps=md_steps
 )
 
