@@ -265,6 +265,7 @@ def copy_inputs_to_leaf_dirs(
     n_leaf = 0
     n_success = 0
     n_failed = 0
+    n_skipped = 0
 
     for current_dir, subdirs, files in os.walk(root_dir):
         if "STRUCT.fdf" not in files:
@@ -272,6 +273,17 @@ def copy_inputs_to_leaf_dirs(
 
         current_dir = Path(current_dir).resolve()
         n_leaf += 1
+
+        # 已完成的 DPNEGF leaf：绝不覆盖其输入文件。
+        # 原因：input.json / run.py 的电极 id、model_path 是按 config+几何重算的，
+        # 用不同 config 重跑会把输入改写成与已算好的 output/negf.out.pth 不一致；
+        # 且下方失败分支会删除 input.json，一旦重处理已完成 leaf 时抛异常，
+        # 会把跑完的 leaf 破坏成 discovery 都识别不到的残缺状态。
+        # done flag 由 sub_dpnegf.py 写在同一层 leaf 目录下。
+        if (current_dir / "dpnegf_done.flag").exists():
+            L.skip(f"DPNEGF 已完成，跳过覆盖输入: {current_dir}")
+            n_skipped += 1
+            continue
 
         try:
             L.debug("=" * 80)
@@ -307,7 +319,7 @@ def copy_inputs_to_leaf_dirs(
                 except OSError as unlink_err:
                     L.warn(f"无法删除残留 input.json：{stale_input_json}：{unlink_err}")
 
-    L.ok(f"copy_input 完成  成功={n_success}  失败={n_failed}  (共 {n_leaf} 个 leaf)")
+    L.ok(f"copy_input 完成  成功={n_success}  失败={n_failed}  跳过={n_skipped}  (共 {n_leaf} 个 leaf)")
     L.info(f"输入目录 = {input_dir}")
     L.info(f"根目录   = {root_dir}")
     L.info(f"模型文件 = {model_filename}")

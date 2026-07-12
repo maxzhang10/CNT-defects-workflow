@@ -476,9 +476,17 @@ def main():
 
     n_success = 0
     n_failed = 0
+    n_skipped = 0
 
     for current_dir, subdirs, files in os.walk(root_dir):
         if "STRUCT.fdf" not in files:
+            continue
+
+        # 已完成的 DPNEGF leaf：不再重生成 xyz，避免改写已算好体系的输入。
+        # done flag 由 sub_dpnegf.py 写在同一层 leaf 目录下。
+        if (Path(current_dir) / "dpnegf_done.flag").exists():
+            L.skip(f"DPNEGF 已完成，跳过 fdf2xyz: {current_dir}")
+            n_skipped += 1
             continue
 
         fdf_path = Path(current_dir) / "STRUCT.fdf"
@@ -503,7 +511,7 @@ def main():
             L.error(f"转换失败: {fdf_path}")
             L.error(f"原因: {e}")
 
-    L.ok(f"fdf2xyz 完成  成功={n_success}  失败={n_failed}")
+    L.ok(f"fdf2xyz 完成  成功={n_success}  失败={n_failed}  跳过={n_skipped}")
     L.info(f"输入根目录 = {root_dir}")
     L.info(f"输出根目录 = {outroot}")
 

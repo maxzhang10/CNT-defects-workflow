@@ -224,6 +224,13 @@ def extract_from_one_dump(
 
             if ok:
                 step_dir = os.path.join(out_base_dir, str(timestep))
+
+                # 已完成的 DPNEGF leaf：不覆盖 STRUCT.fdf。
+                # done flag 由 sub_dpnegf.py 写在同一层 leaf(即该 timestep 目录)下。
+                if os.path.exists(os.path.join(step_dir, "dpnegf_done.flag")):
+                    L.skip(f"DPNEGF 已完成，跳过覆盖 STRUCT.fdf: {step_dir}")
+                    continue
+
                 os.makedirs(step_dir, exist_ok=True)
 
                 out_path = os.path.join(step_dir, "STRUCT.fdf")
