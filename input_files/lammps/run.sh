@@ -29,7 +29,7 @@ echo "Using LAMMPS command: ${LMP_CMD}"
 
 if command -v mpirun >/dev/null 2>&1; then
     echo "Using mpirun"
-    mpirun --allow-run-as-root -np 1 ${LMP_CMD} -in in.lammps > lammps.log
+    mpirun --allow-run-as-root -np 16 ${LMP_CMD} -in in.lammps > lammps.log
 else
     echo "Using serial command"
     ${LMP_CMD} -in in.lammps > lammps.log

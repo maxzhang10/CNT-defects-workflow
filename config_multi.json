@@ -4,11 +4,9 @@
   "r_max": 6.50,
   "data_root": "/personal/CNT_defects_package/multi_Defects_test/data_1100",
   "structures": [
-    "MVH",
-    "DV",
     "5775"
   ],
-  "N_defects": 6,
-  "l_def": 5,
+  "N_defects": 3,
+  "l_def": 24,
   "md_steps": 40000
 }
