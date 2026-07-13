@@ -23,7 +23,7 @@
 STRUCTURE 命名两种：
 - 单/双缺陷：如 MVH_DV、DV_DV、5775_5775、P —— 缺陷数 = 下划线分段数（P=0）。
   线密度需要 l_def（从 --config 读）与手性，density = n_defects / (l_def * T)。
-- 多缺陷：如 MVH_DV_5775_Dens_0.49Å-1 —— 线密度直接内嵌在名字里（`_Dens_<x>Å-1`），
+- 多缺陷：如 MVH_DV_5775_Dens_0.49A-1 —— 线密度直接内嵌在名字里（`_Dens_<x>A-1`），
   此时 Dens 前的 token 是缺陷"类型列表"而非个数，故 n_defects 置空。
 """
 import os
@@ -115,7 +115,7 @@ def parse_leaf_meta(pth_path):
     m_chir = re.fullmatch(r"(\d+)_(\d+)", chir_seg)
     chirality = (int(m_chir.group(1)), int(m_chir.group(2))) if m_chir else (None, None)
 
-    # 线密度：多缺陷目录名内嵌 '_Dens_<x>Å-1'
+    # 线密度：多缺陷目录名内嵌 '_Dens_<x>A-1'
     m_dens = _DENS_RE.search(structure)
     dens_from_name = float(m_dens.group(1)) if m_dens else None
 

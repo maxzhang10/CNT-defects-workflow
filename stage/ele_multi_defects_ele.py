@@ -279,7 +279,7 @@ for item in defect_log:
 
 # %%
 type_name = "_".join(type_list)
-folder_name = f"{type_name}_Dens_{Dens:.2f}Å-1"
+folder_name = f"{type_name}_Dens_{Dens:.2f}A-1"
 structures = {
     folder_name: tube_multi_defects
 }
