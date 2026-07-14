@@ -542,7 +542,7 @@ def main():
         # 全部 DPNEGF 跑完后，对整棵 root 树统一清理一次缓存。
         # 注意：不要放在 for 循环内，否则 O(N^2) 全树遍历，
         # 且并行化后会误删其它 workdir 尚在使用的 self_energy / HS_*.h5。
-        #clean_dpnegf_output_cache(root)
+        clean_dpnegf_output_cache(root)
             
 
         

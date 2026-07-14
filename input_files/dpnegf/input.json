@@ -20,8 +20,8 @@
                 "cpu_budget": 32
             },
             "cache": {
-                  "use_saved": false,
-                  "save_path": null
+                  "use_saved": true,
+                  "save_path": "/personal/CNT_defects_package/work_flow_test/data/300K/5_5/5775_Dens_0.24A-1/dpnegf/40000/output/self_energy"
               }
         },
         "stru_options":{
