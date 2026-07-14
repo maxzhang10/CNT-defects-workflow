@@ -2,11 +2,11 @@
   "temperature": 300,
   "chirality": [5, 5],
   "r_max": 6.50,
-  "data_root": "/personal/CNT_defects_package/multi_Defects_test/data_1100",
+  "data_root": "/personal/CNT_defects_package/work_flow_test/data",
   "structures": [
     "5775"
   ],
   "N_defects": 3,
-  "l_def": 24,
+  "l_def": 5,
   "md_steps": 40000
 }

@@ -3,6 +3,7 @@ import os
 import torch
 
 from dpnegf.runner.NEGF import NEGF
+from dpnegf.utils.argcheck import normalize_run
 from dptb.nn.build import build_model
 import json
 
@@ -26,6 +27,7 @@ if os.path.exists(output):
 
 
 negf_json = json.load(open(INPUT_file))
+negf_json = normalize_run(negf_json)
 #model_json = json.load(open(model))
 
 log_path = output+'/log'
@@ -48,7 +50,6 @@ negf = NEGF(
     model=model,
     structure=structure,
     results_path=output,  
-    n_cpus=32,
     **negf_json['task_options']
 )
    

@@ -14,6 +14,16 @@
             "rel_err": 1e-4,
             "max_iter": 100
         },
+        "self_energy_options": {
+            "solver": "Sancho-Rubio",
+            "parallel": {
+                "cpu_budget": 32
+            },
+            "cache": {
+                  "use_saved": false,
+                  "save_path": null
+              }
+        },
         "stru_options":{
             "gamma_center": true,
             "time_reversal_symmetry": true,
@@ -83,5 +93,6 @@
         "out_current_nscf": true,
         "out_density": true
 },
+
 "AtomicData_options" : {"r_max": 6.5}
 }
