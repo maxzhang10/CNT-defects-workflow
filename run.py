@@ -60,7 +60,8 @@ def is_leaf_structure_dir(p: Path) -> bool:
     if p.name in {"dpnegf", "lammps"}:
         return False
 
-    if "dpnegf" in p.parts:
+    # 排除 dpnegf 工作目录（只检查直接目录名，避免误伤包含 dpnegf 的父路径）
+    if p.name == "dpnegf":
         return False
 
     # 情况 1：dump 直接在结构目录下
@@ -99,7 +100,8 @@ def find_structure_dirs(root: Path):
 
     # 优先从所有 lammps 目录反推结构目录
     for lammps_dir in root.rglob("lammps"):
-        if "dpnegf" in lammps_dir.parts:
+        # 跳过 dpnegf/<timestep>/lammps 这样的情况，只检查父目录名
+        if lammps_dir.parent.name == "dpnegf":
             continue
 
         if has_dump_files(lammps_dir):
