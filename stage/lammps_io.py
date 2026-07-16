@@ -55,8 +55,8 @@ def prepare_lammps_inputs(
     if not input_dir.is_dir():
         raise FileNotFoundError(f"源文件夹不存在: {input_dir}")
 
-    n_fix = 4 * l_PL * N_uc
-    # n_fix = 0  # 如果想全部放开，用这个
+    #n_fix = 4 * l_PL * N_uc
+    n_fix = 0  # 如果想全部放开，用这个
 
     m, n = chirality
 

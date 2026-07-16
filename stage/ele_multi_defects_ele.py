@@ -67,6 +67,7 @@ def generate_defect_coords(
     edge_margin=1.42,
     seed=None,
     max_trials=20000,
+    total_length=None,
 ):
     """
     在缺陷区内随机生成 N 个缺陷坐标。
@@ -78,6 +79,12 @@ def generate_defect_coords(
     4. 缺陷之间二维柱面展开距离大于 min_sep；
     5. 最终坐标吸附到真实 C 原子上；
     6. 完全由 seed 控制随机性。
+
+    参数
+    ----
+    total_length : int, optional
+        CNT 总长度（晶胞数）。如果 total_length == l_def，则为纯缺陷区模式，
+        缺陷区从 z=0 开始；否则为 2PL-2PL-defects-2PL-2PL 模式。
     """
 
     rng = np.random.default_rng(seed)
@@ -86,10 +93,16 @@ def generate_defect_coords(
     coords = []
     used_indices = []
 
-    # 名义 defects 区域：
-    # 2PL-2PL-defects-2PL-2PL
-    z_def_low = 4 * l_PL * T
-    z_def_high = (4 * l_PL + l_def) * T
+    # 判断是否为纯缺陷区模式
+    if total_length is not None and total_length == l_def:
+        # 纯缺陷区模式：整个管子都是缺陷区
+        z_def_low = 0
+        z_def_high = l_def * T
+        L.info("使用纯缺陷区模式（无电极区）")
+    else:
+        # 正常模式：2PL-2PL-defects-2PL-2PL
+        z_def_low = 4 * l_PL * T
+        z_def_high = (4 * l_PL + l_def) * T
 
     # 实际允许造缺陷的区域：
     # 左右各缩小一个 C-C 键长，避免缺陷贴近边界
@@ -191,8 +204,8 @@ r_max = float(config["r_max"])
 data_root = Path(config.get("data_root", "../data")).resolve()
 l_def = int(config["l_def"])
 md_steps = int(config.get("md_steps", 40000))
-T, N_uc, l_PL, length = cnt_geometry.geo_info(m, n, r_max,l_def)
-
+T, N_uc, l_PL, _ = cnt_geometry.geo_info(m, n, r_max, l_def)
+length = config.get("length", l_PL * 8 + l_def)  # 如果 config 中指定了 length，则使用它，否则使用默认值
 
 # %%
 tube_unit = cnt_geometry.build_unit_cnt(m, n, vacuum=10.0)
@@ -229,6 +242,7 @@ defects_cood_ind, pristine_indices = generate_defect_coords(
     min_sep=min_defect_sep,
     edge_margin=edge_margin,
     seed=seed,
+    total_length=length,
 )
 
 Dens = len(defects_cood_ind) / (l_def * T)
@@ -288,8 +302,12 @@ structures = {
 
 for folder, atoms in structures.items():
     atoms_pos = atoms.copy()
-    
-    atoms_lmp = exporters.reposition_hydrogens(atoms, 4*l_PL*N_uc)  # 计算左右电极的原子数，调整 H 原子位置
+
+    # 纯缺陷区模式下没有电极区，不需要调整 H 原子位置
+    if length == l_def:
+        atoms_lmp = atoms.copy()
+    else:
+        atoms_lmp = exporters.reposition_hydrogens(atoms, 4*l_PL*N_uc)  # 计算左右电极的原子数，调整 H 原子位置
 
 
     output_dir = data_root / f"{temperature}K" / f"{m}_{n}" / folder / "lammps"
