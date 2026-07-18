@@ -8,5 +8,8 @@
   ],
   "N_defects": 3,
   "l_def": 5,
-  "md_steps": 40000
+  "md_steps": 40000,
+  "md_sampling": {
+    "n_samples": 5
+  }
 }

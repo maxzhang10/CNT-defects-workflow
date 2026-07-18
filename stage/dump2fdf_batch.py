@@ -167,8 +167,17 @@ def extract_from_one_dump(
     start: Optional[int],
     end: Optional[int],
     skip_zero: bool,
+    samples: Optional[int] = None,
 ) -> int:
-    written = 0
+    """
+    从 dump 文件中提取并写入 FDF 文件。
+
+    Args:
+        samples: 如果指定，只保留最后 N 个满足条件的帧（按时间步排序）。
+                用于从 MD 轨迹末尾采样多个构型。
+    """
+    # 第一轮：收集所有满足条件的帧信息
+    frames: List[Tuple[int, np.ndarray, Tuple[float, ...], List[Tuple]]] = []
 
     with open(dump_path, "r", encoding="utf-8", errors="replace") as fin:
         while True:
@@ -189,7 +198,8 @@ def extract_from_one_dump(
             if not line.startswith("ITEM: BOX BOUNDS"):
                 raise ValueError(f"{dump_path}: expected ITEM: BOX BOUNDS, got {line.strip()}")
 
-            H, (xy, xz, yz, Lx, Ly, Lz) = read_box_bounds(fin)
+            H, tilts = read_box_bounds(fin)
+            xy, xz, yz, Lx, Ly, Lz = tilts
 
             cols = parse_atoms_header(fin.readline())
             need = ["id", "type", "x", "y", "z"]
@@ -223,27 +233,37 @@ def extract_from_one_dump(
                 ok = False
 
             if ok:
-                step_dir = os.path.join(out_base_dir, str(timestep))
+                frames.append((timestep, H, tilts, atoms))
 
-                # 已完成的 DPNEGF leaf：不覆盖 STRUCT.fdf。
-                # done flag 由 sub_dpnegf.py 写在同一层 leaf(即该 timestep 目录)下。
-                if os.path.exists(os.path.join(step_dir, "dpnegf_done.flag")):
-                    L.skip(f"DPNEGF 已完成，跳过覆盖 STRUCT.fdf: {step_dir}")
-                    continue
+    # 如果指定了 samples，只保留最后 N 个帧
+    if samples is not None and len(frames) > samples:
+        frames = frames[-samples:]
 
-                os.makedirs(step_dir, exist_ok=True)
+    # 第二轮：写入 FDF 文件
+    written = 0
+    for timestep, H, tilts, atoms in frames:
+        xy, xz, yz, Lx, Ly, Lz = tilts
+        step_dir = os.path.join(out_base_dir, str(timestep))
 
-                out_path = os.path.join(step_dir, "STRUCT.fdf")
-                write_siesta_fdf(
-                    out_path=out_path,
-                    H=H,
-                    atoms=atoms,
-                    coord_unit=coord_unit,
-                    wrap=wrap,
-                    comment=(f"from {dump_path} timestep {timestep} natoms={natoms} "
-                             f"tilt(xy,xz,yz)=({xy},{xz},{yz})"),
-                )
-                written += 1
+        # 已完成的 DPNEGF leaf：不覆盖 STRUCT.fdf。
+        # done flag 由 sub_dpnegf.py 写在同一层 leaf(即该 timestep 目录)下。
+        if os.path.exists(os.path.join(step_dir, "dpnegf_done.flag")):
+            L.skip(f"DPNEGF 已完成，跳过覆盖 STRUCT.fdf: {step_dir}")
+            continue
+
+        os.makedirs(step_dir, exist_ok=True)
+
+        out_path = os.path.join(step_dir, "STRUCT.fdf")
+        write_siesta_fdf(
+            out_path=out_path,
+            H=H,
+            atoms=atoms,
+            coord_unit=coord_unit,
+            wrap=wrap,
+            comment=(f"from {dump_path} timestep {timestep} natoms={len(atoms)} "
+                     f"tilt(xy,xz,yz)=({xy},{xz},{yz})"),
+        )
+        written += 1
 
     return written
 
@@ -270,6 +290,8 @@ def main():
                     help="optional end timestep (inclusive)")
     ap.add_argument("--no-skip-zero", action="store_true",
                     help="do NOT skip timestep 0 (default: skip 0)")
+    ap.add_argument("--samples", type=int, default=None,
+                    help="只保留最后 N 个满足条件的帧，用于从 MD 轨迹多次采样 (default: None, 保留所有)")
     args = ap.parse_args()
 
     dumps = find_dump_files(args.root, args.dump_name)
@@ -296,6 +318,7 @@ def main():
             start=args.start,
             end=args.end,
             skip_zero=(not args.no_skip_zero),
+            samples=args.samples,
         )
         total_frames += n
         L.ok(f"{dump_path} -> {out_base_dir}/<timestep>/STRUCT.fdf   frames={n}")

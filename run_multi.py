@@ -311,6 +311,11 @@ def main():
     # 必须与 in.lammps 里 `run <N>` 一致（同由 config.md_steps 驱动）。
     md_steps = int(config.get("md_steps", 40000))
 
+    # MD 采样配置：支持多次采样，从轨迹末尾提取多个帧
+    # 格式: "md_sampling": {"n_samples": 5} 表示提取最后 5 个满足条件的帧
+    md_sampling = config.get("md_sampling", {})
+    n_samples = md_sampling.get("n_samples") if isinstance(md_sampling, dict) else None
+
     if args.root is not None:
         root = Path(args.root).resolve()
     else:
@@ -418,20 +423,19 @@ def main():
         else:
             dump_root = struct_dir
 
-        run_cmd(
-            [
-                py,
-                str(dump2fdf),
-                "--root",
-                str(dump_root),
-                "--outroot",
-                str(outroot),
-                "--every",
-                str(md_steps),
-            ],
-            dry_run=args.dry_run,
-            env=env,
-        )
+        cmd = [
+            py,
+            str(dump2fdf),
+            "--root",
+            str(dump_root),
+            "--outroot",
+            str(outroot),
+            "--every",
+            str(md_steps),
+        ]
+        if n_samples is not None:
+            cmd.extend(["--samples", str(n_samples)])
+        run_cmd(cmd, dry_run=args.dry_run, env=env)
 
     # ============================================================
     # 3. 对每个结构的 dpnegf 目录做 fdf -> xyz
