@@ -423,6 +423,13 @@ def main():
         else:
             dump_root = struct_dir
 
+        # 计算 --every：如果启用多次采样，则按 n_samples 均匀分割 md_steps
+        if n_samples is not None and n_samples > 1:
+            every = md_steps // n_samples
+            L.info(f"多次采样模式: md_steps={md_steps}, n_samples={n_samples}, every={every}")
+        else:
+            every = md_steps
+
         cmd = [
             py,
             str(dump2fdf),
@@ -431,7 +438,7 @@ def main():
             "--outroot",
             str(outroot),
             "--every",
-            str(md_steps),
+            str(every),
         ]
         if n_samples is not None:
             cmd.extend(["--samples", str(n_samples)])
