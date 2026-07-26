@@ -76,3 +76,6 @@ slurm-*.err
 
 #claude会生成一些md
 *.md
+
+#存放数据的文件夹
+5_5

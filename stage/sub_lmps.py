@@ -1,127 +1,319 @@
 #!/usr/bin/env python3
+"""
+提交单个 LAMMPS 工作目录。
+
+SLURM 状态语义
+--------------
+尚未提交：
+    无 job_id.txt
+    无 lammps_submitted.flag
+    无 lammps_started.flag
+    无 lammps_failed.flag
+
+sbatch 成功：
+    job_id.txt
+    lammps_submitted.flag
+
+作业真正开始：
+    由 run.sh 写 lammps_started.flag
+
+真正计算成功/失败：
+    由 run.sh 写 lammps_done.flag / lammps_failed.flag
+
+达到 AssocMaxSubmitJobLimit 时自动等待重试；
+sbatch 成功前不会写 started/failed。
+"""
+
 from pathlib import Path
+from typing import Optional
+import argparse
 import subprocess
-import sys
 import time
 
 import logkit as L
+from slurm_utils import (
+    SlurmSubmitError,
+    SlurmSubmitLimitError,
+    sbatch_submit_with_retry,
+)
 
 
 def check_required_files(workdir: Path):
-    required = [
+    required = (
         "data.lmp",
         "in.lammps",
         "CH.airebo-m",
         "run.sh",
-    ]
+    )
 
-    missing = []
-    for name in required:
-        if not (workdir / name).exists():
-            missing.append(name)
+    missing = [
+        name
+        for name in required
+        if not (workdir / name).exists()
+    ]
 
     if missing:
         raise FileNotFoundError(
-            f"Missing files in {workdir}:\n" + "\n".join(missing)
+            f"Missing files in {workdir}:\n"
+            + "\n".join(missing)
         )
 
 
-def run_lammps_local(workdir: Path) -> str:
+def cleanup_legacy_false_flags(workdir: Path):
     """
-    容器节点本地运行 LAMMPS。
-    等价于在 workdir 里执行：
-        bash run.sh
-    """
+    清理旧版脚本因 sbatch 未成功而误写的假 flag。
 
+    只有以下记录都不存在时才处理：
+        lammps_done.flag
+        lammps_submitted.flag
+        job_id.txt
+
+    因此不会碰到真正已提交或已经完成的任务。
+    """
+    if (workdir / "lammps_done.flag").exists():
+        return
+
+    if (workdir / "lammps_submitted.flag").exists():
+        return
+
+    if (workdir / "job_id.txt").exists():
+        return
+
+    started_flag = workdir / "lammps_started.flag"
+    failed_flag = workdir / "lammps_failed.flag"
+    removed = []
+
+    # 旧版在 sbatch 之前就写 started；没有提交记录时该 flag 不可信。
+    if started_flag.exists():
+        started_flag.unlink()
+        removed.append(started_flag.name)
+
+    # 只自动删除明确写着 sbatch submit failed 的假“计算失败”。
+    if failed_flag.exists():
+        text = failed_flag.read_text(
+            encoding="utf-8",
+            errors="ignore",
+        )
+
+        if "sbatch submit failed" in text.lower():
+            failed_flag.unlink()
+            removed.append(failed_flag.name)
+
+    if removed:
+        L.warn(
+            f"已清理旧版误写 flag: {workdir} -> "
+            + ", ".join(removed)
+        )
+
+
+def write_submit_record(workdir: Path, job_id: str):
+    """
+    只有 sbatch 成功后才写提交记录。
+    """
+    (workdir / "job_id.txt").write_text(
+        job_id + "\n",
+        encoding="utf-8",
+    )
+    (workdir / "lammps_submitted.flag").write_text(
+        "slurm\n",
+        encoding="utf-8",
+    )
+
+    # 若上次是非临时提交错误，成功后清理诊断文件。
+    (workdir / "lammps_submit_failed.flag").unlink(
+        missing_ok=True
+    )
+
+
+def run_lammps_local(workdir: Path) -> str:
+    """当前节点阻塞运行 LAMMPS。"""
     L.info(f"本地运行 LAMMPS: {workdir}")
 
     start_time = time.strftime("%Y-%m-%d %H:%M:%S")
-    (workdir / "lammps_started.flag").write_text(start_time + "\n")
-
-    result = subprocess.run(
-        ["bash", "run.sh"],
-        cwd=workdir,
-        text=True,
-        capture_output=True,
+    (workdir / "lammps_started.flag").write_text(
+        start_time + "\n",
+        encoding="utf-8",
     )
 
-    # 保存 Python 捕获到的标准输出和错误输出
-    (workdir / "local_run.stdout").write_text(result.stdout)
-    (workdir / "local_run.stderr").write_text(result.stderr)
+    stdout_path = workdir / "local_run.stdout"
+    stderr_path = workdir / "local_run.stderr"
+
+    with stdout_path.open("w", encoding="utf-8") as fout, \
+         stderr_path.open("w", encoding="utf-8") as ferr:
+        result = subprocess.run(
+            ["bash", "run.sh"],
+            cwd=workdir,
+            text=True,
+            stdout=fout,
+            stderr=ferr,
+        )
 
     if result.returncode != 0:
         fail_time = time.strftime("%Y-%m-%d %H:%M:%S")
         (workdir / "lammps_failed.flag").write_text(
             f"Failed at {fail_time}\n"
-            f"Return code: {result.returncode}\n"
+            f"Return code: {result.returncode}\n",
+            encoding="utf-8",
         )
 
         raise RuntimeError(
             f"LAMMPS local run failed in {workdir}\n"
             f"Return code: {result.returncode}\n"
             f"See:\n"
-            f"  {workdir / 'local_run.stdout'}\n"
-            f"  {workdir / 'local_run.stderr'}"
+            f"  {stdout_path}\n"
+            f"  {stderr_path}"
         )
 
     end_time = time.strftime("%Y-%m-%d %H:%M:%S")
-
-    # 这里写 done flag
-    # run.sh 里也可以 touch lammps_done.flag，双保险
-    (workdir / "lammps_done.flag").write_text(end_time + "\n")
+    (workdir / "lammps_done.flag").write_text(
+        end_time + "\n",
+        encoding="utf-8",
+    )
 
     return "local"
 
 
-def write_submit_record(workdir: Path, job_id: str):
-    (workdir / "job_id.txt").write_text(job_id + "\n")
-    (workdir / "lammps_submitted.flag").write_text("local\n")
+def submit_lammps_slurm(
+    workdir: Path,
+    retry_interval: int,
+    max_submit_retries: Optional[int],
+) -> str:
+    """
+    提交 LAMMPS。
+
+    达到提交数量上限时自动等待；
+    sbatch 成功前不写任何计算状态 flag。
+    """
+    L.info(f"sbatch 提交 LAMMPS: {workdir}")
+
+    job_id = sbatch_submit_with_retry(
+        workdir=workdir,
+        script="run.sh",
+        retry_interval=retry_interval,
+        max_retries=max_submit_retries,
+        label="LAMMPS",
+    )
+
+    write_submit_record(workdir, job_id)
+
+    L.ok(f"已提交 LAMMPS 作业 job_id = {job_id}")
+    return job_id
 
 
 def main():
-    if len(sys.argv) != 2:
-        L.error("用法: python sub_lmps.py /path/to/lammps_workdir")
-        sys.exit(1)
+    parser = argparse.ArgumentParser(
+        description="提交单个 LAMMPS 工作目录（local 或 slurm）"
+    )
+    parser.add_argument(
+        "workdir",
+        help="LAMMPS 工作目录",
+    )
+    parser.add_argument(
+        "--scheduler",
+        choices=("local", "slurm"),
+        default="local",
+        help="local: 阻塞运行；slurm: 非阻塞 sbatch",
+    )
+    parser.add_argument(
+        "--submit-retry-interval",
+        type=int,
+        default=60,
+        help="达到 SLURM 提交上限后的基础重试间隔，默认 60 秒",
+    )
+    parser.add_argument(
+        "--max-submit-retries",
+        type=int,
+        default=0,
+        help="最大重试次数；0 表示无限重试",
+    )
+    args = parser.parse_args()
 
-    workdir = Path(sys.argv[1]).resolve()
+    if args.submit_retry_interval < 1:
+        raise ValueError(
+            "--submit-retry-interval 必须大于等于 1"
+        )
 
-    if not workdir.exists():
-        raise FileNotFoundError(f"Workdir does not exist: {workdir}")
+    if args.max_submit_retries < 0:
+        raise ValueError(
+            "--max-submit-retries 不能小于 0"
+        )
+
+    max_submit_retries = (
+        None
+        if args.max_submit_retries == 0
+        else args.max_submit_retries
+    )
+
+    workdir = Path(args.workdir).resolve()
+
+    if not workdir.is_dir():
+        raise FileNotFoundError(
+            f"Workdir does not exist: {workdir}"
+        )
+
+    cleanup_legacy_false_flags(workdir)
 
     done_flag = workdir / "lammps_done.flag"
     failed_flag = workdir / "lammps_failed.flag"
     submitted_flag = workdir / "lammps_submitted.flag"
     job_id_file = workdir / "job_id.txt"
 
-    # 已经成功完成：直接跳过
     if done_flag.exists():
         L.skip(f"LAMMPS 已完成，跳过: {workdir}")
         return
 
-    # 上一次失败：默认不自动重跑，避免反复炸
     if failed_flag.exists():
-        L.warn(f"上次 LAMMPS 运行失败: {workdir}")
+        L.warn(f"上次 LAMMPS 真正运行失败: {workdir}")
         L.warn(f"如需重跑请删除 {failed_flag}")
         return
 
-    # 已经提交/启动过但没 done：容器本地模式下，这通常说明上次中断了
     if submitted_flag.exists() and job_id_file.exists():
-        job_id = job_id_file.read_text().strip()
-        L.warn(f"LAMMPS 之前已启动。job_id = {job_id}")
-        L.warn("未找到 lammps_done.flag。")
-        L.warn("如需重跑请删除 lammps_submitted.flag 和 job_id.txt。")
+        job_id = job_id_file.read_text(
+            encoding="utf-8",
+        ).strip()
+        L.warn(
+            f"LAMMPS 之前已提交，跳过重复提交。job_id={job_id}"
+        )
         return
+
+    # 处理孤立的 submitted.flag 或 job_id.txt。
+    if submitted_flag.exists() != job_id_file.exists():
+        L.warn(
+            f"发现不完整提交记录，自动清理后重提: {workdir}"
+        )
+        submitted_flag.unlink(missing_ok=True)
+        job_id_file.unlink(missing_ok=True)
 
     check_required_files(workdir)
 
-    job_id = run_lammps_local(workdir)
+    if args.scheduler == "local":
+        job_id = run_lammps_local(workdir)
+        L.ok("LAMMPS 本地运行完成。")
+    else:
+        try:
+            job_id = submit_lammps_slurm(
+                workdir=workdir,
+                retry_interval=args.submit_retry_interval,
+                max_submit_retries=max_submit_retries,
+            )
 
-    write_submit_record(workdir, job_id)
+        except SlurmSubmitLimitError:
+            # 只有设置有限重试次数且耗尽后才会到这里。
+            # 仍然不写 lammps_failed.flag。
+            raise
 
-    L.ok("LAMMPS 运行成功。")
+        except SlurmSubmitError as exc:
+            # 非临时 sbatch 错误写单独诊断文件，
+            # 不伪装成 LAMMPS 计算失败。
+            fail_time = time.strftime("%Y-%m-%d %H:%M:%S")
+            (workdir / "lammps_submit_failed.flag").write_text(
+                f"Submit failed at {fail_time}\n{exc}\n",
+                encoding="utf-8",
+            )
+            raise
+
     L.info(f"workdir = {workdir}")
     L.info(f"job_id  = {job_id}")
-    L.info(f"done    = {workdir / 'lammps_done.flag'}")
 
 
 if __name__ == "__main__":

@@ -1,25 +1,18 @@
-# %%
-from ase import Atom
-from ase.build import nanotube
-from numpy.linalg import norm
-from ase.io import write
-import numpy as np
-from ase.build import sort
-import os
+#!/usr/bin/env python3
 
-from math import gcd
-import math
-import re
+import json
+import os
+from pathlib import Path
+
+import numpy as np
+
 import cnt_geometry
 import defects
 import exporters
 import lammps_io
-import json
-from pathlib import Path
-
 import logkit as L
 
-# %%
+
 def multi_defects_ele(tube, coords, type_list, seed=None):
     rng = np.random.default_rng(seed)
 
@@ -27,12 +20,11 @@ def multi_defects_ele(tube, coords, type_list, seed=None):
     defect_log = []
 
     for k, (theta, z) in enumerate(coords, start=1):
-
         current_index = cnt_geometry.coord_to_index(
             new_tube,
             theta,
             z,
-            only_C=True
+            only_C=True,
         )
 
         defect_type = str(rng.choice(type_list))
@@ -56,7 +48,7 @@ def multi_defects_ele(tube, coords, type_list, seed=None):
 
     return new_tube, defect_log
 
-# %%
+
 def generate_defect_coords(
     tube,
     N,
@@ -74,25 +66,22 @@ def generate_defect_coords(
     约束：
     1. 只在中间 l_def 个 unit cell 的 defects 区内采样；
     2. defects 区左右边界各缩小 edge_margin，默认 1.42 Å；
-    3. 不再使用 ele_mask_checker；
+    3. 不使用 ele_mask_checker；
     4. 缺陷之间二维柱面展开距离大于 min_sep；
     5. 最终坐标吸附到真实 C 原子上；
     6. 完全由 seed 控制随机性。
     """
-
     rng = np.random.default_rng(seed)
     cyl = cnt_geometry.tube_to_cyl(tube)
 
     coords = []
     used_indices = []
 
-    # 名义 defects 区域：
-    # 2PL-2PL-defects-2PL-2PL
+    # 名义 defects 区域：2PL-2PL-defects-2PL-2PL
     z_def_low = 4 * l_PL * T
     z_def_high = (4 * l_PL + l_def) * T
 
-    # 实际允许造缺陷的区域：
-    # 左右各缩小一个 C-C 键长，避免缺陷贴近边界
+    # 实际允许造缺陷的区域：左右各缩小一个 C-C 键长
     z_low = z_def_low + edge_margin
     z_high = z_def_high - edge_margin
 
@@ -118,7 +107,7 @@ def generate_defect_coords(
             tube,
             theta_rand,
             z_rand,
-            only_C=True
+            only_C=True,
         )
 
         if index in used_indices:
@@ -128,7 +117,6 @@ def generate_defect_coords(
         theta_atom = cnt_geometry.wrap_to_pi(cyl["theta"][index - 1])
         z_atom = cyl["z"][index - 1]
 
-        # 吸附到最近 C 原子后，仍然要求在缩小后的 z 范围内
         if not (z_low <= z_atom <= z_high):
             continue
 
@@ -148,14 +136,16 @@ def generate_defect_coords(
 
     return coords, used_indices
 
-# %%
+
 def far_enough_from_existing(candidate, existing_coords, min_sep):
     theta, z = candidate
 
     for theta_old, z_old in existing_coords:
         dist = cnt_geometry.cyl_distance_2d(
-            theta, z,
-            theta_old, z_old
+            theta,
+            z,
+            theta_old,
+            z_old,
         )
 
         if dist < min_sep:
@@ -163,7 +153,7 @@ def far_enough_from_existing(candidate, existing_coords, min_sep):
 
     return True
 
-# %%
+
 def load_config(config_path=None):
     if config_path is None:
         config_path = os.environ.get("CNT_CONFIG", "../config.json")
@@ -173,154 +163,179 @@ def load_config(config_path=None):
     if not config_path.exists():
         raise FileNotFoundError(f"找不到 config 文件: {config_path}")
 
-    with open(config_path, "r", encoding="utf-8") as f:
-        config = json.load(f)
-
-    return config
+    with config_path.open("r", encoding="utf-8") as file:
+        return json.load(file)
 
 
+def main():
+    config = load_config()
 
+    required_keys = [
+        "temperature",
+        "chirality",
+        "r_max",
+        "l_def",
+        "N_defects",
+        "structures",
+        "lammps_seed",
+    ]
+    missing_keys = [key for key in required_keys if key not in config]
+    if missing_keys:
+        raise KeyError(f"config 缺少必要字段: {missing_keys}")
 
-# %%
-config = load_config()
+    temperature = int(config["temperature"])
+    m, n = map(int, config["chirality"])
+    r_max = float(config["r_max"])
+    data_root = Path(config.get("data_root", "../data")).resolve()
+    l_def = int(config["l_def"])
+    md_steps = int(config.get("md_steps", 40000))
 
+    # seed：控制缺陷位置和缺陷类型。
+    # lammps_seed：只控制这一条 LAMMPS 热运动轨迹。
+    seed = int(config.get("seed", 20260705))
+    lammps_seed = int(config["lammps_seed"])
 
-temperature = int(config["temperature"])
-m, n = map(int, config["chirality"])
-r_max = float(config["r_max"])
-data_root = Path(config.get("data_root", "../data")).resolve()
-l_def = int(config["l_def"])
-md_steps = int(config.get("md_steps", 40000))
-T, N_uc, l_PL, length = cnt_geometry.geo_info(m, n, r_max,l_def)
+    if lammps_seed <= 0:
+        raise ValueError(f"lammps_seed 必须为正整数，当前值: {lammps_seed}")
 
+    T, N_uc, l_PL, length = cnt_geometry.geo_info(
+        m,
+        n,
+        r_max,
+        l_def,
+    )
 
-# %%
-tube_unit = cnt_geometry.build_unit_cnt(m, n, vacuum=10.0)
-tube_clean = cnt_geometry.clean_cnt_by_shift_wrap_anchor(tube_unit) 
-tube = tube_clean * (1, 1, length) 
+    tube_unit = cnt_geometry.build_unit_cnt(m, n, vacuum=10.0)
+    tube_clean = cnt_geometry.clean_cnt_by_shift_wrap_anchor(tube_unit)
+    tube = tube_clean * (1, 1, length)
+    cnt_geometry.set_reference_cyl(tube)
 
-# %%
-cnt_geometry.set_reference_cyl(tube)   # 规定中心轴
+    N = int(config["N_defects"])
+    min_defect_sep = 4.26
+    edge_margin = 1.42
 
-# %% [markdown]
-# 生成结构
+    defects_coord_ind, pristine_indices = generate_defect_coords(
+        tube=tube,
+        N=N,
+        T=T,
+        l_PL=l_PL,
+        l_def=l_def,
+        min_sep=min_defect_sep,
+        edge_margin=edge_margin,
+        seed=seed,
+    )
 
-# %%
-# =========================
-# 生成 N 个缺陷坐标
-# =========================
+    density = len(defects_coord_ind) / (l_def * T)
 
-N = int(config["N_defects"])
-seed = 20260705
+    L.info(f"目标缺陷数量: {N}")
+    L.info(f"实际缺陷数量: {len(defects_coord_ind)}")
+    L.info(f"散射区长度: {l_def * T:.2f} Å")
+    L.info(f"线密度: {density:.4f} 缺陷/Å")
+    L.info(f"二维柱面最小间距: {min_defect_sep:.2f} Å")
+    L.info(f"缺陷结构 seed: {seed}")
+    L.info(f"LAMMPS seed: {lammps_seed}")
 
-# 二维柱面展开距离屏蔽半径
-# 目的：避免两个缺陷核心拓扑重叠
-min_defect_sep = 4.26
+    L.info("缺陷坐标：")
+    for coord, idx in zip(defects_coord_ind, pristine_indices):
+        L.info(
+            f"  index={idx:5d}, "
+            f"theta={coord[0]: .6f}, "
+            f"z={coord[1]: .6f}"
+        )
 
-# defects 区左右各缩小一个 C-C 键长
-edge_margin = 1.42
+    type_list = list(config["structures"])
 
-defects_cood_ind, pristine_indices = generate_defect_coords(
-    tube=tube,
-    N=N,
-    T=T,
-    l_PL=l_PL,
-    l_def=l_def,
-    min_sep=min_defect_sep,
-    edge_margin=edge_margin,
-    seed=seed,
-)
+    tube_multi_defects, defect_log = multi_defects_ele(
+        tube,
+        defects_coord_ind,
+        type_list,
+        seed=seed,
+    )
 
-Dens = len(defects_cood_ind) / (l_def * T)
+    L.info("实际生成缺陷记录：")
+    for item in defect_log:
+        L.info(
+            f"  #{item['no']:02d} "
+            f"type={item['type']:>4s}, "
+            f"index={item['index_when_created']:5d}, "
+            f"theta={item['theta']: .6f}, "
+            f"z={item['z']: .6f}"
+        )
 
-L.info(f"目标缺陷数量: {N}")
-L.info(f"实际缺陷数量: {len(defects_cood_ind)}")
-L.info(f"散射区长度: {l_def * T:.2f} Å")
-L.info(f"线密度: {Dens:.4f} 缺陷/Å")
-L.info(f"二维柱面最小间距: {min_defect_sep:.2f} Å")
+    type_name = "_".join(type_list)
+    folder_name = (
+        f"{type_name}"
+        f"_L{l_def:03d}"
+        f"_{density:.4f}A-1"
+    )
 
-L.info("缺陷坐标：")
-for coord, idx in zip(defects_cood_ind, pristine_indices):
-    L.info(
-        f"  index={idx:5d}, "
-        f"theta={coord[0]: .6f}, "
-        f"z={coord[1]: .6f}"
+    structures = {
+        folder_name: tube_multi_defects,
+    }
+
+    # 目录优先级：
+    # 1. run_multi.py 通过 CNT_STRUCTURE_ROOT 强制指定当前工作根目录；
+    # 2. batch_generate.py 写入配置中的 structure_root；
+    # 3. 兼容旧单次工作流的 data_root/温度/手性/结构目录规则。
+    env_structure_root = os.environ.get("CNT_STRUCTURE_ROOT")
+    configured_structure_root = config.get("structure_root")
+
+    if env_structure_root:
+        structure_root = Path(env_structure_root).resolve()
+
+        if configured_structure_root is not None:
+            config_root = Path(configured_structure_root).resolve()
+            if config_root != structure_root:
+                raise ValueError(
+                    "结构工作目录不一致：\n"
+                    f"  CNT_STRUCTURE_ROOT = {structure_root}\n"
+                    f"  config.structure_root = {config_root}"
+                )
+    elif configured_structure_root is not None:
+        structure_root = Path(configured_structure_root).resolve()
+    else:
+        structure_root = (
+            data_root
+            / f"{temperature}K"
+            / f"{m}_{n}"
+            / folder_name
+        )
+
+    structure_root.mkdir(parents=True, exist_ok=True)
+    L.info(f"结构工作目录: {structure_root}")
+
+    for folder, atoms in structures.items():
+        atoms_pos = atoms.copy()
+        atoms_lmp = exporters.reposition_hydrogens(
+            atoms,
+            4 * l_PL * N_uc,
+        )
+
+        output_dir = structure_root / "lammps"
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        poscar_path = output_dir / "POSCAR"
+        lammps_path = output_dir / "data.lmp"
+
+        exporters.write_poscar(poscar_path, atoms_pos)
+        exporters.write_lammps(lammps_path, atoms_lmp)
+
+        L.info(f"[WRITE] {folder}")
+        L.info(f"  POSCAR   -> {poscar_path}")
+        L.info(f"  data.lmp -> {lammps_path}")
+
+    lammps_io.prepare_lammps_inputs(
+        temperature=temperature,
+        chirality=(m, n),
+        structures=structures,
+        l_PL=l_PL,
+        N_uc=N_uc,
+        data_root=data_root,
+        structure_root=structure_root,
+        md_steps=md_steps,
+        lammps_seed=lammps_seed,
     )
 
 
-
-
-
-
-# %%
-# =========================
-# 生成多缺陷结构
-# =========================
-
-# type_list = ["MVH", "DV", "5775"]
-type_list = config["structures"]
-
-tube_multi_defects, defect_log = multi_defects_ele(
-    tube,
-    defects_cood_ind,
-    type_list,
-    seed=seed,
-)
-
-L.info("实际生成缺陷记录：")
-for item in defect_log:
-    L.info(
-        f"  #{item['no']:02d} "
-        f"type={item['type']:>4s}, "
-        f"index={item['index_when_created']:5d}, "
-        f"theta={item['theta']: .6f}, "
-        f"z={item['z']: .6f}"
-    )
-
-# %%
-type_name = "_".join(type_list)
-folder_name = f"{type_name}_Dens_{Dens:.2f}A-1"
-structures = {
-    folder_name: tube_multi_defects
-}
-
-
-
-for folder, atoms in structures.items():
-    atoms_pos = atoms.copy()
-    
-    atoms_lmp = exporters.reposition_hydrogens(atoms, 4*l_PL*N_uc)  # 计算左右电极的原子数，调整 H 原子位置
-
-
-    output_dir = data_root / f"{temperature}K" / f"{m}_{n}" / folder / "lammps"
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    poscar_path = output_dir / "POSCAR"
-    lammps_path = output_dir / "data.lmp"
-
-    exporters.write_poscar(poscar_path, atoms_pos)
-    exporters.write_lammps(lammps_path, atoms_lmp)
-
-    L.info(f"[WRITE] {folder}")
-    L.info(f"  POSCAR   -> {poscar_path}")
-    L.info(f"  data.lmp -> {lammps_path}")
-
-# %%
-
-
-from itertools import chain
-
-from numpy import char
-
-
-lammps_io.prepare_lammps_inputs(
-    temperature=temperature,
-    chirality=(m, n),
-    structures=structures,
-    l_PL=l_PL,
-    N_uc=N_uc,
-    data_root=data_root,
-    md_steps=md_steps
-)
-
-
+if __name__ == "__main__":
+    main()

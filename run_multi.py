@@ -12,12 +12,54 @@ _STAGE_DIR = Path(__file__).resolve().parent / "stage"
 if str(_STAGE_DIR) not in sys.path:
     sys.path.insert(0, str(_STAGE_DIR))
 import logkit as L
+from slurm_utils import wait_for_jobs, check_flags
 
 def run_cmd(cmd, dry_run=False, env=None):
     L.run(" ".join(map(str, cmd)))
     if dry_run:
         return
     subprocess.run(cmd, check=True, env=env)
+
+
+def collect_job_ids(workdirs):
+    """
+    从每个 workdir 读取 sub_*.py 写下的 job_id.txt，收集 SLURM job_id。
+    没有 job_id.txt 的（如已 done 而跳过、或 dry-run）自动忽略。
+    """
+    ids = []
+    for w in workdirs:
+        f = Path(w) / "job_id.txt"
+        if f.exists():
+            jid = f.read_text().strip()
+            if jid and jid != "local":
+                ids.append(jid)
+    return ids
+
+
+def barrier_and_check(workdirs, kind, poll_interval, dry_run):
+    """
+    SLURM 屏障：等这批 workdir 的作业全部离开队列，再按 flag 检查成败。
+    kind: "lammps" 或 "dpnegf"。任一失败/缺失 flag 时抛错，阻止进入下一阶段。
+    """
+    if dry_run:
+        L.info(f"[dry-run] 跳过 {kind} SLURM 屏障等待")
+        return
+
+    job_ids = collect_job_ids(workdirs)
+    wait_for_jobs(job_ids, poll_interval=poll_interval, label=kind.upper())
+
+    done_dirs, failed_dirs, missing_dirs = check_flags(workdirs, kind)
+    L.info(f"{kind} 结果: 完成={len(done_dirs)} 失败={len(failed_dirs)} 缺flag={len(missing_dirs)}")
+
+    if failed_dirs or missing_dirs:
+        for d in failed_dirs:
+            L.error(f"{kind} 失败: {d}（见 {kind}_failed.flag / slurm-*.err）")
+        for d in missing_dirs:
+            L.error(f"{kind} 无 done/failed flag（作业可能被杀或超时）: {d}")
+        raise RuntimeError(
+            f"{kind} 阶段有作业未成功，已中止后续阶段。"
+            f"修复后删除对应 {kind}_failed.flag / *_submitted.flag 重跑。"
+        )
 
 def has_dump_files(p: Path) -> bool:
     """
@@ -257,8 +299,8 @@ def main():
 
     parser.add_argument(
         "--stage",
-        default="/personal/CNT_defects_package/work_flow_test/stage",
-        help="脚本所在目录，默认是 work_flow_test/stage",
+        default=str(Path(__file__).resolve().parent / "stage"),
+        help="脚本所在目录，默认是本工作流的 stage",
     )
 
     parser.add_argument(
@@ -291,6 +333,49 @@ def main():
     action="store_true",
     help="跳过 DPNEGF 运行，只生成 DPNEGF 输入文件",
     )
+
+    parser.add_argument(
+        "--skip-conductance",
+        action="store_true",
+        help="跳过最终的电导日志收集",
+    )
+
+    parser.add_argument(
+        "--conductance-python",
+        default=None,
+        help="运行电导收集脚本的 Python；默认复用 --python（需要 torch）",
+    )
+
+    parser.add_argument(
+        "--e-fermi",
+        type=float,
+        default=0.0,
+        help="提取电导所用的费米能，默认 0 eV",
+    )
+
+    parser.add_argument(
+        "--transport-temperature-k",
+        type=float,
+        default=None,
+        help=(
+            "电导计算的输运温度(K)。优先使用该参数；"
+            "未提供时尝试使用 config.temperature。"
+        ),
+    )
+
+    parser.add_argument(
+        "--scheduler",
+        choices=["local", "slurm"],
+        default="slurm",
+        help="local: 逐个 bash run.sh 阻塞跑; slurm: 批量 sbatch 提交后按阶段屏障等待",
+    )
+
+    parser.add_argument(
+        "--poll-interval",
+        type=int,
+        default=30,
+        help="slurm 模式下 squeue 轮询间隔（秒）",
+    )
     args = parser.parse_args()
 
     stage = Path(args.stage).resolve()
@@ -311,10 +396,8 @@ def main():
     # 必须与 in.lammps 里 `run <N>` 一致（同由 config.md_steps 驱动）。
     md_steps = int(config.get("md_steps", 40000))
 
-    # MD 采样配置：支持多次采样，从轨迹末尾提取多个帧
-    # 格式: "md_sampling": {"n_samples": 5} 表示提取最后 5 个满足条件的帧
-    md_sampling = config.get("md_sampling", {})
-    n_samples = md_sampling.get("n_samples") if isinstance(md_sampling, dict) else None
+    # 独立轨迹模式：一次 run_multi.py 对应一条 LAMMPS 轨迹，
+    # 后续固定只提取 md_steps 对应的最后一帧。
 
     if args.root is not None:
         root = Path(args.root).resolve()
@@ -326,6 +409,7 @@ def main():
     ele_defects_script = stage / "ele_multi_defects_ele.py"
     sub_lammps_script = stage / "sub_lmps.py"
     sub_dpnegf_script = stage / "sub_dpnegf.py"
+    collect_conductance_script = stage / "collect_md_conductance.py"
 
     dump2fdf = stage / "dump2fdf_batch.py"
     fdf2xyz = stage / "fdf2xyz.py"
@@ -340,9 +424,18 @@ def main():
 
     if not args.skip_dpnegf:
         required_scripts.append(sub_dpnegf_script)
+        if not args.skip_conductance:
+            required_scripts.append(collect_conductance_script)
+
+    missing_scripts = [p for p in required_scripts if not p.is_file()]
+    if missing_scripts:
+        raise FileNotFoundError(
+            "缺少工作流脚本:\n" + "\n".join(f"  {p}" for p in missing_scripts)
+        )
+
 
     if not root.exists():
-        raise FileNotFoundError(f"root 不存在: {root}")
+        L.warn(f"root 目录不存在，先创建: {root}"); root.mkdir(parents=True, exist_ok=True)
 
     env = os.environ.copy()
 
@@ -350,15 +443,21 @@ def main():
 
     env["CNT_CONFIG"] = str(config_path)
 
-    L.info(f"CNT_CONFIG = {config_path}")
-    L.info(f"root       = {root}")
-    L.info(f"stage      = {stage}")
+    # 当前 run_multi.py 只负责一个明确的工作根目录。
+    # 将它显式传给结构生成脚本，避免 data_root 的旧目录规则
+    # 把多个 replica 写到共同的配置目录。
+    env["CNT_STRUCTURE_ROOT"] = str(root)
+
+    L.info(f"CNT_CONFIG         = {config_path}")
+    L.info(f"CNT_STRUCTURE_ROOT = {root}")
+    L.info(f"root               = {root}")
+    L.info(f"stage              = {stage}")
 
     # ============================================================
     # 0. 先运行 eledefects.py
     # ============================================================
     if not args.skip_ele:
-        L.phase(1, 6, "生成缺陷几何 (eledefects)")
+        L.phase(1, 7, "生成缺陷几何 (eledefects)")
         run_cmd(
             [
                 py,
@@ -370,7 +469,7 @@ def main():
         # ============================================================
         # 0.5 运行lammps任务
         # ============================================================
-        L.phase(2, 6, "LAMMPS 退火")
+        L.phase(2, 7, "LAMMPS 退火")
         lammps_workdirs = find_lammps_workdirs(root)
 
         if not lammps_workdirs:
@@ -390,14 +489,25 @@ def main():
                     py,
                     str(sub_lammps_script),
                     str(workdir),
+                    "--scheduler",
+                    args.scheduler,
                 ],
                 dry_run=args.dry_run,
                 env=env,
             )
+
+        # SLURM 屏障：等所有 LAMMPS 作业跑完再进入 dump->fdf（后者依赖 dump 产物）。
+        # local 模式下每个 sub_lmps 已阻塞跑完，这里等价于一次性 flag 复核。
+        if args.scheduler == "slurm":
+            barrier_and_check(
+                lammps_workdirs, "lammps",
+                poll_interval=args.poll_interval,
+                dry_run=args.dry_run,
+            )
     # ============================================================
     # 1. 查找含 dump 的结构目录
     # ============================================================
-    L.phase(3, 6, "dump -> fdf")
+    L.phase(3, 7, "dump -> fdf")
     structure_dirs = find_structure_dirs(root)
 
     if not structure_dirs:
@@ -423,12 +533,11 @@ def main():
         else:
             dump_root = struct_dir
 
-        # 计算 --every：如果启用多次采样，则按 n_samples 均匀分割 md_steps
-        if n_samples is not None and n_samples > 1:
-            every = md_steps // n_samples
-            L.info(f"多次采样模式: md_steps={md_steps}, n_samples={n_samples}, every={every}")
-        else:
-            every = md_steps
+        # 每条独立 LAMMPS 轨迹只取最后一帧。
+        # md_steps 必须与 in.lammps 中的 run <N> 一致。
+        L.info(
+            f"单轨迹末帧采样: timestep={md_steps}, samples=1"
+        )
 
         cmd = [
             py,
@@ -438,16 +547,16 @@ def main():
             "--outroot",
             str(outroot),
             "--every",
-            str(every),
+            str(md_steps),
+            "--samples",
+            "1",
         ]
-        if n_samples is not None:
-            cmd.extend(["--samples", str(n_samples)])
         run_cmd(cmd, dry_run=args.dry_run, env=env)
 
     # ============================================================
     # 3. 对每个结构的 dpnegf 目录做 fdf -> xyz
     # ============================================================
-    L.phase(4, 6, "fdf -> xyz")
+    L.phase(4, 7, "fdf -> xyz")
     for struct_dir in structure_dirs:
         dpnegf_dir = struct_dir / "dpnegf"
 
@@ -473,7 +582,7 @@ def main():
     # ============================================================
     # 4. 复制 dpnegf 输入文件
     # ============================================================
-    L.phase(5, 6, "复制 DPNEGF 输入")
+    L.phase(5, 7, "复制 DPNEGF 输入")
     project_root = Path(__file__).resolve().parent
     dpnegf_input_dir = project_root / "input_files" / "dpnegf"
 
@@ -526,7 +635,7 @@ def main():
     # 5. 运行所有刚刚建立好的 DPNEGF 工作目录
     # ============================================================
     if not args.skip_dpnegf:
-        L.phase(6, 6, "运行 DPNEGF")
+        L.phase(6, 7, "运行 DPNEGF")
         dpnegf_workdirs = find_dpnegf_workdirs_from_structures(structure_dirs)
 
         if not dpnegf_workdirs:
@@ -547,17 +656,55 @@ def main():
                     py,
                     str(sub_dpnegf_script),
                     str(workdir),
+                    "--scheduler",
+                    args.scheduler,
                 ],
                 dry_run=args.dry_run,
                 env=env,
             )
 
+        # SLURM 屏障：等所有 DPNEGF 作业跑完并检查 flag，再统一清理缓存。
+        # local 模式下每个 sub_dpnegf 已阻塞跑完，可直接进入清理。
+        if args.scheduler == "slurm":
+            barrier_and_check(
+                dpnegf_workdirs, "dpnegf",
+                poll_interval=args.poll_interval,
+                dry_run=args.dry_run,
+            )
+
         # 全部 DPNEGF 跑完后，对整棵 root 树统一清理一次缓存。
         # 注意：不要放在 for 循环内，否则 O(N^2) 全树遍历，
         # 且并行化后会误删其它 workdir 尚在使用的 self_energy / HS_*.h5。
-        clean_dpnegf_output_cache(root)
-            
+        # slurm 屏障保证此刻所有作业都已结束，清理是安全的。
+        if not args.dry_run:
+            clean_dpnegf_output_cache(root)
 
-        
+        # ============================================================
+        # 6. 收集本次 MD 对应的 DPNEGF 电导日志
+        # ============================================================
+        if not args.skip_conductance:
+            L.phase(7, 7, "收集电导日志")
+
+            conductance_python = shutil.which(args.conductance_python or py)
+            if not args.dry_run and conductance_python is None:
+                raise FileNotFoundError(
+                    f"找不到电导收集 Python: {args.conductance_python or py}"
+                )
+
+            cmd = [
+                conductance_python or (args.conductance_python or py),
+                str(collect_conductance_script),
+                "--config",
+                str(config_path),
+                "--e-fermi",
+                str(args.e_fermi),
+            ]
+
+            for struct_dir in structure_dirs:
+                cmd.extend(["--structure-dir", str(struct_dir)])
+
+            run_cmd(cmd, dry_run=args.dry_run, env=env)
+
+
 if __name__ == "__main__":
     main()
