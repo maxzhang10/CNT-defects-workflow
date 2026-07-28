@@ -62,14 +62,6 @@ negf_out = torch.load('./output/negf.out.pth')
 negf_out.keys()
 
 # %%
-plt.plot(negf_out['uni_grid'], negf_out['DOS'][str(negf_out['k'][0])])
-plt.xlabel('Energy (eV)')
-plt.ylabel('DOS')
-plt.title('DOS vs Energy')
-plt.grid()
-plt.savefig("DOS.png")
-plt.close()
-# %%
 plt.plot(negf_out['uni_grid'], negf_out['T_avg'])
 plt.xlabel('Energy (eV)')
 plt.ylabel('Transmission')

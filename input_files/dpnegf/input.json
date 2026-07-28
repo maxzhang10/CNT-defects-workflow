@@ -17,12 +17,12 @@
         "self_energy_options": {
             "solver": "Sancho-Rubio",
             "parallel": {
-                "cpu_budget": 32
+                "cpu_budget": 48
             },
             "cache": {
-                  "use_saved": true,
-                  "save_path": "/personal/CNT_defects_package/work_flow_test/data/300K/5_5/5775_Dens_0.24A-1/dpnegf/40000/output/self_energy"
-              }
+                "use_saved": true,
+                "save_path": "/public5/home/t6s008517/dpnegf/workflow_2/self_energy/"
+            }
         },
         "stru_options":{
             "gamma_center": true,
@@ -78,20 +78,20 @@
             }
         },
         "sgf_solver": "Sancho-Rubio",
-        "espacing": 0.05,
-        "emin": -3,
-        "emax": 3,
+        "espacing": 0.1,
+        "emin": -0.5,
+        "emax": 0.5,
         "density_options": {
             "method": "Fiori",
             "integrate_way": "direct"
         },
         "eta_lead":1e-5,
         "eta_device":1e-5,
-        "out_dos": true,
+        "out_dos": false,
         "out_tc": true,
         "out_ldos": false,
-        "out_current_nscf": true,
-        "out_density": true
+        "out_current_nscf": false,
+        "out_density": false
 },
 
 "AtomicData_options" : {"r_max": 6.5}

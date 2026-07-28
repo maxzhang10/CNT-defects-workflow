@@ -19,13 +19,6 @@ CHIRAL_CONFIGS = [
         "l_def": 8,
         "N_defects": 2,
         "structures": ["5775"],
-    },
-    {
-        "m": 5,
-        "n": 5,
-        "l_def": 16,
-        "N_defects": 4,
-        "structures": ["5775"],
     }
 ]
 
@@ -35,7 +28,7 @@ TEMPERATURES = [500]
 
 # 每个物理配置独立运行的 LAMMPS 轨迹数。
 # 可由命令行 --lammps-repeats 覆盖。
-DEFAULT_LAMMPS_REPEATS = 5
+DEFAULT_LAMMPS_REPEATS = 2
 
 # 两类随机种子分开管理：
 # seed 控制缺陷结构；同一物理配置的多个 replica 共用同一个 seed。
