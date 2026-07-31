@@ -114,8 +114,8 @@ def build_tasks(
     将每个物理配置展开为 lammps_repeats 条独立 LAMMPS 轨迹。
 
     同一物理配置的 replica：
-    - 使用相同的缺陷结构 seed；
-    - 使用不同的 lammps_seed；
+    - 使用独立的缺陷结构 seed（每个 replica 缺陷位置不同）；
+    - 使用独立的 lammps_seed（每个 replica 热运动轨迹不同）；
     - 写入同一配置目录下相互独立的 replica_XXX 子目录。
     """
     tasks = []
@@ -150,12 +150,13 @@ def build_tasks(
                 density=density,
             )
 
-            # 同一个物理配置的所有 replica 共用缺陷结构 seed，
-            # 从而只比较不同热运动轨迹带来的差异。
-            structure_seed = BASE_STRUCTURE_SEED + physical_index
-
+            # 每个 replica 使用独立的缺陷结构 seed，
+            # 实现缺陷位置的随机采样。
             for replica in range(1, lammps_repeats + 1):
                 task_index += 1
+                # structure_seed: 控制缺陷位置和类型，每个 replica 独立
+                structure_seed = BASE_STRUCTURE_SEED + task_index
+                # lammps_seed: 控制 LAMMPS 热运动轨迹，每个 replica 独立
                 lammps_seed = BASE_LAMMPS_SEED + task_index
 
                 # 目录层级：
