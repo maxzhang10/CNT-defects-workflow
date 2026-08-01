@@ -254,6 +254,84 @@ def make_task_config(task):
     return config
 
 
+# 必须保留的输入文件模式（相对于 run_root）
+REQUIRED_INPUT_FILES = [
+    "workflow_config.json",
+    "*.in",           # LAMMPS 输入文件
+    "*.data",         # LAMMPS 数据文件
+    "*.xyz",          # 结构文件
+    "POSCAR",         # VASP 输入
+    "input.json",     # DPNEGF 输入配置
+]
+
+
+def cleanup_failed_directory(run_root):
+    """
+    清理失败目录中的输出文件和哨兵文件，只保留必须的输入文件。
+
+    删除的内容包括：
+    - 日志文件 (*.log, *.out, *.err)
+    - 结果文件 (*.csv, *.txt, conductance_*)
+    - SLURM 输出 (*.slurm-out, slurm-*.out)
+    - 临时目录 (lammps/, dpnegf/, tmp/)
+    - 完成标记文件 (*.done, *.flag, SUCCESS, FAILED)
+    """
+    if not run_root.exists():
+        return
+
+    # 要删除的文件模式
+    output_patterns = [
+        "*.log",
+        "*.out",
+        "*.err",
+        "*.csv",
+        "*.txt",
+        "*.done",
+        "*.flag",
+        "*.slurm-out",
+        "slurm-*.out",
+        "conductance_*",
+        "SUCCESS",
+        "FAILED",
+        "*.traj",
+        "*.dump",
+        "*.restart",
+    ]
+
+    # 要删除的目录
+    dir_names = [
+        "lammps",
+        "dpnegf",
+        "tmp",
+        "__pycache__",
+    ]
+
+    deleted_count = 0
+
+    # 删除匹配模式的文件
+    for pattern in output_patterns:
+        for file_path in run_root.glob(pattern):
+            if file_path.is_file():
+                try:
+                    file_path.unlink()
+                    deleted_count += 1
+                except OSError:
+                    pass
+
+    # 删除特定目录
+    for dir_name in dir_names:
+        dir_path = run_root / dir_name
+        if dir_path.exists() and dir_path.is_dir():
+            try:
+                import shutil
+                shutil.rmtree(dir_path)
+                deleted_count += 1
+            except OSError:
+                pass
+
+    print(f"        [CLEANUP] 清理完成，删除 {deleted_count} 项")
+
+
 def run_single_task(
     task,
     scheduler,
@@ -494,6 +572,13 @@ def main():
         help="跳过批次结束后的跨 replica 电导汇总。",
     )
 
+    parser.add_argument(
+        "--max-retries",
+        type=int,
+        default=2,
+        help="任务失败后的最大重试次数，默认 2 次。",
+    )
+
     args = parser.parse_args()
 
     if args.max_parallel is not None and args.max_parallel < 1:
@@ -585,50 +670,90 @@ def main():
 
     print("=" * 70)
 
-    all_results = []
+    all_results = {}
+    retry_counts = {}
     start = time.time()
 
-    # 每个 task 都有独立 run_root，
-    # 因此不再按温度/手性分组串行。
-    with ThreadPoolExecutor(
-        max_workers=max_workers
-    ) as executor:
-        future_to_task = {
-            executor.submit(
-                run_single_task,
-                task,
-                args.scheduler,
-                workflow_dir,
-            ): task
-            for task in tasks
-        }
+    # 准备任务队列，支持重试
+    pending_tasks = list(tasks)
+    completed_tasks = set()
 
-        for future in as_completed(
-            future_to_task
-        ):
-            task = future_to_task[future]
+    while pending_tasks:
+        # 每个 task 都有独立 run_root，
+        # 因此不再按温度/手性分组串行。
+        with ThreadPoolExecutor(
+            max_workers=max_workers
+        ) as executor:
+            future_to_task = {
+                executor.submit(
+                    run_single_task,
+                    task,
+                    args.scheduler,
+                    workflow_dir,
+                ): task
+                for task in pending_tasks
+            }
 
-            try:
-                result = future.result()
-            except Exception as exc:
-                print(
-                    f"[ERROR] 未捕获异常 "
-                    f"{task['task_id']}: "
-                    f"{type(exc).__name__}: {exc}",
-                    file=sys.stderr,
-                    flush=True,
-                )
+            # 清空待处理列表，准备收集下一轮（重试）任务
+            pending_tasks = []
 
-                result = (
-                    task["task_id"],
-                    1,
-                )
+            for future in as_completed(
+                future_to_task
+            ):
+                task = future_to_task[future]
+                task_id = task["task_id"]
 
-            all_results.append(result)
+                try:
+                    result = future.result()
+                    returncode = result[1]
+                except Exception as exc:
+                    print(
+                        f"[ERROR] 未捕获异常 "
+                        f"{task_id}: "
+                        f"{type(exc).__name__}: {exc}",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                    returncode = 1
+
+                # 检查任务是否成功
+                if returncode == 0:
+                    all_results[task_id] = (task_id, 0)
+                    completed_tasks.add(task_id)
+                else:
+                    # 任务失败，检查是否需要重试
+                    current_retries = retry_counts.get(task_id, 0)
+
+                    if current_retries < args.max_retries:
+                        retry_counts[task_id] = current_retries + 1
+
+                        print(
+                            f"[RETRY] {task_id} "
+                            f"第 {retry_counts[task_id]}/{args.max_retries} 次重试",
+                            flush=True,
+                        )
+
+                        # 清理失败目录
+                        cleanup_failed_directory(task["run_root"])
+
+                        # 将任务加入下一轮重试队列
+                        pending_tasks.append(task)
+                    else:
+                        # 重试次数已用完
+                        print(
+                            f"[MAX_RETRY] {task_id} "
+                            f"已达到最大重试次数 {args.max_retries}，放弃",
+                            flush=True,
+                        )
+                        all_results[task_id] = (task_id, returncode)
+                        completed_tasks.add(task_id)
+
+    # 转换结果为列表格式
+    all_results_list = list(all_results.values())
 
     failed = [
         task_id
-        for task_id, returncode in all_results
+        for task_id, returncode in all_results_list
         if returncode != 0
     ]
 
@@ -638,13 +763,17 @@ def main():
 
     print(
         f"成功: "
-        f"{len(all_results) - len(failed)}"
-        f"/{len(all_results)}"
+        f"{len(all_results_list) - len(failed)}"
+        f"/{len(all_results_list)}"
     )
 
     print(
         f"失败: {len(failed)}"
     )
+
+    if retry_counts:
+        total_retries = sum(retry_counts.values())
+        print(f"总重试次数: {total_retries}")
 
     print(
         f"总耗时: "
