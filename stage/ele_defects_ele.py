@@ -70,9 +70,9 @@ L.info(f"data_root   = {data_root}")
 
 T, N_uc, l_PL, length = cnt_geometry.geo_info(m, n, r_max, l_def)
 length = config.get("length", l_PL * 8 + l_def)  # 如果 config 中指定了 length，则使用它，否则使用默认值
-L.info(f"l_def       = {l_def}")
+
 L.info(f"length      = {length}")
-L.info(f"l_PL        = {l_PL}")
+
 # %% [markdown]
 # 坐标排序
 
