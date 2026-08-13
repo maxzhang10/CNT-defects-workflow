@@ -22,7 +22,15 @@ import logkit as L
 
 def load_config(config_path=None):
     if config_path is None:
-        config_path = os.environ.get("CNT_CONFIG", "../config.json")
+        config_path = os.environ.get("CNT_CONFIG")
+        if config_path is None:
+            # 尝试从脚本所在位置找到 config.json
+            script_dir = Path(__file__).resolve().parent
+            repo_config = script_dir.parent / "config.json"
+            if repo_config.exists():
+                config_path = str(repo_config)
+            else:
+                config_path = "../config.json"
 
     config_path = Path(config_path).resolve()
 
@@ -61,7 +69,10 @@ L.info(f"r_max       = {r_max}")
 L.info(f"data_root   = {data_root}")
 
 T, N_uc, l_PL, length = cnt_geometry.geo_info(m, n, r_max, l_def)
-
+length = config.get("length", l_PL * 8 + l_def)  # 如果 config 中指定了 length，则使用它，否则使用默认值
+L.info(f"l_def       = {l_def}")
+L.info(f"length      = {length}")
+L.info(f"l_PL        = {l_PL}")
 # %% [markdown]
 # 坐标排序
 
@@ -175,36 +186,30 @@ for i, name in enumerate(structures, 1):
 
 for folder, atoms in structures.items():
     atoms_pos = atoms.copy()
-    
-    atoms_lmp = exporters.reposition_hydrogens(atoms, 4*l_PL*N_uc)  # 计算左右电极的原子数，调整 H 原子位置
 
-
-    output_dir = data_root / f"{temperature}K" / f"{m}_{n}" / folder / "lammps"
+    # 简化输出：只生成 POSCAR，路径为 data_root/<m>_<n>/<folder>/
+    output_dir = data_root / f"{m}_{n}" / folder
     output_dir.mkdir(parents=True, exist_ok=True)
 
     poscar_path = output_dir / "POSCAR"
-    lammps_path = output_dir / "data.lmp"
 
     exporters.write_poscar(poscar_path, atoms_pos)
-    exporters.write_lammps(lammps_path, atoms_lmp)
 
     L.info(f"[WRITE] {folder}")
     L.info(f"  POSCAR   -> {poscar_path}")
-    L.info(f"  data.lmp -> {lammps_path}")
 
 # %%
-from itertools import chain
-
-from numpy import char
-
-
-lammps_io.prepare_lammps_inputs(
-    temperature=temperature,
-    chirality=(m, n),
-    structures=structures,
-    l_PL=l_PL,
-    N_uc=N_uc,
-    data_root=data_root,
-    md_steps=md_steps
-)
+# 已禁用 LAMMPS 输入生成，仅输出 POSCAR
+# from itertools import chain
+# from numpy import char
+#
+# lammps_io.prepare_lammps_inputs(
+#     temperature=temperature,
+#     chirality=(m, n),
+#     structures=structures,
+#     l_PL=l_PL,
+#     N_uc=N_uc,
+#     data_root=data_root,
+#     md_steps=md_steps
+# )
 

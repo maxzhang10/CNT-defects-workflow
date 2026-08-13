@@ -206,7 +206,7 @@ l_def = int(config["l_def"])
 md_steps = int(config.get("md_steps", 40000))
 T, N_uc, l_PL, _ = cnt_geometry.geo_info(m, n, r_max, l_def)
 length = config.get("length", l_PL * 8 + l_def)  # 如果 config 中指定了 length，则使用它，否则使用默认值
-
+L.info(f"l_def       = {l_def}")
 # %%
 tube_unit = cnt_geometry.build_unit_cnt(m, n, vacuum=10.0)
 tube_clean = cnt_geometry.clean_cnt_by_shift_wrap_anchor(tube_unit) 
