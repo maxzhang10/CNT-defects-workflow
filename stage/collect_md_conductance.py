@@ -48,11 +48,8 @@ import numpy as np
 
 try:
     import torch
-except ImportError as exc:
-    raise SystemExit(
-        "ERROR: collect_replica_conductance.py requires PyTorch. "
-        "Run it with the DeePTB/DPNEGF Python environment."
-    ) from exc
+except ImportError:
+    torch = None
 
 
 ENERGY_KEYS = (
@@ -77,6 +74,8 @@ CHIRALITY_PATTERN = re.compile(r"^(-?\d+)_(-?\d+)$")
 
 KB_EV_PER_K = 8.617333262145e-5
 COVERAGE_HARD_MIN = 0.95
+TRANSPORT_EDGE_THRESHOLD = 1.0e-3
+TRANSPORT_EDGE_CONSECUTIVE_POINTS = 3
 
 
 @dataclass(frozen=True)
@@ -106,6 +105,17 @@ class ReplicaResult:
     n_energy_points: int
     replica_dir: str
     result_file: str
+    semi: bool = False
+    Ec_transport_eV: float | None = None
+    Ev_transport_eV: float | None = None
+    transport_gap_eV: float | None = None
+    energy_window_eV: str | None = None
+    conduction_window_eV: str | None = None
+    valence_window_eV: str | None = None
+    Gc_G0: float | None = None
+    Gv_G0: float | None = None
+    ln_Gc_G0: float | None = None
+    ln_Gv_G0: float | None = None
 
 
 @dataclass(frozen=True)
@@ -130,6 +140,21 @@ class ConfigurationSummary:
     mean_ln_G0: float | None
     std_ln_G0: float | None
     geometric_mean_G0: float | None
+    semi: bool = False
+    Ec_transport_eV: float | None = None
+    Ev_transport_eV: float | None = None
+    transport_gap_eV: float | None = None
+    energy_window_eV: str | None = None
+    conduction_window_eV: str | None = None
+    valence_window_eV: str | None = None
+    mean_Gc_G0: float | None = None
+    std_Gc_G0: float | None = None
+    mean_Gv_G0: float | None = None
+    std_Gv_G0: float | None = None
+    mean_ln_Gc_G0: float | None = None
+    typical_Gc_G0: float | None = None
+    mean_ln_Gv_G0: float | None = None
+    typical_Gv_G0: float | None = None
 
 
 def info(message: str) -> None:
@@ -149,6 +174,11 @@ def error(message: str) -> None:
 
 
 def load_torch_file(path: Path) -> Any:
+    if torch is None:
+        raise RuntimeError(
+            "collect_md_conductance.py requires PyTorch. "
+            "Run it with the DeePTB/DPNEGF Python environment."
+        )
     try:
         return torch.load(path, map_location="cpu", weights_only=False)
     except TypeError:
@@ -413,6 +443,102 @@ def interpolate_conductance(
     return conductance
 
 
+def validate_energy_window(value: Any) -> tuple[float, float]:
+    if not isinstance(value, (list, tuple)) or len(value) != 2:
+        raise ValueError("energy_window must be exactly [relative_emin, relative_emax]")
+    try:
+        emin, emax = float(value[0]), float(value[1])
+    except (TypeError, ValueError) as exc:
+        raise ValueError("energy_window must contain two numeric values") from exc
+    if not math.isfinite(emin) or not math.isfinite(emax) or emin >= emax:
+        raise ValueError("energy_window must contain finite values with emin < emax")
+    return emin, emax
+
+
+def load_transmission_curve(
+    result_file: Path,
+    reduction: str,
+) -> tuple[np.ndarray, np.ndarray, str, str]:
+    payload = load_torch_file(result_file)
+    energy_value, energy_key = find_named_value(payload, ENERGY_KEYS)
+    transmission_value, transmission_key = find_named_value(payload, TRANSMISSION_KEYS)
+    energy = normalize_energy_grid(energy_value)
+    transmission = normalize_transmission(
+        transmission_value, n_energy=energy.size, reduction=reduction
+    )
+    energy, transmission = prepare_curve(energy, transmission)
+    return energy, transmission, energy_key, transmission_key
+
+
+def find_transport_edges(
+    curves: Sequence[tuple[np.ndarray, np.ndarray]],
+) -> tuple[float, float]:
+    """Determine one pair of transport edges from the replica-mean spectrum."""
+    if not curves:
+        raise ValueError("cannot determine transport edges without replica curves")
+    common_min = max(float(energy[0]) for energy, _ in curves)
+    common_max = min(float(energy[-1]) for energy, _ in curves)
+    if common_min >= common_max or common_min > 0.0 or common_max < 0.0:
+        raise ValueError(
+            "replica energy grids have no common range containing original E_F=0"
+        )
+    reference = max(curves, key=lambda item: item[0].size)[0]
+    grid = reference[(reference >= common_min) & (reference <= common_max)]
+    if grid.size < TRANSPORT_EDGE_CONSECUTIVE_POINTS:
+        raise ValueError("common replica energy grid is too short for transport-edge detection")
+    average = np.mean(
+        [np.interp(grid, energy, transmission) for energy, transmission in curves], axis=0
+    )
+
+    def stable_edge(indices: np.ndarray) -> float:
+        for start in range(indices.size - TRANSPORT_EDGE_CONSECUTIVE_POINTS + 1):
+            block = indices[start:start + TRANSPORT_EDGE_CONSECUTIVE_POINTS]
+            if np.all(average[block] >= TRANSPORT_EDGE_THRESHOLD):
+                return float(grid[block[0]])
+        raise ValueError(
+            "no stable transport edge found using "
+            f"T >= {TRANSPORT_EDGE_THRESHOLD:g} for "
+            f"{TRANSPORT_EDGE_CONSECUTIVE_POINTS} consecutive energy points"
+        )
+
+    ec = stable_edge(np.flatnonzero(grid >= 0.0))
+    ev = stable_edge(np.flatnonzero(grid <= 0.0)[::-1])
+    if ev >= ec:
+        raise ValueError(f"invalid transport edges: Ev={ev:g} eV, Ec={ec:g} eV")
+    return ec, ev
+
+
+def edge_window_conductance(
+    energy: np.ndarray,
+    transmission: np.ndarray,
+    edge: float,
+    relative_window: tuple[float, float],
+    temperature_k: float,
+) -> tuple[float, tuple[float, float]]:
+    lower, upper = edge + relative_window[0], edge + relative_window[1]
+    grid_min, grid_max = float(energy[0]), float(energy[-1])
+    if lower < grid_min or upper > grid_max:
+        raise ValueError(
+            f"transmission energy range [{grid_min:g}, {grid_max:g}] eV does not "
+            f"fully contain required integration range [{lower:g}, {upper:g}] eV"
+        )
+    # Insert exact window endpoints, rather than silently clipping to uni_grid.
+    inside = energy[(energy > lower) & (energy < upper)]
+    energy_eval = np.concatenate(([lower], inside, [upper]))
+    transmission_eval = np.interp(energy_eval, energy, transmission)
+    if temperature_k <= 0.0:
+        conductance = float(np.interp(edge, energy_eval, transmission_eval))
+    else:
+        kbt = KB_EV_PER_K * temperature_k
+        u = (energy_eval - edge) / (2.0 * kbt)
+        kernel = 0.25 / kbt / np.cosh(np.clip(u, -50.0, 50.0)) ** 2
+        kernel[np.abs(u) > 50.0] = 0.0
+        conductance = trapezoid_integral(transmission_eval * kernel, energy_eval)
+    if not math.isfinite(conductance):
+        raise ValueError("band-edge conductance is not finite")
+    return conductance, (lower, upper)
+
+
 def read_json(path: Path) -> dict[str, Any]:
     if not path.is_file():
         return {}
@@ -613,11 +739,19 @@ def build_replica_result(
     transport_temperature_k: float | None,
     reduction: str,
     expected_replicas_override: int | None,
+    semi: bool = False,
+    energy_window: tuple[float, float] | None = None,
+    transport_edges: tuple[float, float] | None = None,
+    configured_temperature_k: float | None = None,
 ) -> ReplicaResult:
     config = read_json(replica_dir / "workflow_config.json")
     path_meta = parse_path_metadata(configuration_dir)
 
-    effective_transport_temperature_k = transport_temperature_k
+    # 半导体带边积分必须使用 task 所定义的当前温度；常规模式则
+    # 保留原有 --transport-temperature-k 的全局覆盖语义。
+    effective_transport_temperature_k = (
+        configured_temperature_k if semi else transport_temperature_k
+    )
     if effective_transport_temperature_k is None:
         effective_transport_temperature_k = optional_float(
             config.get("temperature")
@@ -643,6 +777,27 @@ def build_replica_result(
         transport_temperature_k=effective_transport_temperature_k,
         reduction=reduction,
     )
+
+    ec = ev = gap = None
+    gc = gv = ln_gc = ln_gv = None
+    window_text = conduction_text = valence_text = None
+    if semi:
+        if energy_window is None or transport_edges is None:
+            raise ValueError("semi conductance requires energy_window and common transport edges")
+        ec, ev = transport_edges
+        gap = ec - ev
+        energy, transmission, _, _ = load_transmission_curve(result_file, reduction)
+        gc, conduction_window = edge_window_conductance(
+            energy, transmission, ec, energy_window, effective_transport_temperature_k
+        )
+        gv, valence_window = edge_window_conductance(
+            energy, transmission, ev, energy_window, effective_transport_temperature_k
+        )
+        ln_gc = math.log(gc) if gc > 0.0 else None
+        ln_gv = math.log(gv) if gv > 0.0 else None
+        window_text = f"[{energy_window[0]:g}, {energy_window[1]:g}]"
+        conduction_text = f"[{conduction_window[0]:g}, {conduction_window[1]:g}]"
+        valence_text = f"[{valence_window[0]:g}, {valence_window[1]:g}]"
 
     conductance_method = (
         "zero-temperature interpolation"
@@ -708,6 +863,17 @@ def build_replica_result(
         n_energy_points=n_energy,
         replica_dir=str(replica_dir),
         result_file=str(result_file),
+        semi=semi,
+        Ec_transport_eV=ec,
+        Ev_transport_eV=ev,
+        transport_gap_eV=gap,
+        energy_window_eV=window_text,
+        conduction_window_eV=conduction_text,
+        valence_window_eV=valence_text,
+        Gc_G0=gc,
+        Gv_G0=gv,
+        ln_Gc_G0=ln_gc,
+        ln_Gv_G0=ln_gv,
     )
 
 
@@ -793,6 +959,36 @@ def summarize_configuration(
     inferred_missing = max(0, expected - len(results)) if expected is not None else 0
     total_problems = max(n_problems, inferred_missing)
 
+    semi = first.semi
+    semi_values: dict[str, float | None] = {}
+    if semi:
+        def channel_stats(channel: str) -> tuple[float, float, float | None, float | None]:
+            channel_values = np.asarray([getattr(item, channel) for item in results], dtype=float)
+            channel_positive = channel_values[channel_values > 0.0]
+            mean_ln = float(np.mean(np.log(channel_positive))) if channel_positive.size else None
+            typical = float(np.exp(mean_ln)) if mean_ln is not None else None
+            return (
+                float(np.mean(channel_values)),
+                float(np.std(channel_values, ddof=1)) if channel_values.size > 1 else 0.0,
+                mean_ln,
+                typical,
+            )
+        mean_gc, std_gc, mean_ln_gc, typical_gc = channel_stats("Gc_G0")
+        mean_gv, std_gv, mean_ln_gv, typical_gv = channel_stats("Gv_G0")
+        semi_values = {
+            "semi": True,
+            "Ec_transport_eV": first.Ec_transport_eV,
+            "Ev_transport_eV": first.Ev_transport_eV,
+            "transport_gap_eV": first.transport_gap_eV,
+            "energy_window_eV": first.energy_window_eV,
+            "conduction_window_eV": first.conduction_window_eV,
+            "valence_window_eV": first.valence_window_eV,
+            "mean_Gc_G0": mean_gc, "std_Gc_G0": std_gc,
+            "mean_Gv_G0": mean_gv, "std_Gv_G0": std_gv,
+            "mean_ln_Gc_G0": mean_ln_gc, "typical_Gc_G0": typical_gc,
+            "mean_ln_Gv_G0": mean_ln_gv, "typical_Gv_G0": typical_gv,
+        }
+
     return ConfigurationSummary(
         configuration_dir=str(configuration_dir),
         configuration_name=configuration_dir.name,
@@ -814,6 +1010,7 @@ def summarize_configuration(
         mean_ln_G0=mean_log,
         std_ln_G0=std_log,
         geometric_mean_G0=geometric_mean,
+        **semi_values,
     )
 
 
@@ -853,14 +1050,40 @@ def build_configuration_log(
         "Replicas",
     ]
 
+    if summary.semi:
+        lines[lines.index("") + 1:lines.index("") + 1] = [
+            "Semiconductor transport-edge mode",
+            f"Ec_transport_eV: {summary.Ec_transport_eV}",
+            f"Ev_transport_eV: {summary.Ev_transport_eV}",
+            f"transport_gap_eV: {summary.transport_gap_eV}",
+            f"energy_window_eV: {summary.energy_window_eV}",
+            f"conduction integration range_eV: {summary.conduction_window_eV}",
+            f"valence integration range_eV: {summary.valence_window_eV}",
+        ]
     for result in sorted(results, key=lambda item: item.replica):
-        lines.append(
+        row = (
             f"replica_{result.replica:03d}  "
             f"seed={result.lammps_seed}  "
             f"G/G0={result.conductance_G0:.16g}  "
             f"ln={result.ln_conductance_G0}  "
             f"file={result.result_file}"
         )
+        if summary.semi:
+            row += f"  Gc/G0={result.Gc_G0:.16g}  Gv/G0={result.Gv_G0:.16g}"
+        lines.append(row)
+
+    if summary.semi:
+        lines.extend([
+            "", "Band-edge summary (G/G0)",
+            f"Gc arithmetic mean: {summary.mean_Gc_G0:.16g}",
+            f"Gc std:             {summary.std_Gc_G0:.16g}",
+            f"<ln Gc>:            {summary.mean_ln_Gc_G0}",
+            f"Gc typical:         {summary.typical_Gc_G0}",
+            f"Gv arithmetic mean: {summary.mean_Gv_G0:.16g}",
+            f"Gv std:             {summary.std_Gv_G0:.16g}",
+            f"<ln Gv>:            {summary.mean_ln_Gv_G0}",
+            f"Gv typical:         {summary.typical_Gv_G0}",
+        ])
 
     if problems:
         lines.extend(["", "Problems"])
@@ -869,8 +1092,9 @@ def build_configuration_log(
     return "\n".join(lines) + "\n"
 
 
-def replica_fieldnames() -> list[str]:
-    return list(ReplicaResult.__dataclass_fields__.keys())
+def replica_fieldnames(semi: bool) -> list[str]:
+    fields = list(ReplicaResult.__dataclass_fields__.keys())
+    return fields if semi else fields[:fields.index("semi")]
 
 
 def parse_args() -> argparse.Namespace:
@@ -893,6 +1117,16 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Collect only this configuration directory. May be supplied "
             "multiple times. If omitted, scan every replica_XXX beneath root."
+        ),
+    )
+    parser.add_argument(
+        "--configuration-settings",
+        action="append",
+        default=[],
+        metavar="JSON",
+        help=(
+            "Per-configuration JSON object containing configuration_dir, semi, "
+            "energy_window, and temperature. May be supplied multiple times."
         ),
     )
     parser.add_argument(
@@ -948,7 +1182,6 @@ def parse_args() -> argparse.Namespace:
     )
     return parser.parse_args()
 
-
 def main() -> int:
     args = parse_args()
     root = Path(args.root).expanduser().resolve()
@@ -964,6 +1197,26 @@ def main() -> int:
         return 1
     if args.expected_replicas is not None and args.expected_replicas < 1:
         error("--expected-replicas must be greater than zero")
+        return 1
+    settings_by_dir: dict[str, dict[str, Any]] = {}
+    try:
+        for raw in args.configuration_settings:
+            setting = json.loads(raw)
+            if not isinstance(setting, dict) or "configuration_dir" not in setting:
+                raise ValueError("must be a JSON object with configuration_dir")
+            path_key = str(Path(setting["configuration_dir"]).expanduser().resolve())
+            if path_key in settings_by_dir:
+                raise ValueError(f"duplicate configuration settings for {path_key}")
+            semi = bool(setting.get("semi", False))
+            window = validate_energy_window(setting.get("energy_window")) if semi else None
+            temperature = optional_float(setting.get("temperature"))
+            if temperature is None or temperature < 0.0:
+                raise ValueError("configuration setting temperature must be non-negative")
+            settings_by_dir[path_key] = {
+                "semi": semi, "energy_window": window, "temperature": temperature,
+            }
+    except (json.JSONDecodeError, TypeError, ValueError) as exc:
+        error(f"invalid --configuration-settings: {exc}")
         return 1
 
     if args.configuration_dir:
@@ -1011,6 +1264,85 @@ def main() -> int:
 
         results: list[ReplicaResult] = []
         problems: list[str] = []
+        settings = settings_by_dir.get(str(configuration_dir.resolve()), {})
+        first_config = read_json(replica_dirs[0] / "workflow_config.json")
+        semi = bool(settings.get("semi", first_config.get("semi", False)))
+        energy_window = settings.get("energy_window")
+        if semi and energy_window is None:
+            try:
+                energy_window = validate_energy_window(first_config.get("energy_window"))
+            except ValueError as exc:
+                message = f"{configuration_dir}: invalid semiconductor configuration: {exc}"
+                error(message)
+                all_problems.append(message)
+                continue
+        configured_temperature_k = settings.get("temperature")
+        transport_edges = None
+
+        if semi:
+            try:
+                curves = []
+                for replica_dir in replica_dirs:
+                    config = read_json(replica_dir / "workflow_config.json")
+                    result_file = choose_result_file(replica_dir, config)
+                    energy, transmission, _, _ = load_transmission_curve(
+                        result_file, args.component_reduction
+                    )
+                    replica_temperature_k = configured_temperature_k
+                    if replica_temperature_k is None:
+                        replica_temperature_k = optional_float(config.get("temperature"))
+                    if replica_temperature_k is None:
+                        replica_temperature_k = parse_path_metadata(
+                            configuration_dir
+                        )["temperature_K"]
+                    if replica_temperature_k is None:
+                        replica_temperature_k = 300.0
+                    if replica_temperature_k > 0.0:
+                        max_step = float(np.max(np.diff(energy)))
+                        kbt = KB_EV_PER_K * replica_temperature_k
+                        ratio = max_step / kbt
+                        if ratio > 1.0:
+                            warn(
+                                f"{replica_dir}: strong grid-resolution warning: "
+                                f"max uni_grid step={max_step:g} eV is "
+                                f"{ratio:.2f} k_B T (k_B T={kbt:g} eV); "
+                                "the grid is wider than k_B T, so band-edge "
+                                "location and Fermi-window integration may be unreliable"
+                            )
+                        elif ratio > 0.5:
+                            warn(
+                                f"{replica_dir}: grid-resolution warning: "
+                                f"max uni_grid step={max_step:g} eV is "
+                                f"{ratio:.2f} k_B T (k_B T={kbt:g} eV); "
+                                "Fermi-window integration may not be stable"
+                            )
+                    curves.append((energy, transmission))
+                transport_edges = find_transport_edges(curves)
+                ec, ev = transport_edges
+                assert energy_window is not None
+                conduction_lower = ec + energy_window[0]
+                valence_upper = ev + energy_window[1]
+                if conduction_lower <= ev or valence_upper >= ec:
+                    warn(
+                        "band-edge integration windows overlap the opposite "
+                        "transport band: "
+                        f"Ec={ec:g} eV, Ev={ev:g} eV, "
+                        f"energy_window=[{energy_window[0]:g}, "
+                        f"{energy_window[1]:g}] eV; "
+                        f"conduction lower bound={conduction_lower:g} eV, "
+                        f"valence upper bound={valence_upper:g} eV. "
+                        "Continuing with the configured temperature-dependent "
+                        "integration windows."
+                    )
+                info(
+                    f"{configuration_dir}: common transport edges "
+                    f"Ec={transport_edges[0]:g} eV, Ev={transport_edges[1]:g} eV"
+                )
+            except Exception as exc:
+                message = f"{configuration_dir}: {type(exc).__name__}: {exc}"
+                error(message)
+                all_problems.append(message)
+                continue
 
         for replica_dir in replica_dirs:
             try:
@@ -1021,6 +1353,10 @@ def main() -> int:
                     transport_temperature_k=args.transport_temperature_k,
                     reduction=args.component_reduction,
                     expected_replicas_override=args.expected_replicas,
+                    semi=semi,
+                    energy_window=energy_window,
+                    transport_edges=transport_edges,
+                    configured_temperature_k=configured_temperature_k,
                 )
             except Exception as exc:
                 message = (
@@ -1054,7 +1390,7 @@ def main() -> int:
         atomic_write_csv(
             configuration_dir / args.per_config_csv,
             [asdict(result) for result in results],
-            replica_fieldnames(),
+            replica_fieldnames(semi),
         )
         atomic_write_text(
             configuration_dir / args.per_config_log,

@@ -2,6 +2,7 @@
 import os
 import re
 import json
+import math
 import shutil
 import argparse
 from pathlib import Path
@@ -112,7 +113,16 @@ def update_run_py_for_leaf(leaf_dir, model_filename, m, n):
     )
 
 
-def update_input_json_for_leaf(leaf_dir, model_filename, chirality, r_max=6.5, n_lead_pl=2, l_def=5):
+def update_input_json_for_leaf(
+    leaf_dir,
+    model_filename,
+    chirality,
+    temperature,
+    espacing,
+    r_max=6.5,
+    n_lead_pl=2,
+    l_def=5,
+):
     leaf_dir = Path(leaf_dir).resolve()
 
     fdf_path = leaf_dir / "STRUCT.fdf"
@@ -151,6 +161,9 @@ def update_input_json_for_leaf(leaf_dir, model_filename, chirality, r_max=6.5, n
 
     stru_options = input_data["task_options"]["stru_options"]
 
+    input_data["task_options"]["ele_T"] = temperature
+    input_data["task_options"]["espacing"] = espacing
+
     stru_options["lead_L"]["id"] = lead_L_id
     stru_options["device"]["id"] = device_id
     stru_options["lead_R"]["id"] = lead_R_id
@@ -173,6 +186,8 @@ def update_input_json_for_leaf(leaf_dir, model_filename, chirality, r_max=6.5, n
         f"  lead_L.id = {lead_L_id}\n"
         f"  device.id = {device_id}\n"
         f"  lead_R.id = {lead_R_id}"
+        f"\n  ele_T = {temperature} K"
+        f"\n  espacing = {espacing} eV"
     )
 
 def copy_or_link_file(src: Path, dst: Path, overwrite: bool = True):
@@ -245,6 +260,8 @@ def copy_inputs_to_leaf_dirs(
     r_max=6.5,
     n_lead_pl=2,
     l_def=5,
+    temperature=300,
+    espacing=0.1,
     overwrite=True,
 ):
     input_dir = Path(input_dir).resolve()
@@ -297,6 +314,8 @@ def copy_inputs_to_leaf_dirs(
                 leaf_dir=current_dir,
                 model_filename=model_filename,
                 chirality=chirality,
+                temperature=temperature,
+                espacing=espacing,
                 r_max=r_max,
                 n_lead_pl=n_lead_pl,
                 l_def=l_def,
@@ -409,6 +428,16 @@ def main():
     L.info(f"l_def     = {l_def}")
     L.info(f"chirality = {chirality}")
     L.info(f"r_max     = {r_max}")
+    temperature = float(config.get("temperature", 300))
+    if not math.isfinite(temperature) or temperature < 0:
+        raise ValueError(f"temperature must be a finite non-negative value, got {temperature}")
+    L.info(f"temperature = {temperature} K")
+    espacing = float(config.get("espacing", 0.1))
+    if not math.isfinite(espacing) or espacing <= 0.0:
+        raise ValueError(
+            f"espacing must be a finite positive value in eV, got {espacing}"
+        )
+    L.info(f"espacing = {espacing} eV")
 
     n_failed = copy_inputs_to_leaf_dirs(
         input_dir=args.input_dir,
@@ -419,7 +448,9 @@ def main():
         r_max=r_max,
         n_lead_pl=args.n_lead_pl,
         overwrite=(not args.no_overwrite),
-        l_def=l_def
+        l_def=l_def,
+        temperature=temperature,
+        espacing=espacing,
     )
 
     if n_failed > 0:

@@ -4,6 +4,7 @@ import argparse
 import copy
 import importlib
 import json
+import math
 import subprocess
 import sys
 import tempfile
@@ -19,6 +20,11 @@ CHIRAL_CONFIGS = [
         "l_def": 8,
         "N_defects": 2,
         "structures": ["5775"],
+        # 半导体带边电导：省略时保持原有 E_F=0 的电导计算。
+        "semi": True,
+        "energy_window": [-0.25, 0.25],
+        # DPNEGF 透射谱能量网格步长（eV）。
+        "espacing": 0.1,
     }
 ]
 
@@ -124,6 +130,32 @@ def build_tasks(
     task_index = 0
 
     for cfg in CHIRAL_CONFIGS:
+        semi = bool(cfg.get("semi", False))
+        try:
+            espacing = float(cfg.get("espacing", 0.1))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("espacing must be a positive numeric value in eV") from exc
+        if not math.isfinite(espacing) or espacing <= 0.0:
+            raise ValueError("espacing must be a finite positive value in eV")
+        energy_window = None
+        if semi:
+            raw_window = cfg.get("energy_window")
+            if not isinstance(raw_window, (list, tuple)) or len(raw_window) != 2:
+                raise ValueError(
+                    "semi=True requires energy_window=[relative_emin, relative_emax]"
+                )
+            try:
+                energy_window = [float(raw_window[0]), float(raw_window[1])]
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    "semi=True energy_window must contain two numeric values"
+                ) from exc
+            if not all(math.isfinite(value) for value in energy_window):
+                raise ValueError("semi=True energy_window values must be finite")
+            if energy_window[0] >= energy_window[1]:
+                raise ValueError(
+                    "semi=True requires energy_window[0] < energy_window[1]"
+                )
         for temperature in TEMPERATURES:
             physical_index += 1
 
@@ -217,6 +249,9 @@ def build_tasks(
                     "length": int(length),
                     "seed": structure_seed,
                     "lammps_seed": lammps_seed,
+                    "semi": semi,
+                    "energy_window": energy_window,
+                    "espacing": espacing,
                 })
 
     return tasks
@@ -249,6 +284,9 @@ def make_task_config(task):
         "density_A_inv": task["density"],
         "configuration_root": str(task["configuration_root"]),
         "md_sampling": {"n_samples": 1},
+        "semi": task["semi"],
+        "energy_window": task["energy_window"],
+        "espacing": task["espacing"],
     })
 
     return config
@@ -822,6 +860,34 @@ def main():
         for configuration_root in configuration_roots:
             collect_cmd.extend(
                 ["--configuration-dir", str(configuration_root)]
+            )
+            matching_tasks = [
+                task for task in tasks
+                if Path(task["configuration_root"]).resolve() == configuration_root
+            ]
+            first_task = matching_tasks[0]
+            if any(
+                task["semi"] != first_task["semi"]
+                or task["energy_window"] != first_task["energy_window"]
+                or task["temperature"] != first_task["temperature"]
+                for task in matching_tasks
+            ):
+                raise ValueError(
+                    f"configuration {configuration_root} has inconsistent "
+                    "semi/energy_window/temperature task settings"
+                )
+            collect_cmd.extend(
+                [
+                    "--configuration-settings",
+                    json.dumps(
+                        {
+                            "configuration_dir": str(configuration_root),
+                            "semi": first_task["semi"],
+                            "energy_window": first_task["energy_window"],
+                            "temperature": first_task["temperature"],
+                        }
+                    ),
+                ]
             )
 
         collect_result = subprocess.run(
