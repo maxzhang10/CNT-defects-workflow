@@ -23,7 +23,10 @@ Only inside each configuration directory:
 No cross-configuration CSV files are written at root.
 Legacy conductance_all.csv / conductance_summary.csv files are removed.
 
-The dimensionless zero-temperature conductance is G/G0 = T(E_F).
+The dimensionless linear-response conductance is evaluated from the
+Landauer formula:
+    G/G0 = integral T(E) [-df(E; E_F, T)/dE] dE.
+At zero transport temperature this reduces to G/G0 = T(E_F).
 """
 
 from __future__ import annotations
@@ -837,7 +840,7 @@ def build_configuration_log(
         f"valid replicas: {summary.valid_replicas}",
         f"missing/failed replicas: {summary.missing_or_failed_replicas}",
         "",
-        "Summary (G/G0 = T(E_F))",
+        "Summary (G/G0 = integral T(E) [-df/dE] dE; at T=0, G/G0 = T(E_F))",
         f"mean:             {summary.mean_G0:.16g}",
         f"std:              {summary.std_G0:.16g}",
         f"median:           {summary.median_G0:.16g}",
@@ -873,8 +876,9 @@ def replica_fieldnames() -> list[str]:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Collect T(E_F) across replica_XXX directories and write "
-            "only per-configuration CSV and log files."
+            "Collect linear-response conductance from replica_XXX directories "
+            "using the Landauer Fermi-window integral (or T(E_F) at T=0), "
+            "then write only per-configuration CSV and log files."
         )
     )
     parser.add_argument(
