@@ -119,6 +119,7 @@ def update_input_json_for_leaf(
     chirality,
     temperature,
     espacing,
+    negf_energy_window,
     r_max=6.5,
     n_lead_pl=2,
     l_def=5,
@@ -163,6 +164,8 @@ def update_input_json_for_leaf(
 
     input_data["task_options"]["ele_T"] = temperature
     input_data["task_options"]["espacing"] = espacing
+    input_data["task_options"]["emin"] = negf_energy_window[0]
+    input_data["task_options"]["emax"] = negf_energy_window[1]
 
     stru_options["lead_L"]["id"] = lead_L_id
     stru_options["device"]["id"] = device_id
@@ -188,6 +191,7 @@ def update_input_json_for_leaf(
         f"  lead_R.id = {lead_R_id}"
         f"\n  ele_T = {temperature} K"
         f"\n  espacing = {espacing} eV"
+        f"\n  energy range = [{negf_energy_window[0]}, {negf_energy_window[1]}] eV"
     )
 
 def copy_or_link_file(src: Path, dst: Path, overwrite: bool = True):
@@ -262,6 +266,7 @@ def copy_inputs_to_leaf_dirs(
     l_def=5,
     temperature=300,
     espacing=0.1,
+    negf_energy_window=(-0.5, 0.5),
     overwrite=True,
 ):
     input_dir = Path(input_dir).resolve()
@@ -316,6 +321,7 @@ def copy_inputs_to_leaf_dirs(
                 chirality=chirality,
                 temperature=temperature,
                 espacing=espacing,
+                negf_energy_window=negf_energy_window,
                 r_max=r_max,
                 n_lead_pl=n_lead_pl,
                 l_def=l_def,
@@ -438,6 +444,22 @@ def main():
             f"espacing must be a finite positive value in eV, got {espacing}"
         )
     L.info(f"espacing = {espacing} eV")
+    raw_negf_window = config.get("negf_energy_window", [-0.5, 0.5])
+    if not isinstance(raw_negf_window, (list, tuple)) or len(raw_negf_window) != 2:
+        raise ValueError("negf_energy_window must be [emin, emax] in eV")
+    try:
+        negf_energy_window = (float(raw_negf_window[0]), float(raw_negf_window[1]))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("negf_energy_window must contain two numeric values") from exc
+    if (
+        not all(math.isfinite(value) for value in negf_energy_window)
+        or negf_energy_window[0] >= negf_energy_window[1]
+    ):
+        raise ValueError("negf_energy_window requires finite emin < emax")
+    L.info(
+        "negf_energy_window = "
+        f"[{negf_energy_window[0]}, {negf_energy_window[1]}] eV"
+    )
 
     n_failed = copy_inputs_to_leaf_dirs(
         input_dir=args.input_dir,
@@ -451,6 +473,7 @@ def main():
         l_def=l_def,
         temperature=temperature,
         espacing=espacing,
+        negf_energy_window=negf_energy_window,
     )
 
     if n_failed > 0:

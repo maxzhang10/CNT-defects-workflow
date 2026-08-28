@@ -65,6 +65,11 @@ TEMPLATE = {
     "md_sampling": {
         "n_samples": 1,
     },
+    # DPNEGF 透射谱的计算范围 [emin, emax]（eV）。不要与旧 semi
+    # 后处理使用的 energy_window 混淆。
+    "negf_energy_window": [-0.5, 0.5],
+    # False 保持既有行为：DPNEGF 成功后清理 output/self_energy。
+    "save_self_energy": False,
 }
 
 
@@ -160,6 +165,30 @@ def build_tasks(
                 "fermi_difference_threshold": threshold,
             }
         semi = bool(cfg.get("semi", False))
+        raw_negf_window = cfg.get(
+            "negf_energy_window", TEMPLATE["negf_energy_window"]
+        )
+        if (
+            not isinstance(raw_negf_window, (list, tuple))
+            or len(raw_negf_window) != 2
+        ):
+            raise ValueError("negf_energy_window must be [emin, emax] in eV")
+        try:
+            negf_energy_window = [
+                float(raw_negf_window[0]), float(raw_negf_window[1])
+            ]
+        except (TypeError, ValueError) as exc:
+            raise ValueError("negf_energy_window must contain two numeric values") from exc
+        if (
+            not all(math.isfinite(value) for value in negf_energy_window)
+            or negf_energy_window[0] >= negf_energy_window[1]
+        ):
+            raise ValueError("negf_energy_window requires finite emin < emax")
+        save_self_energy = cfg.get(
+            "save_self_energy", TEMPLATE["save_self_energy"]
+        )
+        if not isinstance(save_self_energy, bool):
+            raise ValueError("save_self_energy must be a boolean")
         try:
             espacing = float(cfg.get("espacing", 0.1))
         except (TypeError, ValueError) as exc:
@@ -281,6 +310,8 @@ def build_tasks(
                     "semi": semi,
                     "energy_window": energy_window,
                     "espacing": espacing,
+                    "negf_energy_window": negf_energy_window,
+                    "save_self_energy": save_self_energy,
                     "conductance_mode": conductance_mode,
                     **band_edge_settings,
                 })
@@ -318,6 +349,8 @@ def make_task_config(task):
         "semi": task["semi"],
         "energy_window": task["energy_window"],
         "espacing": task["espacing"],
+        "negf_energy_window": task["negf_energy_window"],
+        "save_self_energy": task["save_self_energy"],
         "conductance_mode": task["conductance_mode"],
         "Ec_eV": task.get("Ec_eV"),
         "Ev_eV": task.get("Ev_eV"),

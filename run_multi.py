@@ -239,11 +239,11 @@ def find_dpnegf_workdirs_from_structures(structure_dirs):
 
     return sorted(set(workdirs))
 
-def clean_dpnegf_output_cache(root):
+def clean_dpnegf_output_cache(root, save_self_energy=False):
     """
     在 root 目录下递归寻找所有 */output/ 目录，并清理：
 
-    1. output/self_energy 目录
+    1. output/self_energy 目录（save_self_energy=True 时保留）
     2. output/HS_device.h5
     3. output/HS_lead_L.h5
     4. output/HS_lead_R.h5
@@ -269,9 +269,9 @@ def clean_dpnegf_output_cache(root):
         if not output_dir.is_dir():
             continue
 
-        # 1. 删除 self_energy 目录
+        # 1. 删除 self_energy 目录（如配置要求保存则跳过）
         self_energy_dir = output_dir / "self_energy"
-        if self_energy_dir.is_dir():
+        if self_energy_dir.is_dir() and not save_self_energy:
             L.clean(f"rm -r {self_energy_dir}")
             shutil.rmtree(self_energy_dir)
             removed_dirs += 1
@@ -284,7 +284,23 @@ def clean_dpnegf_output_cache(root):
                 fpath.unlink()
                 removed_files += 1
 
-    L.clean(f"已清理 self_energy 目录: {removed_dirs} 个，HS 文件: {removed_files} 个")
+    if save_self_energy:
+        L.clean(f"保留 self_energy 目录，已清理 HS 文件: {removed_files} 个")
+    else:
+        L.clean(f"已清理 self_energy 目录: {removed_dirs} 个，HS 文件: {removed_files} 个")
+
+
+def remove_lammps_dump_files(lammps_dir: Path) -> int:
+    """Remove .dump trajectories only after dump->FDF conversion succeeded."""
+    removed = 0
+    if not lammps_dir.is_dir():
+        return removed
+    for dump_file in lammps_dir.rglob("*.dump"):
+        if dump_file.is_file():
+            dump_file.unlink()
+            removed += 1
+            L.clean(f"rm {dump_file}")
+    return removed
 
 def main():
     parser = argparse.ArgumentParser(
@@ -552,6 +568,10 @@ def main():
             "1",
         ]
         run_cmd(cmd, dry_run=args.dry_run, env=env)
+        # dump2fdf 成功才删除轨迹，避免转换失败时丢失唯一的 MD 结果。
+        if not args.dry_run and lammps_dir.is_dir():
+            removed = remove_lammps_dump_files(lammps_dir)
+            L.clean(f"LAMMPS dump 清理完成: {removed} 个 ({lammps_dir})")
 
     # ============================================================
     # 3. 对每个结构的 dpnegf 目录做 fdf -> xyz
@@ -677,7 +697,13 @@ def main():
         # 且并行化后会误删其它 workdir 尚在使用的 self_energy / HS_*.h5。
         # slurm 屏障保证此刻所有作业都已结束，清理是安全的。
         if not args.dry_run:
-            clean_dpnegf_output_cache(root)
+            save_self_energy = config.get("save_self_energy", False)
+            if not isinstance(save_self_energy, bool):
+                raise ValueError("save_self_energy must be a boolean")
+            clean_dpnegf_output_cache(
+                root,
+                save_self_energy=save_self_energy,
+            )
 
         # ============================================================
         # 6. 收集本次 MD 对应的 DPNEGF 电导日志
