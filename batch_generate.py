@@ -23,6 +23,12 @@ CHIRAL_CONFIGS = [
         # 半导体带边电导：省略时保持原有 E_F=0 的电导计算。
         "semi": True,
         "energy_window": [-0.25, 0.25],
+        # 有限偏压带边电导示例：启用时由外部 Ec/Ev 定义两个计算中心。
+        # "conductance_mode": "band_edge_bias",
+        # "Ec_eV": 0.32,
+        # "Ev_eV": -0.28,
+        # "bias_eV": 0.01,
+        # "fermi_difference_threshold": 1e-6,
         # DPNEGF 透射谱能量网格步长（eV）。
         "espacing": 0.1,
     }
@@ -130,6 +136,29 @@ def build_tasks(
     task_index = 0
 
     for cfg in CHIRAL_CONFIGS:
+        conductance_mode = cfg.get("conductance_mode", "fermi")
+        if conductance_mode not in {"fermi", "band_edge_bias"}:
+            raise ValueError("conductance_mode must be 'fermi' or 'band_edge_bias'")
+        band_edge_settings = {}
+        if conductance_mode == "band_edge_bias":
+            try:
+                ec = float(cfg["Ec_eV"])
+                ev = float(cfg["Ev_eV"])
+                bias = float(cfg["bias_eV"])
+                threshold = float(cfg["fermi_difference_threshold"])
+            except (KeyError, TypeError, ValueError) as exc:
+                raise ValueError(
+                    "band_edge_bias requires numeric Ec_eV, Ev_eV, bias_eV, "
+                    "and fermi_difference_threshold"
+                ) from exc
+            if not all(math.isfinite(value) for value in (ec, ev, bias, threshold)):
+                raise ValueError("band_edge_bias settings must be finite")
+            if ev >= ec or bias <= 0.0 or not 0.0 < threshold < 1.0:
+                raise ValueError("band_edge_bias requires Ev_eV < Ec_eV, bias_eV > 0, and 0 < threshold < 1")
+            band_edge_settings = {
+                "Ec_eV": ec, "Ev_eV": ev, "bias_eV": bias,
+                "fermi_difference_threshold": threshold,
+            }
         semi = bool(cfg.get("semi", False))
         try:
             espacing = float(cfg.get("espacing", 0.1))
@@ -252,6 +281,8 @@ def build_tasks(
                     "semi": semi,
                     "energy_window": energy_window,
                     "espacing": espacing,
+                    "conductance_mode": conductance_mode,
+                    **band_edge_settings,
                 })
 
     return tasks
@@ -287,6 +318,11 @@ def make_task_config(task):
         "semi": task["semi"],
         "energy_window": task["energy_window"],
         "espacing": task["espacing"],
+        "conductance_mode": task["conductance_mode"],
+        "Ec_eV": task.get("Ec_eV"),
+        "Ev_eV": task.get("Ev_eV"),
+        "bias_eV": task.get("bias_eV"),
+        "fermi_difference_threshold": task.get("fermi_difference_threshold"),
     })
 
     return config
@@ -869,6 +905,7 @@ def main():
             if any(
                 task["semi"] != first_task["semi"]
                 or task["energy_window"] != first_task["energy_window"]
+                or task["conductance_mode"] != first_task["conductance_mode"]
                 or task["temperature"] != first_task["temperature"]
                 for task in matching_tasks
             ):
@@ -885,6 +922,11 @@ def main():
                             "semi": first_task["semi"],
                             "energy_window": first_task["energy_window"],
                             "temperature": first_task["temperature"],
+                            "conductance_mode": first_task["conductance_mode"],
+                            "Ec_eV": first_task.get("Ec_eV"),
+                            "Ev_eV": first_task.get("Ev_eV"),
+                            "bias_eV": first_task.get("bias_eV"),
+                            "fermi_difference_threshold": first_task.get("fermi_difference_threshold"),
                         }
                     ),
                 ]
