@@ -20,9 +20,6 @@ CHIRAL_CONFIGS = [
         "l_def": 8,
         "N_defects": 2,
         "structures": ["5775"],
-        # 半导体带边电导：省略时保持原有 E_F=0 的电导计算。
-        "semi": True,
-        "energy_window": [-0.25, 0.25],
         # 有限偏压带边电导示例：启用时由外部 Ec/Ev 定义两个计算中心。
         # "conductance_mode": "band_edge_bias",
         # "Ec_eV": 0.32,
@@ -65,8 +62,7 @@ TEMPLATE = {
     "md_sampling": {
         "n_samples": 1,
     },
-    # DPNEGF 透射谱的计算范围 [emin, emax]（eV）。不要与旧 semi
-    # 后处理使用的 energy_window 混淆。
+    # DPNEGF 透射谱的计算范围 [emin, emax]（eV）。
     "negf_energy_window": [-0.5, 0.5],
     # False 保持既有行为：DPNEGF 成功后清理 output/self_energy。
     "save_self_energy": False,
@@ -164,7 +160,6 @@ def build_tasks(
                 "Ec_eV": ec, "Ev_eV": ev, "bias_eV": bias,
                 "fermi_difference_threshold": threshold,
             }
-        semi = bool(cfg.get("semi", False))
         raw_negf_window = cfg.get(
             "negf_energy_window", TEMPLATE["negf_energy_window"]
         )
@@ -195,25 +190,6 @@ def build_tasks(
             raise ValueError("espacing must be a positive numeric value in eV") from exc
         if not math.isfinite(espacing) or espacing <= 0.0:
             raise ValueError("espacing must be a finite positive value in eV")
-        energy_window = None
-        if semi:
-            raw_window = cfg.get("energy_window")
-            if not isinstance(raw_window, (list, tuple)) or len(raw_window) != 2:
-                raise ValueError(
-                    "semi=True requires energy_window=[relative_emin, relative_emax]"
-                )
-            try:
-                energy_window = [float(raw_window[0]), float(raw_window[1])]
-            except (TypeError, ValueError) as exc:
-                raise ValueError(
-                    "semi=True energy_window must contain two numeric values"
-                ) from exc
-            if not all(math.isfinite(value) for value in energy_window):
-                raise ValueError("semi=True energy_window values must be finite")
-            if energy_window[0] >= energy_window[1]:
-                raise ValueError(
-                    "semi=True requires energy_window[0] < energy_window[1]"
-                )
         for temperature in TEMPERATURES:
             physical_index += 1
 
@@ -307,8 +283,6 @@ def build_tasks(
                     "length": int(length),
                     "seed": structure_seed,
                     "lammps_seed": lammps_seed,
-                    "semi": semi,
-                    "energy_window": energy_window,
                     "espacing": espacing,
                     "negf_energy_window": negf_energy_window,
                     "save_self_energy": save_self_energy,
@@ -346,8 +320,6 @@ def make_task_config(task):
         "density_A_inv": task["density"],
         "configuration_root": str(task["configuration_root"]),
         "md_sampling": {"n_samples": 1},
-        "semi": task["semi"],
-        "energy_window": task["energy_window"],
         "espacing": task["espacing"],
         "negf_energy_window": task["negf_energy_window"],
         "save_self_energy": task["save_self_energy"],
@@ -936,15 +908,13 @@ def main():
             ]
             first_task = matching_tasks[0]
             if any(
-                task["semi"] != first_task["semi"]
-                or task["energy_window"] != first_task["energy_window"]
-                or task["conductance_mode"] != first_task["conductance_mode"]
+                task["conductance_mode"] != first_task["conductance_mode"]
                 or task["temperature"] != first_task["temperature"]
                 for task in matching_tasks
             ):
                 raise ValueError(
                     f"configuration {configuration_root} has inconsistent "
-                    "semi/energy_window/temperature task settings"
+                    "conductance_mode/temperature task settings"
                 )
             collect_cmd.extend(
                 [
@@ -952,8 +922,6 @@ def main():
                     json.dumps(
                         {
                             "configuration_dir": str(configuration_root),
-                            "semi": first_task["semi"],
-                            "energy_window": first_task["energy_window"],
                             "temperature": first_task["temperature"],
                             "conductance_mode": first_task["conductance_mode"],
                             "Ec_eV": first_task.get("Ec_eV"),
