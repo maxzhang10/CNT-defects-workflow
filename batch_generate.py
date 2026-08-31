@@ -20,6 +20,8 @@ CHIRAL_CONFIGS = [
         "l_def": 8,
         "N_defects": 2,
         "structures": ["5775"],
+        # 普通费米能级电导模式：可省略（默认即为 fermi），
+        # "conductance_mode": "fermi",
         # 有限偏压带边电导示例：启用时由外部 Ec/Ev 定义两个计算中心。
         # "conductance_mode": "band_edge_bias",
         # "Ec_eV": 0.32,
@@ -28,6 +30,9 @@ CHIRAL_CONFIGS = [
         # "fermi_difference_threshold": 1e-6,
         # DPNEGF 透射谱能量网格步长（eV）。
         "espacing": 0.1,
+        # DPNEGF 透射谱能量范围 [emin, emax]（eV）。
+        # 该范围同时适用于 fermi 和 band_edge_bias 电导模式。
+        "negf_energy_window": [-0.5, 0.5],
     }
 ]
 
