@@ -14,11 +14,11 @@ if str(_STAGE_DIR) not in sys.path:
 import logkit as L
 from slurm_utils import wait_for_jobs, check_flags
 
-def run_cmd(cmd, dry_run=False, env=None):
+def run_cmd(cmd, dry_run=False, env=None, cwd=None):
     L.run(" ".join(map(str, cmd)))
     if dry_run:
         return
-    subprocess.run(cmd, check=True, env=env)
+    subprocess.run(cmd, check=True, env=env, cwd=cwd)
 
 
 def collect_job_ids(workdirs):
@@ -155,6 +155,19 @@ def find_structure_dirs(root: Path):
             dirs.append(p)
 
     return sorted(set(dirs))
+
+
+def find_poscar_structure_dirs(root: Path):
+    """Find structure directories containing POSCAR for md_steps=0."""
+    root = root.resolve()
+    if (root / "POSCAR").is_file():
+        return [root]
+    dirs = set()
+    for path in root.rglob("POSCAR"):
+        if path.is_file():
+            # ele_multi_defects_ele.py writes POSCAR under <structure>/lammps.
+            dirs.add(path.parent.parent.resolve() if path.parent.name == "lammps" else path.parent.resolve())
+    return sorted(dirs)
 
 def is_lammps_workdir(p: Path) -> bool:
     """
@@ -411,6 +424,8 @@ def main():
     # MD 步数：dump2fdf 用它作为 --every，保证只抽出最后一帧。
     # 必须与 in.lammps 里 `run <N>` 一致（同由 config.md_steps 驱动）。
     md_steps = int(config.get("md_steps", 40000))
+    if md_steps < 0:
+        raise ValueError("md_steps must be greater than or equal to zero")
 
     # 独立轨迹模式：一次 run_multi.py 对应一条 LAMMPS 轨迹，
     # 后续固定只提取 md_steps 对应的最后一帧。
@@ -488,33 +503,25 @@ def main():
         L.phase(2, 7, "LAMMPS 退火")
         lammps_workdirs = find_lammps_workdirs(root)
 
-        if not lammps_workdirs:
+        if md_steps == 0:
+            L.info("md_steps=0，跳过 LAMMPS 运行，直接使用 POSCAR")
+        elif not lammps_workdirs:
             raise RuntimeError(
                 f"没有找到 LAMMPS 工作目录。请确认 {root} 下存在类似:\n"
                 f"  data/300K/5_5/DV_DV/lammps\n"
                 f"并且其中包含 data.lmp / in.lammps / CH.airebo-m / run.sh"
             )
 
-        L.info(f"找到 LAMMPS 工作目录: {len(lammps_workdirs)} 个")
-        for i, w in enumerate(lammps_workdirs, 1):
-            L.item(i, len(lammps_workdirs), w)
-
-        for workdir in lammps_workdirs:
-            run_cmd(
-                [
-                    py,
-                    str(sub_lammps_script),
-                    str(workdir),
-                    "--scheduler",
-                    args.scheduler,
-                ],
-                dry_run=args.dry_run,
-                env=env,
-            )
+        if md_steps > 0:
+            L.info(f"找到 LAMMPS 工作目录: {len(lammps_workdirs)} 个")
+            for i, w in enumerate(lammps_workdirs, 1):
+                L.item(i, len(lammps_workdirs), w)
+            for workdir in lammps_workdirs:
+                run_cmd([py, str(sub_lammps_script), str(workdir), "--scheduler", args.scheduler], dry_run=args.dry_run, env=env)
 
         # SLURM 屏障：等所有 LAMMPS 作业跑完再进入 dump->fdf（后者依赖 dump 产物）。
         # local 模式下每个 sub_lmps 已阻塞跑完，这里等价于一次性 flag 复核。
-        if args.scheduler == "slurm":
+        if md_steps > 0 and args.scheduler == "slurm":
             barrier_and_check(
                 lammps_workdirs, "lammps",
                 poll_interval=args.poll_interval,
@@ -524,12 +531,16 @@ def main():
     # 1. 查找含 dump 的结构目录
     # ============================================================
     L.phase(3, 7, "dump -> fdf")
-    structure_dirs = find_structure_dirs(root)
+    structure_dirs = find_poscar_structure_dirs(root) if md_steps == 0 else find_structure_dirs(root)
 
     if not structure_dirs:
         raise RuntimeError(
-            f"没有找到结构目录。请确认 {root} 下是否存在 dump / *.dump / *.lammpstrj 文件。\n"
-            f"注意：eledefects.py 通常只生成 lammps 输入文件；如果还没运行 LAMMPS，就不会有 dump。"
+            (
+                f"没有找到结构目录。请确认 {root} 下存在 POSCAR 文件。"
+                if md_steps == 0 else
+                f"没有找到结构目录。请确认 {root} 下是否存在 dump / *.dump / *.lammpstrj 文件。\n"
+                f"注意：eledefects.py 通常只生成 lammps 输入文件；如果还没运行 LAMMPS，就不会有 dump。"
+            )
         )
 
     L.info(f"找到结构目录: {len(structure_dirs)} 个")
@@ -541,6 +552,18 @@ def main():
     # ============================================================
     for struct_dir in structure_dirs:
         outroot = struct_dir / "dpnegf"
+
+        if md_steps == 0:
+            poscar_dir = struct_dir / "lammps" if (struct_dir / "lammps" / "POSCAR").is_file() else struct_dir
+            if not (poscar_dir / "POSCAR").is_file():
+                raise FileNotFoundError(f"md_steps=0 时找不到 POSCAR: {poscar_dir / 'POSCAR'}")
+            if not args.dry_run and shutil.which("sgeom") is None:
+                raise FileNotFoundError("md_steps=0 需要 sgeom 命令，但当前环境中未找到")
+            run_cmd(["sgeom", "POSCAR", "STRUCT.fdf"], dry_run=args.dry_run, cwd=poscar_dir)
+            if not args.dry_run:
+                outroot.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(poscar_dir / "STRUCT.fdf", outroot / "STRUCT.fdf")
+            continue
 
         lammps_dir = struct_dir / "lammps"
 
