@@ -3,6 +3,7 @@ import os
 import re
 import json
 import math
+import copy
 import shutil
 import argparse
 from pathlib import Path
@@ -120,6 +121,7 @@ def update_input_json_for_leaf(
     temperature,
     espacing,
     negf_energy_window,
+    self_energy_cache,
     r_max=6.5,
     n_lead_pl=2,
     l_def=5,
@@ -160,12 +162,14 @@ def update_input_json_for_leaf(
     with open(input_json_path, "r", encoding="utf-8") as f:
         input_data = json.load(f)
 
-    stru_options = input_data["task_options"]["stru_options"]
+    task_options = input_data["task_options"]
+    stru_options = task_options["stru_options"]
 
-    input_data["task_options"]["ele_T"] = temperature
-    input_data["task_options"]["espacing"] = espacing
-    input_data["task_options"]["emin"] = negf_energy_window[0]
-    input_data["task_options"]["emax"] = negf_energy_window[1]
+    task_options["ele_T"] = temperature
+    task_options["espacing"] = espacing
+    task_options["emin"] = negf_energy_window[0]
+    task_options["emax"] = negf_energy_window[1]
+    task_options["self_energy_options"]["cache"] = copy.deepcopy(self_energy_cache)
 
     stru_options["lead_L"]["id"] = lead_L_id
     stru_options["device"]["id"] = device_id
@@ -192,6 +196,7 @@ def update_input_json_for_leaf(
         f"\n  ele_T = {temperature} K"
         f"\n  espacing = {espacing} eV"
         f"\n  energy range = [{negf_energy_window[0]}, {negf_energy_window[1]}] eV"
+        f"\n  self-energy cache = {self_energy_cache}"
     )
 
 def copy_or_link_file(src: Path, dst: Path, overwrite: bool = True):
@@ -267,6 +272,7 @@ def copy_inputs_to_leaf_dirs(
     temperature=300,
     espacing=0.1,
     negf_energy_window=(-0.5, 0.5),
+    self_energy_cache=None,
     overwrite=True,
 ):
     input_dir = Path(input_dir).resolve()
@@ -322,6 +328,7 @@ def copy_inputs_to_leaf_dirs(
                 temperature=temperature,
                 espacing=espacing,
                 negf_energy_window=negf_energy_window,
+                self_energy_cache=self_energy_cache,
                 r_max=r_max,
                 n_lead_pl=n_lead_pl,
                 l_def=l_def,
@@ -460,6 +467,17 @@ def main():
         "negf_energy_window = "
         f"[{negf_energy_window[0]}, {negf_energy_window[1]}] eV"
     )
+    raw_cache = config.get("self_energy_cache")
+    if raw_cache is None:
+        raise ValueError("self_energy_cache must be configured")
+    if not isinstance(raw_cache, dict):
+        raise ValueError("self_energy_cache must be an object with use_saved and save_path")
+    use_saved = raw_cache.get("use_saved")
+    save_path = raw_cache.get("save_path")
+    if not isinstance(use_saved, bool) or not isinstance(save_path, str) or not save_path:
+        raise ValueError("self_energy_cache requires boolean use_saved and non-empty string save_path")
+    self_energy_cache = {"use_saved": use_saved, "save_path": save_path}
+    L.info(f"self_energy_cache = {self_energy_cache}")
 
     n_failed = copy_inputs_to_leaf_dirs(
         input_dir=args.input_dir,
@@ -474,6 +492,7 @@ def main():
         temperature=temperature,
         espacing=espacing,
         negf_energy_window=negf_energy_window,
+        self_energy_cache=self_energy_cache,
     )
 
     if n_failed > 0:

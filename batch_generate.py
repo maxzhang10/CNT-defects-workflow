@@ -56,7 +56,7 @@ TEMPLATE = {
     "chirality": [5, 5],
     "r_max": 6.50,
     "data_root": (
-        "/public5/home/t6s008517/dpnegf/workflow_2/5_5/"
+        "./"
         
     ),
     "structures": ["5775"],
@@ -67,10 +67,17 @@ TEMPLATE = {
     "md_sampling": {
         "n_samples": 1,
     },
+    # DPNEGF 透射谱能量网格步长（eV）。
+    "espacing": 0.1,
     # DPNEGF 透射谱的计算范围 [emin, emax]（eV）。
     "negf_energy_window": [-0.5, 0.5],
     # False 保持既有行为：DPNEGF 成功后清理 output/self_energy。
     "save_self_energy": False,
+    # 覆盖 DPNEGF input.json 的 self_energy_options.cache 配置。
+    "self_energy_cache": {
+        "use_saved": True,
+        "save_path": "./self_energy/",
+    },
 }
 
 
@@ -190,7 +197,7 @@ def build_tasks(
         if not isinstance(save_self_energy, bool):
             raise ValueError("save_self_energy must be a boolean")
         try:
-            espacing = float(cfg.get("espacing", 0.1))
+            espacing = float(cfg.get("espacing", TEMPLATE["espacing"]))
         except (TypeError, ValueError) as exc:
             raise ValueError("espacing must be a positive numeric value in eV") from exc
         if not math.isfinite(espacing) or espacing <= 0.0:

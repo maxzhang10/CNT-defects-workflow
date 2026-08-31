@@ -568,10 +568,6 @@ def main():
             "1",
         ]
         run_cmd(cmd, dry_run=args.dry_run, env=env)
-        # dump2fdf 成功才删除轨迹，避免转换失败时丢失唯一的 MD 结果。
-        if not args.dry_run and lammps_dir.is_dir():
-            removed = remove_lammps_dump_files(lammps_dir)
-            L.clean(f"LAMMPS dump 清理完成: {removed} 个 ({lammps_dir})")
 
     # ============================================================
     # 3. 对每个结构的 dpnegf 目录做 fdf -> xyz
@@ -704,6 +700,13 @@ def main():
                 root,
                 save_self_energy=save_self_energy,
             )
+
+            # 仅在本次发现的全部 DPNEGF 工作目录均成功后才删除对应 MD
+            # 轨迹；任一 DPNEGF 失败会在屏障/本地运行处抛错并跳过这里。
+            for struct_dir in structure_dirs:
+                lammps_dir = struct_dir / "lammps"
+                removed = remove_lammps_dump_files(lammps_dir)
+                L.clean(f"DPNEGF 成功后清理 LAMMPS dump: {removed} 个 ({lammps_dir})")
 
         # ============================================================
         # 6. 收集本次 MD 对应的 DPNEGF 电导日志
