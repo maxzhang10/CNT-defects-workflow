@@ -118,7 +118,6 @@ def update_input_json_for_leaf(
     leaf_dir,
     model_filename,
     chirality,
-    temperature,
     espacing,
     negf_energy_window,
     self_energy_cache,
@@ -165,7 +164,8 @@ def update_input_json_for_leaf(
     task_options = input_data["task_options"]
     stru_options = task_options["stru_options"]
 
-    task_options["ele_T"] = temperature
+    # 保留模板 input.json 中的 ele_T。工作流的 temperature 用于结构/MD，
+    # 不应再隐式覆盖 DPNEGF 电极温度。
     task_options["espacing"] = espacing
     task_options["emin"] = negf_energy_window[0]
     task_options["emax"] = negf_energy_window[1]
@@ -193,7 +193,6 @@ def update_input_json_for_leaf(
         f"  lead_L.id = {lead_L_id}\n"
         f"  device.id = {device_id}\n"
         f"  lead_R.id = {lead_R_id}"
-        f"\n  ele_T = {temperature} K"
         f"\n  espacing = {espacing} eV"
         f"\n  energy range = [{negf_energy_window[0]}, {negf_energy_window[1]}] eV"
         f"\n  self-energy cache = {self_energy_cache}"
@@ -269,7 +268,6 @@ def copy_inputs_to_leaf_dirs(
     r_max=6.5,
     n_lead_pl=2,
     l_def=5,
-    temperature=300,
     espacing=0.1,
     negf_energy_window=(-0.5, 0.5),
     self_energy_cache=None,
@@ -325,7 +323,6 @@ def copy_inputs_to_leaf_dirs(
                 leaf_dir=current_dir,
                 model_filename=model_filename,
                 chirality=chirality,
-                temperature=temperature,
                 espacing=espacing,
                 negf_energy_window=negf_energy_window,
                 self_energy_cache=self_energy_cache,
@@ -441,10 +438,6 @@ def main():
     L.info(f"l_def     = {l_def}")
     L.info(f"chirality = {chirality}")
     L.info(f"r_max     = {r_max}")
-    temperature = float(config.get("temperature", 300))
-    if not math.isfinite(temperature) or temperature < 0:
-        raise ValueError(f"temperature must be a finite non-negative value, got {temperature}")
-    L.info(f"temperature = {temperature} K")
     espacing = float(config.get("espacing", 0.1))
     if not math.isfinite(espacing) or espacing <= 0.0:
         raise ValueError(
@@ -489,7 +482,6 @@ def main():
         n_lead_pl=args.n_lead_pl,
         overwrite=(not args.no_overwrite),
         l_def=l_def,
-        temperature=temperature,
         espacing=espacing,
         negf_energy_window=negf_energy_window,
         self_energy_cache=self_energy_cache,
