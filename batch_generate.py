@@ -22,11 +22,10 @@ CHIRAL_CONFIGS = [
         "structures": ["5775"],
         # 普通费米能级电导模式：可省略（默认即为 fermi），
         # "conductance_mode": "fermi",
-        # 有限偏压带边电导示例：启用时由外部 Ec/Ev 定义两个计算中心。
+        # 带边电导示例：启用时由外部 Ec/Ev 作为化学势定义两个计算中心。
         # "conductance_mode": "band_edge_bias",
         # "Ec_eV": 0.32,
         # "Ev_eV": -0.28,
-        # "bias_eV": 0.01,
         # "fermi_difference_threshold": 1e-6,
         # DPNEGF 透射谱能量网格步长（eV）。
         "espacing": 0.1,
@@ -157,19 +156,18 @@ def build_tasks(
             try:
                 ec = float(cfg["Ec_eV"])
                 ev = float(cfg["Ev_eV"])
-                bias = float(cfg["bias_eV"])
                 threshold = float(cfg["fermi_difference_threshold"])
             except (KeyError, TypeError, ValueError) as exc:
                 raise ValueError(
-                    "band_edge_bias requires numeric Ec_eV, Ev_eV, bias_eV, "
+                    "band_edge_bias requires numeric Ec_eV, Ev_eV, "
                     "and fermi_difference_threshold"
                 ) from exc
-            if not all(math.isfinite(value) for value in (ec, ev, bias, threshold)):
+            if not all(math.isfinite(value) for value in (ec, ev, threshold)):
                 raise ValueError("band_edge_bias settings must be finite")
-            if ev >= ec or bias <= 0.0 or not 0.0 < threshold < 1.0:
-                raise ValueError("band_edge_bias requires Ev_eV < Ec_eV, bias_eV > 0, and 0 < threshold < 1")
+            if ev >= ec or not 0.0 < threshold < 1.0:
+                raise ValueError("band_edge_bias requires Ev_eV < Ec_eV and 0 < fermi_difference_threshold < 1")
             band_edge_settings = {
-                "Ec_eV": ec, "Ev_eV": ev, "bias_eV": bias,
+                "Ec_eV": ec, "Ev_eV": ev,
                 "fermi_difference_threshold": threshold,
             }
         raw_negf_window = cfg.get(
@@ -338,7 +336,6 @@ def make_task_config(task):
         "conductance_mode": task["conductance_mode"],
         "Ec_eV": task.get("Ec_eV"),
         "Ev_eV": task.get("Ev_eV"),
-        "bias_eV": task.get("bias_eV"),
         "fermi_difference_threshold": task.get("fermi_difference_threshold"),
     })
 
@@ -437,6 +434,48 @@ def run_single_task(
     start = time.time()
 
     try:
+        # P0-4：在覆盖 workflow_config.json 之前，先校验目录中已有完成结果
+        # 的 provenance。只有旧结果的 provenance hash 与当前 config hash 完全
+        # 一致才允许复用；不一致或无法确认时 fail-safe 报错，禁止覆盖旧配置
+        # 并禁止复用旧结果。
+        stage_dir = workflow_dir / "stage"
+        if str(stage_dir) not in sys.path:
+            sys.path.insert(0, str(stage_dir))
+        negf_provenance = importlib.import_module("negf_provenance")
+        new_hash = negf_provenance.compute_negf_config_hash(config)
+
+        if run_root.is_dir():
+            mismatches = []
+            checked = 0
+            for done_flag in sorted(run_root.rglob("dpnegf_done.flag")):
+                leaf = done_flag.parent
+                checked += 1
+                result = negf_provenance.result_file_path(leaf)
+                saved_hash = negf_provenance.read_hash_file(
+                    negf_provenance.provenance_hash_path(leaf)
+                )
+                if not result.is_file() or result.stat().st_size == 0:
+                    mismatches.append(
+                        f"{leaf}: done flag 存在但结果文件缺失或为空 ({result})"
+                    )
+                elif saved_hash is None:
+                    mismatches.append(
+                        f"{leaf}: 旧结果缺少 provenance hash，无法确认配置一致性"
+                    )
+                elif saved_hash != new_hash:
+                    mismatches.append(
+                        f"{leaf}: 配置已变更 (provenance={saved_hash[:12]}... "
+                        f"!= 当前={new_hash[:12]}...)"
+                    )
+            if mismatches:
+                details = "\n".join(f"  - {m}" for m in mismatches)
+                raise RuntimeError(
+                    f"检测到 {checked} 个已完成 DPNEGF 结果与新配置不一致，"
+                    f"禁止覆盖旧配置或复用旧结果 (P0-4):\n{details}\n"
+                    "请使用新目录运行，或删除对应 dpnegf_done.flag 与 output/ "
+                    "后显式重新计算。"
+                )
+
         # 提前创建独立根目录。
         # 之后 ele_multi_defects_ele.py 会在其中生成 lammps/。
         run_root.mkdir(
@@ -650,10 +689,10 @@ def main():
     parser.add_argument(
         "--transport-temperature-k",
         type=float,
-        default=TEMPERATURES[0],
+        default=None,
         help=(
-            "汇总电导时使用的输运温度(K)。"
-            "默认使用 TEMPERATURES[0]；可通过该参数显式覆盖。"
+            "汇总电导时使用的输运温度(K)。默认不传，让每个配置使用各自"
+            " workflow_config.json 中的温度；可通过该参数显式全局覆盖。"
         ),
     )
 
@@ -722,6 +761,9 @@ def main():
     cnt_geometry = load_cnt_geometry(
         workflow_dir
     )
+
+    # 导入 NEGF provenance 工具（与 stage 共享同一 config hash 定义）。
+    negf_provenance = importlib.import_module("negf_provenance")
 
     tasks = build_tasks(
         base_root=base_root,
@@ -938,7 +980,6 @@ def main():
                             "conductance_mode": first_task["conductance_mode"],
                             "Ec_eV": first_task.get("Ec_eV"),
                             "Ev_eV": first_task.get("Ev_eV"),
-                            "bias_eV": first_task.get("bias_eV"),
                             "fermi_difference_threshold": first_task.get("fermi_difference_threshold"),
                         }
                     ),

@@ -36,6 +36,14 @@ from slurm_utils import (
     SlurmSubmitLimitError,
     sbatch_submit_with_retry,
 )
+from negf_provenance import (
+    expected_hash_path,
+    provenance_hash_path,
+    provenance_is_valid,
+    read_hash_file,
+    result_file_path,
+    write_hash_file,
+)
 
 
 def check_required_files(workdir: Path):
@@ -252,7 +260,36 @@ def main():
     job_id_file = workdir / "job_id.txt"
 
     if done_flag.exists():
-        L.skip(f"DPNEGF 已完成，跳过: {workdir}")
+        # Fail-safe：done flag 不等于成功。必须同时验证结果文件非空且
+        # provenance hash（output/negf_config_hash.txt）与本次期望的 config hash
+        # （expected_negf_config_hash.txt，由 copy_input_dpnegf.py 写入）完全一致，
+        # 才允许复用旧结果；否则禁止复用，明确报错（P0-4）。
+        expected_hash = read_hash_file(expected_hash_path(workdir))
+        if expected_hash is None:
+            raise RuntimeError(
+                f"无法复用旧结果: 缺少期望 config hash ({expected_hash_path(workdir).name})。\n"
+                f"  workdir = {workdir}\n"
+                f"请删除 {done_flag.name} 显式重新计算，或使用新目录。"
+            )
+        if not provenance_is_valid(workdir, expected_hash):
+            saved_hash = read_hash_file(provenance_hash_path(workdir))
+            result = result_file_path(workdir)
+            if not result.is_file() or result.stat().st_size == 0:
+                detail = f"结果文件缺失或为空: {result}"
+            elif saved_hash is None:
+                detail = f"缺少 provenance hash: {provenance_hash_path(workdir)}"
+            else:
+                detail = (
+                    f"config 不一致: provenance hash={saved_hash} "
+                    f"!= 期望 hash={expected_hash}"
+                )
+            raise RuntimeError(
+                f"禁止复用旧 DPNEGF 结果，配置已变更或 provenance 无法确认:\n"
+                f"  workdir = {workdir}\n"
+                f"  {detail}\n"
+                f"请使用新目录，或删除 {done_flag.name} 与 output/ 后显式重新计算。"
+            )
+        L.skip(f"DPNEGF 已完成且 provenance 一致，跳过: {workdir}")
         return
 
     if failed_flag.exists():

@@ -11,6 +11,11 @@ from fdf2xyz import load_config, get_chirality_from_config
 import cnt_geometry
 
 import logkit as L
+from negf_provenance import (
+    compute_negf_config_hash,
+    expected_hash_path,
+    write_hash_file,
+)
 
 
 def clean_line(line):
@@ -272,6 +277,7 @@ def copy_inputs_to_leaf_dirs(
     negf_energy_window=(-0.5, 0.5),
     self_energy_cache=None,
     overwrite=True,
+    negf_config_hash=None,
 ):
     input_dir = Path(input_dir).resolve()
     root_dir = Path(root_dir).resolve()
@@ -299,6 +305,15 @@ def copy_inputs_to_leaf_dirs(
 
         current_dir = Path(current_dir).resolve()
         n_leaf += 1
+
+        # 无论该 leaf 是否已完成，都把本次运行期望的 config hash 写到 leaf 下，
+        # 作为 provenance 校验的期望值（run.sh 成功时复制为 provenance；
+        # sub_dpnegf.py 据此校验 done 结果是否与当前配置一致）。
+        if negf_config_hash is not None:
+            try:
+                write_hash_file(expected_hash_path(current_dir), negf_config_hash)
+            except OSError as e:
+                L.warn(f"写入 expected hash 失败: {current_dir}: {e}")
 
         # 已完成的 DPNEGF leaf：绝不覆盖其输入文件。
         # 原因：input.json / run.py 的电极 id、model_path 是按 config+几何重算的，
@@ -485,6 +500,7 @@ def main():
         espacing=espacing,
         negf_energy_window=negf_energy_window,
         self_energy_cache=self_energy_cache,
+        negf_config_hash=compute_negf_config_hash(config),
     )
 
     if n_failed > 0:

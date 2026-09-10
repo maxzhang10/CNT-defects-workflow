@@ -28,8 +28,11 @@ Landauer formula:
     G/G0 = integral T(E) [-df(E; E_F, T)/dE] dE.
 At zero transport temperature this reduces to G/G0 = T(E_F).
 
-The optional ``band_edge_bias`` mode evaluates an equivalent finite-bias
-conductance about externally supplied conduction and valence band edges.
+The optional ``band_edge_bias`` mode evaluates the same linear-response
+conductance, but using externally supplied conduction and valence band edges
+as the chemical potential: ``Gc`` at ``Ec`` and ``Gv`` at ``Ev``. This reuses
+the finite-temperature Fermi-window integral (or ``T(E)`` at ``T=0``) and its
+coverage/convergence checks, centred on each band edge.
 """
 
 from __future__ import annotations
@@ -116,12 +119,7 @@ class ReplicaResult:
     Gv_G0: float | None = None
     ln_Gc_G0: float | None = None
     ln_Gv_G0: float | None = None
-    bias_eV: float | None = None
     fermi_difference_threshold: float | None = None
-    conduction_mu_L_eV: float | None = None
-    conduction_mu_R_eV: float | None = None
-    valence_mu_L_eV: float | None = None
-    valence_mu_R_eV: float | None = None
 
 
 @dataclass(frozen=True)
@@ -157,10 +155,11 @@ class ConfigurationSummary:
     mean_Gv_G0: float | None = None
     std_Gv_G0: float | None = None
     mean_ln_Gc_G0: float | None = None
+    std_ln_Gc_G0: float | None = None
     typical_Gc_G0: float | None = None
     mean_ln_Gv_G0: float | None = None
+    std_ln_Gv_G0: float | None = None
     typical_Gv_G0: float | None = None
-    bias_eV: float | None = None
     fermi_difference_threshold: float | None = None
 
 
@@ -468,82 +467,48 @@ def load_transmission_curve(
 def validate_band_edge_bias_settings(
     ec: Any,
     ev: Any,
-    bias: Any,
     threshold: Any,
-) -> tuple[float, float, float, float]:
-    """Validate externally supplied band edges and finite-bias settings."""
-    values = [optional_float(value) for value in (ec, ev, bias, threshold)]
-    if any(value is None for value in values):
-        raise ValueError("Ec_eV, Ev_eV, bias_eV, and fermi_difference_threshold are required")
-    ec_value, ev_value, bias_value, threshold_value = values
-    assert ec_value is not None and ev_value is not None
-    assert bias_value is not None and threshold_value is not None
+) -> tuple[float, float, float]:
+    """Validate externally supplied band edges and Fermi-window threshold."""
+    ec_value = optional_float(ec)
+    ev_value = optional_float(ev)
+    threshold_value = optional_float(threshold)
+    if ec_value is None or ev_value is None or threshold_value is None:
+        raise ValueError("band_edge_bias requires Ec_eV, Ev_eV, and fermi_difference_threshold")
+    if not math.isfinite(ec_value) or not math.isfinite(ev_value) or not math.isfinite(threshold_value):
+        raise ValueError("band_edge_bias requires finite Ec_eV, Ev_eV, and fermi_difference_threshold")
     if ev_value >= ec_value:
         raise ValueError("band edges must satisfy Ev_eV < Ec_eV")
-    if bias_value <= 0.0:
-        raise ValueError("bias_eV must be greater than zero")
     if not 0.0 < threshold_value < 1.0:
         raise ValueError("fermi_difference_threshold must be between zero and one")
-    return ec_value, ev_value, bias_value, threshold_value
+    return ec_value, ev_value, threshold_value
 
 
-def fermi_difference_half_width(
-    bias_eV: float,
-    temperature_k: float,
-    threshold: float,
-) -> float:
-    """Return ΔE for which |fL(Eedge ± ΔE) - fR(...)| equals threshold."""
+def fermi_window_half_width(temperature_k: float, threshold: float) -> float:
+    """Half-width of the finite-temperature Fermi-window kernel about a
+    chemical potential, defined by an externally supplied ``threshold``.
+
+    The band-edge window ``[edge - half_width, edge + half_width]`` is the
+    symmetric interval that captures ``1 - threshold`` of the
+    ``-df/dE = sech^2((E-mu)/(2 kBT))/(4 kBT)`` kernel mass centred on the band
+    edge; ``threshold`` is the uncaptured tail mass outside that interval. The
+    coverage therefore equals ``1 - threshold``, the complement of the coverage
+    gate enforced inside :func:`interpolate_conductance` (which rejects below
+    ``COVERAGE_HARD_MIN``).
+
+    This keeps the explicit band-edge range check consistent with the coverage
+    check the integral itself performs, while leaving the window width under
+    user control via ``fermi_difference_threshold``. At zero transport
+    temperature there is no Fermi window, so the half-width is zero and
+    ``interpolate_conductance`` reduces to ``T(mu)``.
+    """
     if temperature_k <= 0.0:
-        raise ValueError("band_edge_bias requires transport temperature greater than zero")
+        return 0.0
+    if not 0.0 < threshold < 1.0:
+        raise ValueError("fermi_difference_threshold must be between zero and one")
     kbt = KB_EV_PER_K * temperature_k
-    a = bias_eV / (2.0 * kbt)
-    # The maximum occupation difference is at the centre of the bias window.
-    peak = math.tanh(a / 2.0) if a < 700.0 else 1.0
-    if threshold >= peak:
-        raise ValueError(
-            "fermi_difference_threshold must be smaller than the peak "
-            f"|fL-fR|={peak:.6g} for bias_eV={bias_eV:g} and T={temperature_k:g} K"
-        )
-
-    # |fL-fR| = sinh(a) / (cosh((E-Eedge)/kBT) + cosh(a)).
-    # For very large a, avoid overflowing sinh/cosh; the asymptotic root is
-    # |E-Eedge|/kBT = a - log(threshold).
-    if a > 300.0:
-        return kbt * (a - math.log(threshold))
-    cosh_argument = math.sinh(a) / threshold - math.cosh(a)
-    if cosh_argument < 1.0:  # protects arccosh from roundoff at tiny bias
-        cosh_argument = 1.0
-    return kbt * math.acosh(cosh_argument)
-
-
-def edge_bias_conductance(
-    energy: np.ndarray,
-    transmission: np.ndarray,
-    edge: float,
-    bias_eV: float,
-    temperature_k: float,
-    threshold: float,
-) -> tuple[float, tuple[float, float], tuple[float, float]]:
-    """Finite-bias Landauer conductance centered on one supplied band edge."""
-    half_width = fermi_difference_half_width(bias_eV, temperature_k, threshold)
-    lower, upper = edge - half_width, edge + half_width
-    grid_min, grid_max = float(energy[0]), float(energy[-1])
-    if lower < grid_min or upper > grid_max:
-        raise ValueError(
-            f"transmission energy range [{grid_min:g}, {grid_max:g}] eV does not "
-            f"fully contain threshold-defined bias window [{lower:g}, {upper:g}] eV"
-        )
-    inside = energy[(energy > lower) & (energy < upper)]
-    energy_eval = np.concatenate(([lower], inside, [upper]))
-    transmission_eval = np.interp(energy_eval, energy, transmission)
-    kbt = KB_EV_PER_K * temperature_k
-    mu_left, mu_right = edge + bias_eV / 2.0, edge - bias_eV / 2.0
-    f_left = 1.0 / (1.0 + np.exp(np.clip((energy_eval - mu_left) / kbt, -700.0, 700.0)))
-    f_right = 1.0 / (1.0 + np.exp(np.clip((energy_eval - mu_right) / kbt, -700.0, 700.0)))
-    conductance = trapezoid_integral(transmission_eval * (f_left - f_right), energy_eval) / bias_eV
-    if not math.isfinite(conductance):
-        raise ValueError("band-edge finite-bias conductance is not finite")
-    return conductance, (lower, upper), (mu_left, mu_right)
+    # coverage over [-W, W] = tanh(W / (2 kBT)); set tail = 1 - coverage.
+    return 2.0 * kbt * math.atanh(1.0 - threshold)
 
 
 def read_json(path: Path) -> dict[str, Any]:
@@ -749,21 +714,31 @@ def build_replica_result(
     configured_temperature_k: float | None = None,
     conductance_mode: str = "fermi",
     band_edges: tuple[float, float] | None = None,
-    bias_eV: float | None = None,
     fermi_difference_threshold: float | None = None,
 ) -> ReplicaResult:
     config = read_json(replica_dir / "workflow_config.json")
     path_meta = parse_path_metadata(configuration_dir)
 
+    # Effective transport temperature precedence:
+    #   explicit --transport-temperature-k override
+    #   -> per-configuration configured_temperature_k
+    #   -> workflow_config.json temperature
+    #   -> path temperature
+    #   -> 300 K fallback.
+    # This is the single resolution used by every conductance path below
+    # (linear response, band-edge half_width, Gc and Gv), so all of them
+    # share one consistent transport temperature.
     effective_transport_temperature_k = transport_temperature_k
+    if effective_transport_temperature_k is None:
+        effective_transport_temperature_k = configured_temperature_k
     if effective_transport_temperature_k is None:
         effective_transport_temperature_k = optional_float(
             config.get("temperature")
         )
-        if effective_transport_temperature_k is None:
-            effective_transport_temperature_k = path_meta["temperature_K"]
-        if effective_transport_temperature_k is None:
-            effective_transport_temperature_k = 300.0
+    if effective_transport_temperature_k is None:
+        effective_transport_temperature_k = path_meta["temperature_K"]
+    if effective_transport_temperature_k is None:
+        effective_transport_temperature_k = 300.0
 
     replica_number = parse_replica_number(replica_dir)
     result_file = choose_result_file(replica_dir, config)
@@ -785,35 +760,50 @@ def build_replica_result(
     ec = ev = gap = None
     gc = gv = ln_gc = ln_gv = None
     conduction_text = valence_text = None
-    conduction_mu = valence_mu = None
     if conductance_mode == "band_edge_bias":
-        if band_edges is None or bias_eV is None or fermi_difference_threshold is None:
-            raise ValueError("band_edge_bias requires Ec_eV, Ev_eV, bias_eV, and fermi_difference_threshold")
+        if band_edges is None or fermi_difference_threshold is None:
+            raise ValueError("band_edge_bias requires Ec_eV, Ev_eV, and fermi_difference_threshold")
         ec, ev = band_edges
         gap = ec - ev
         energy, transmission, _, _ = load_transmission_curve(result_file, reduction)
-        gc, conduction_window, conduction_mu = edge_bias_conductance(
-            energy, transmission, ec, bias_eV, effective_transport_temperature_k,
-            fermi_difference_threshold,
+        grid_min, grid_max = float(energy[0]), float(energy[-1])
+        half_width = fermi_window_half_width(
+            effective_transport_temperature_k, fermi_difference_threshold
         )
-        gv, valence_window, valence_mu = edge_bias_conductance(
-            energy, transmission, ev, bias_eV, effective_transport_temperature_k,
-            fermi_difference_threshold,
+        # Band-edge Fermi-window coverage/convergence check: the transmission
+        # energy grid must span [edge - half_width, edge + half_width] so the
+        # band-edge window (capturing 1 - threshold of the kernel) is fully
+        # contained -- consistent with the fermi-mode coverage gate, centred on
+        # each band edge and controlled by fermi_difference_threshold.
+        if half_width > 0.0:
+            for edge, label in ((ec, "Ec"), (ev, "Ev")):
+                lower, upper = edge - half_width, edge + half_width
+                if lower < grid_min or upper > grid_max:
+                    raise ValueError(
+                        f"{label}={edge:g} eV Fermi window [{lower:g}, {upper:g}] eV "
+                        f"is not fully contained in the transmission energy range "
+                        f"[{grid_min:g}, {grid_max:g}] eV"
+                    )
+        # Reuse the same linear-response Fermi-window integral as fermi mode,
+        # using each band edge as the chemical potential.
+        gc = interpolate_conductance(
+            energy, transmission, e_fermi=ec,
+            temperature_k=effective_transport_temperature_k,
+        )
+        gv = interpolate_conductance(
+            energy, transmission, e_fermi=ev,
+            temperature_k=effective_transport_temperature_k,
         )
         ln_gc = math.log(gc) if gc > 0.0 else None
         ln_gv = math.log(gv) if gv > 0.0 else None
-        conduction_text = f"[{conduction_window[0]:g}, {conduction_window[1]:g}]"
-        valence_text = f"[{valence_window[0]:g}, {valence_window[1]:g}]"
+        conduction_text = f"[{ec - half_width:g}, {ec + half_width:g}]"
+        valence_text = f"[{ev - half_width:g}, {ev + half_width:g}]"
 
     conductance_method = (
         "zero-temperature interpolation"
         if effective_transport_temperature_k <= 0.0
         else "finite-temperature Fermi-window integral"
     )
-    if conductance_mode == "band_edge_bias":
-        conductance_method = (
-            "finite-bias Landauer average: integral T(E)[fL-fR] dE / bias_eV"
-        )
 
     chirality = config.get("chirality")
     chirality_m = path_meta["chirality_m"]
@@ -883,14 +873,9 @@ def build_replica_result(
         Gv_G0=gv,
         ln_Gc_G0=ln_gc,
         ln_Gv_G0=ln_gv,
-        bias_eV=bias_eV if conductance_mode == "band_edge_bias" else None,
         fermi_difference_threshold=(
             fermi_difference_threshold if conductance_mode == "band_edge_bias" else None
         ),
-        conduction_mu_L_eV=conduction_mu[0] if conduction_mu else None,
-        conduction_mu_R_eV=conduction_mu[1] if conduction_mu else None,
-        valence_mu_L_eV=valence_mu[0] if valence_mu else None,
-        valence_mu_R_eV=valence_mu[1] if valence_mu else None,
     )
 
 
@@ -978,19 +963,34 @@ def summarize_configuration(
 
     mode_values: dict[str, float | str | None] = {"conductance_mode": first.conductance_mode}
     if first.conductance_mode == "band_edge_bias":
-        def channel_stats(channel: str) -> tuple[float, float, float | None, float | None]:
+        def channel_stats(channel: str) -> tuple[float, float, float | None, float | None, float | None]:
+            # Returns (arithmetic mean, std of values, mean of ln, std of ln, typical=exp(mean ln)).
+            # mean_ln/std_ln are over the positive channel values only; std_ln uses ddof=1
+            # and feeds the SEM error bar of the band-edge localization-length fit.
             channel_values = np.asarray([getattr(item, channel) for item in results], dtype=float)
             channel_positive = channel_values[channel_values > 0.0]
-            mean_ln = float(np.mean(np.log(channel_positive))) if channel_positive.size else None
-            typical = float(np.exp(mean_ln)) if mean_ln is not None else None
+            if channel_positive.size:
+                log_vals = np.log(channel_positive)
+                mean_ln = float(np.mean(log_vals))
+                std_ln = (
+                    float(np.std(log_vals, ddof=1))
+                    if log_vals.size > 1
+                    else 0.0
+                )
+                typical = float(np.exp(mean_ln))
+            else:
+                mean_ln = None
+                std_ln = None
+                typical = None
             return (
                 float(np.mean(channel_values)),
                 float(np.std(channel_values, ddof=1)) if channel_values.size > 1 else 0.0,
                 mean_ln,
+                std_ln,
                 typical,
             )
-        mean_gc, std_gc, mean_ln_gc, typical_gc = channel_stats("Gc_G0")
-        mean_gv, std_gv, mean_ln_gv, typical_gv = channel_stats("Gv_G0")
+        mean_gc, std_gc, mean_ln_gc, std_ln_gc, typical_gc = channel_stats("Gc_G0")
+        mean_gv, std_gv, mean_ln_gv, std_ln_gv, typical_gv = channel_stats("Gv_G0")
         mode_values.update({
             "Ec_transport_eV": first.Ec_transport_eV,
             "Ev_transport_eV": first.Ev_transport_eV,
@@ -999,9 +999,8 @@ def summarize_configuration(
             "valence_window_eV": first.valence_window_eV,
             "mean_Gc_G0": mean_gc, "std_Gc_G0": std_gc,
             "mean_Gv_G0": mean_gv, "std_Gv_G0": std_gv,
-            "mean_ln_Gc_G0": mean_ln_gc, "typical_Gc_G0": typical_gc,
-            "mean_ln_Gv_G0": mean_ln_gv, "typical_Gv_G0": typical_gv,
-            "bias_eV": first.bias_eV,
+            "mean_ln_Gc_G0": mean_ln_gc, "std_ln_Gc_G0": std_ln_gc, "typical_Gc_G0": typical_gc,
+            "mean_ln_Gv_G0": mean_ln_gv, "std_ln_Gv_G0": std_ln_gv, "typical_Gv_G0": typical_gv,
             "fermi_difference_threshold": first.fermi_difference_threshold,
         })
 
@@ -1054,7 +1053,12 @@ def build_configuration_log(
         f"valid replicas: {summary.valid_replicas}",
         f"missing/failed replicas: {summary.missing_or_failed_replicas}",
         "",
-        "Summary (G/G0 = integral T(E) [-df/dE] dE; at T=0, G/G0 = T(E_F))",
+        (
+            "Summary (Fermi-energy conductance: G/G0 = integral T(E) [-df/dE] dE; "
+            "at T=0, G/G0 = T(E_F))"
+            if summary.conductance_mode == "band_edge_bias"
+            else "Summary (G/G0 = integral T(E) [-df/dE] dE; at T=0, G/G0 = T(E_F))"
+        ),
         f"mean:             {summary.mean_G0:.16g}",
         f"std:              {summary.std_G0:.16g}",
         f"median:           {summary.median_G0:.16g}",
@@ -1069,25 +1073,35 @@ def build_configuration_log(
 
     if summary.conductance_mode == "band_edge_bias":
         lines[lines.index("") + 1:lines.index("") + 1] = [
-            "Finite-bias band-edge mode",
+            "Band-edge mode",
             f"Ec_transport_eV: {summary.Ec_transport_eV}",
             f"Ev_transport_eV: {summary.Ev_transport_eV}",
             f"transport_gap_eV: {summary.transport_gap_eV}",
-            f"conduction integration range_eV: {summary.conduction_window_eV}",
-            f"valence integration range_eV: {summary.valence_window_eV}",
-            f"bias_eV: {summary.bias_eV}",
+            f"conduction Fermi window_eV: {summary.conduction_window_eV}",
+            f"valence Fermi window_eV: {summary.valence_window_eV}",
             f"fermi_difference_threshold: {summary.fermi_difference_threshold}",
         ]
     for result in sorted(results, key=lambda item: item.replica):
-        row = (
-            f"replica_{result.replica:03d}  "
-            f"seed={result.lammps_seed}  "
-            f"G/G0={result.conductance_G0:.16g}  "
-            f"ln={result.ln_conductance_G0}  "
-            f"file={result.result_file}"
-        )
         if summary.conductance_mode == "band_edge_bias":
-            row += f"  Gc/G0={result.Gc_G0:.16g}  Gv/G0={result.Gv_G0:.16g}"
+            # In band-edge mode the generic conductance_G0 is the Fermi-energy
+            # linear-response value, not a band-edge value; label it as such to
+            # avoid confusing it with Gc/Gv.
+            row = (
+                f"replica_{result.replica:03d}  "
+                f"seed={result.lammps_seed}  "
+                f"Fermi G/G0={result.conductance_G0:.16g}  "
+                f"Fermi ln(G/G0)={result.ln_conductance_G0}  "
+                f"Gc/G0={result.Gc_G0:.16g}  Gv/G0={result.Gv_G0:.16g}  "
+                f"file={result.result_file}"
+            )
+        else:
+            row = (
+                f"replica_{result.replica:03d}  "
+                f"seed={result.lammps_seed}  "
+                f"G/G0={result.conductance_G0:.16g}  "
+                f"ln={result.ln_conductance_G0}  "
+                f"file={result.result_file}"
+            )
         lines.append(row)
 
     if summary.conductance_mode == "band_edge_bias":
@@ -1096,10 +1110,12 @@ def build_configuration_log(
             f"Gc arithmetic mean: {summary.mean_Gc_G0:.16g}",
             f"Gc std:             {summary.std_Gc_G0:.16g}",
             f"<ln Gc>:            {summary.mean_ln_Gc_G0}",
+            f"std ln Gc:          {summary.std_ln_Gc_G0}",
             f"Gc typical:         {summary.typical_Gc_G0}",
             f"Gv arithmetic mean: {summary.mean_Gv_G0:.16g}",
             f"Gv std:             {summary.std_Gv_G0:.16g}",
             f"<ln Gv>:            {summary.mean_ln_Gv_G0}",
+            f"std ln Gv:          {summary.std_ln_Gv_G0}",
             f"Gv typical:         {summary.typical_Gv_G0}",
         ])
 
@@ -1143,8 +1159,8 @@ def parse_args() -> argparse.Namespace:
         metavar="JSON",
         help=(
             "Per-configuration JSON object containing configuration_dir and "
-            "conductance settings. band_edge_bias requires Ec_eV, Ev_eV, "
-            "bias_eV, and fermi_difference_threshold. May be supplied multiple times."
+            "conductance settings. band_edge_bias requires Ec_eV, Ev_eV, and "
+            "fermi_difference_threshold. May be supplied multiple times."
         ),
     )
     parser.add_argument(
@@ -1229,9 +1245,9 @@ def main() -> int:
             if mode not in {"fermi", "band_edge_bias"}:
                 raise ValueError("conductance_mode must be 'fermi' or 'band_edge_bias'")
             if mode == "band_edge_bias":
-                ec, ev, bias, threshold = validate_band_edge_bias_settings(
+                ec, ev, threshold = validate_band_edge_bias_settings(
                     setting.get("Ec_eV"), setting.get("Ev_eV"),
-                    setting.get("bias_eV"), setting.get("fermi_difference_threshold"),
+                    setting.get("fermi_difference_threshold"),
                 )
             temperature = optional_float(setting.get("temperature"))
             if temperature is None or temperature < 0.0:
@@ -1240,7 +1256,6 @@ def main() -> int:
                 "temperature": temperature,
                 "conductance_mode": mode,
                 "band_edges": (ec, ev) if mode == "band_edge_bias" else None,
-                "bias_eV": bias if mode == "band_edge_bias" else None,
                 "fermi_difference_threshold": threshold if mode == "band_edge_bias" else None,
             }
     except (json.JSONDecodeError, TypeError, ValueError) as exc:
@@ -1303,18 +1318,16 @@ def main() -> int:
         if conductance_mode == "band_edge_bias":
             try:
                 band_edges = settings.get("band_edges")
-                if band_edges is None:
-                    ec, ev, bias_eV, threshold = validate_band_edge_bias_settings(
+                threshold = settings.get("fermi_difference_threshold")
+                if band_edges is None or threshold is None:
+                    ec, ev, threshold = validate_band_edge_bias_settings(
                         first_config.get("Ec_eV"), first_config.get("Ev_eV"),
-                        first_config.get("bias_eV"), first_config.get("fermi_difference_threshold"),
+                        first_config.get("fermi_difference_threshold"),
                     )
                     band_edges = (ec, ev)
-                else:
-                    bias_eV = settings["bias_eV"]
-                    threshold = settings["fermi_difference_threshold"]
-                # 两个带边的阈值窗口宽度只由 bias、温度和阈值决定。
+                # 两个带边的 Fermi 窗口宽度由温度和 threshold 决定。
                 # 小带隙/高温时窗口相交意味着电子、空穴输运贡献不能完全分离；
-                # 这是物理诊断信息，不应阻止用户继续得到有限偏压结果。
+                # 这是物理诊断信息，不应阻止用户继续得到带边结果。
                 configured_temperature_for_window = args.transport_temperature_k
                 if configured_temperature_for_window is None:
                     configured_temperature_for_window = settings.get("temperature")
@@ -1324,15 +1337,15 @@ def main() -> int:
                     configured_temperature_for_window = parse_path_metadata(configuration_dir)["temperature_K"]
                 if configured_temperature_for_window is None:
                     configured_temperature_for_window = 300.0
-                half_width = fermi_difference_half_width(
-                    bias_eV, configured_temperature_for_window, threshold
+                half_width = fermi_window_half_width(
+                    configured_temperature_for_window, threshold
                 )
                 ev, ec = band_edges[1], band_edges[0]
                 valence_upper = ev + half_width
                 conduction_lower = ec - half_width
                 if valence_upper >= conduction_lower:
                     warn(
-                        f"{configuration_dir}: band-edge finite-bias windows overlap "
+                        f"{configuration_dir}: band-edge Fermi windows overlap "
                         f"([{ev - half_width:g}, {valence_upper:g}] and "
                         f"[{conduction_lower:g}, {ec + half_width:g}] eV); "
                         "electron and hole conductance are mixed"
@@ -1343,7 +1356,8 @@ def main() -> int:
                 all_problems.append(message)
                 continue
         else:
-            band_edges = bias_eV = threshold = None
+            band_edges = None
+            threshold = None
         configured_temperature_k = settings.get("temperature")
 
         for replica_dir in replica_dirs:
@@ -1358,7 +1372,6 @@ def main() -> int:
                     configured_temperature_k=configured_temperature_k,
                     conductance_mode=conductance_mode,
                     band_edges=band_edges,
-                    bias_eV=bias_eV,
                     fermi_difference_threshold=threshold,
                 )
             except Exception as exc:

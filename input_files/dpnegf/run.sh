@@ -32,6 +32,11 @@ source ~/software-t6s008517/DeePTB/.venv/bin/activate
 
 if python run.py; then
     echo "DPNEGF finished successfully at $(date)"
+    # 写入 provenance hash：与 output/negf.out.pth 同层，
+    # 用于后续校验 done 结果是否与当前配置一致（P0-4）。
+    if [ -f expected_negf_config_hash.txt ]; then
+        cp expected_negf_config_hash.txt output/negf_config_hash.txt
+    fi
     touch dpnegf_done.flag
 else
     echo "[ERROR] DPNEGF 失败，写 dpnegf_failed.flag"
