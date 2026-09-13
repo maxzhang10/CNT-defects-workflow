@@ -20,26 +20,55 @@
 # 注意：#SBATCH -n 与 run.py 的 n_cpus 要对齐（当前都是 32）。
 # ============================================================
 
+set -Eeuo pipefail
+
+cd "${SLURM_SUBMIT_DIR:-$(pwd)}"
+
+# 清理本次运行的旧状态，避免上一轮的 done/failed/started flag 干扰判断。
+rm -f dpnegf_done.flag
+rm -f dpnegf_failed.flag
+rm -f dpnegf_started.flag
+
+on_exit() {
+    rc=$?
+
+    if (( rc != 0 )); then
+        {
+            echo "Failed at: $(date '+%F %T')"
+            echo "Return code: ${rc}"
+            echo "SLURM_JOB_ID: ${SLURM_JOB_ID:-unknown}"
+            echo "Host: $(hostname)"
+        } > dpnegf_failed.flag
+
+        echo "[ERROR] DPNEGF failed, return code=${rc}" >&2
+        return
+    fi
+
+    # 成功：写入 provenance hash（与 output/negf.out.pth 同层，
+    # 用于后续校验 done 结果是否与当前配置一致），并落 done flag。
+    if [ -f expected_negf_config_hash.txt ]; then
+        cp expected_negf_config_hash.txt output/negf_config_hash.txt
+    fi
+    touch dpnegf_done.flag
+    rm -f dpnegf_failed.flag
+}
+
+trap on_exit EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+source ~/software-t6s008517/DeePTB/.venv/bin/activate
+
+date '+%F %T' > dpnegf_started.flag
+
 echo "======================================"
 echo "DPNEGF slurm run"
 echo "Start time: $(date)"
 echo "Host: $(hostname)"
 echo "Workdir: $(pwd)"
-echo "SLURM_JOB_ID=${SLURM_JOB_ID}"
+echo "SLURM_JOB_ID=${SLURM_JOB_ID:-unknown}"
 echo "======================================"
 
-source ~/software-t6s008517/DeePTB/.venv/bin/activate
+python run.py
 
-if python run.py; then
-    echo "DPNEGF finished successfully at $(date)"
-    # 写入 provenance hash：与 output/negf.out.pth 同层，
-    # 用于后续校验 done 结果是否与当前配置一致（P0-4）。
-    if [ -f expected_negf_config_hash.txt ]; then
-        cp expected_negf_config_hash.txt output/negf_config_hash.txt
-    fi
-    touch dpnegf_done.flag
-else
-    echo "[ERROR] DPNEGF 失败，写 dpnegf_failed.flag"
-    touch dpnegf_failed.flag
-    exit 1
-fi
+echo "DPNEGF finished successfully at $(date)"

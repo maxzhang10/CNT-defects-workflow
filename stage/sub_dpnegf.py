@@ -27,7 +27,10 @@ sbatch 成功前不会写 started/failed。
 from pathlib import Path
 from typing import Optional
 import argparse
+import os
+import shutil
 import subprocess
+import sys
 import time
 
 import logkit as L
@@ -42,8 +45,35 @@ from negf_provenance import (
     provenance_is_valid,
     read_hash_file,
     result_file_path,
+    result_is_readable,
     write_hash_file,
 )
+
+
+def local_dpnegf_python() -> str:
+    """返回本地运行 DPNEGF run.py 的 Python 解释器。
+
+    local 模式不应复用 SLURM 模板 run.sh 中硬编码的 venv 路径
+    (~/software-t6s008517/DeePTB/.venv/bin/activate)，而应使用当前
+    解释器（即 run_multi.py 通过 --python 选定的解释器）。
+    可通过环境变量 CNT_DPTB_PYTHON 覆盖。
+    """
+    return os.environ.get("CNT_DPTB_PYTHON") or sys.executable
+
+
+def copy_provenance_hash_on_success(workdir: Path) -> None:
+    """成功后将 expected hash 复制为 provenance hash（与 run.sh 行为一致）。
+
+    SLURM 模式下该复制由 run.sh 完成；local 模式绕过 run.sh，必须在此补做，
+    否则下次 sub_dpnegf.py 的 done-flag provenance 校验会因缺少
+    output/negf_config_hash.txt 而拒绝复用结果。
+    """
+    expected = expected_hash_path(workdir)
+    if not expected.is_file():
+        return
+    target = provenance_hash_path(workdir)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy(expected, target)
 
 
 def check_required_files(workdir: Path):
@@ -139,15 +169,35 @@ def run_dpnegf_local(workdir: Path) -> str:
     stdout_path = workdir / "local_run.stdout"
     stderr_path = workdir / "local_run.stderr"
 
-    with stdout_path.open("w", encoding="utf-8") as fout, \
-         stderr_path.open("w", encoding="utf-8") as ferr:
-        result = subprocess.run(
-            ["bash", "run.sh"],
-            cwd=workdir,
-            text=True,
-            stdout=fout,
-            stderr=ferr,
+    # 用当前解释器直接运行 run.py，不复用 SLURM 模板 run.sh
+    # （后者激活硬编码的 ~/software-t6s008517/DeePTB/.venv 虚拟环境）。
+    python = local_dpnegf_python()
+    cmd = [python, "run.py"]
+    L.info(f"DPNEGF 本地命令: {' '.join(cmd)} (cwd={workdir})")
+
+    try:
+        with stdout_path.open("w", encoding="utf-8") as fout, \
+             stderr_path.open("w", encoding="utf-8") as ferr:
+            result = subprocess.run(
+                cmd,
+                cwd=workdir,
+                text=True,
+                stdout=fout,
+                stderr=ferr,
+            )
+    except FileNotFoundError as exc:
+        fail_time = time.strftime("%Y-%m-%d %H:%M:%S")
+        (workdir / "dpnegf_failed.flag").write_text(
+            f"Failed at {fail_time}\n"
+            f"Python interpreter not found: {exc}\n",
+            encoding="utf-8",
         )
+        raise RuntimeError(
+            f"DPNEGF 本地 Python 解释器未找到，请用环境变量 CNT_DPTB_PYTHON 指定。\n"
+            f"  workdir = {workdir}\n"
+            f"  cmd = {' '.join(cmd)}\n"
+            f"  {exc}"
+        ) from exc
 
     if result.returncode != 0:
         fail_time = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -164,6 +214,10 @@ def run_dpnegf_local(workdir: Path) -> str:
             f"  {stdout_path}\n"
             f"  {stderr_path}"
         )
+
+    # run.py 成功后，把 expected hash 复制为 provenance hash
+    # （SLURM 模式下由 run.sh 完成的步骤，local 模式必须在此补做）。
+    copy_provenance_hash_on_success(workdir)
 
     end_time = time.strftime("%Y-%m-%d %H:%M:%S")
     (workdir / "dpnegf_done.flag").write_text(
@@ -201,7 +255,14 @@ def submit_dpnegf_slurm(
     return job_id
 
 
-def main():
+# 遇到上次真实失败 flag 时的退出码。
+# main() 返回它，__main__ 用 sys.exit() 传播；run_multi.py 的 run_cmd
+# 用 check=True 调用，会因此抛 CalledProcessError 中断 local 流程，
+# 避免把旧 failed flag 当作成功并继续消费陈旧 output。
+EXIT_PRIOR_FAILURE = 2
+
+
+def main() -> int:
     parser = argparse.ArgumentParser(
         description="提交单个 DPNEGF 工作目录（local 或 slurm）"
     )
@@ -264,6 +325,16 @@ def main():
         # provenance hash（output/negf_config_hash.txt）与本次期望的 config hash
         # （expected_negf_config_hash.txt，由 copy_input_dpnegf.py 写入）完全一致，
         # 才允许复用旧结果；否则禁止复用，明确报错（P0-4）。
+        # P1-10：进一步要求结果文件可读取（torch.load 能成功），
+        # 损坏的结果同样视为失败，进入重试而非被当作成功。
+        if not result_is_readable(workdir):
+            result = result_file_path(workdir)
+            raise RuntimeError(
+                f"done flag 存在但结果文件不可读取（缺失/空/损坏）:\n"
+                f"  workdir = {workdir}\n"
+                f"  result  = {result}\n"
+                f"请删除 {done_flag.name} 与 output/ 后显式重新计算。"
+            )
         expected_hash = read_hash_file(expected_hash_path(workdir))
         if expected_hash is None:
             raise RuntimeError(
@@ -290,12 +361,14 @@ def main():
                 f"请使用新目录，或删除 {done_flag.name} 与 output/ 后显式重新计算。"
             )
         L.skip(f"DPNEGF 已完成且 provenance 一致，跳过: {workdir}")
-        return
+        return 0
 
     if failed_flag.exists():
         L.warn(f"上次 DPNEGF 真正运行失败: {workdir}")
         L.warn(f"如需重跑请删除 {failed_flag}")
-        return
+        # 返回非零，让 orchestrator（check=True）中止 local 流程，
+        # 而不是把旧 failed flag 当成功并继续消费陈旧 output。
+        return EXIT_PRIOR_FAILURE
 
     if submitted_flag.exists() and job_id_file.exists():
         job_id = job_id_file.read_text(
@@ -304,7 +377,7 @@ def main():
         L.warn(
             f"DPNEGF 之前已提交，跳过重复提交。job_id={job_id}"
         )
-        return
+        return 0
 
     if submitted_flag.exists() != job_id_file.exists():
         L.warn(
@@ -340,7 +413,8 @@ def main():
 
     L.info(f"workdir = {workdir}")
     L.info(f"job_id  = {job_id}")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

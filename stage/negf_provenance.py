@@ -99,6 +99,43 @@ def result_file_path(leaf_dir: Path) -> Path:
     return Path(leaf_dir) / "output" / RESULT_FILE
 
 
+def result_is_nonempty(leaf_dir: Path) -> bool:
+    """结果文件存在且非空。仅做存在性/大小检查，不读取内容。"""
+    result = result_file_path(Path(leaf_dir))
+    return result.is_file() and result.stat().st_size > 0
+
+
+def result_is_readable(leaf_dir: Path) -> bool:
+    """结果文件存在、非空，且能用 torch.load 真正读出（可读取）。
+
+    用于把"done flag + 损坏/缺失结果"识别为失败，使其进入重试，
+    而不是等到批次末尾电导汇总才暴露。
+
+    torch 不在 orchestrator 环境时退化为非空检查 —— 此时由
+    collect 阶段（在带 torch 的环境里运行）做最终的读取校验。
+    """
+    leaf_dir = Path(leaf_dir)
+    if not result_is_nonempty(leaf_dir):
+        return False
+    try:
+        import torch  # type: ignore
+    except ImportError:
+        # orchestrator 环境无 torch：只能确认到非空，读取校验交给下游。
+        return True
+    try:
+        try:
+            torch.load(
+                result_file_path(leaf_dir),
+                map_location="cpu",
+                weights_only=False,
+            )
+        except TypeError:
+            torch.load(result_file_path(leaf_dir), map_location="cpu")
+    except Exception:
+        return False
+    return True
+
+
 def provenance_is_valid(leaf_dir: Path, expected_hash: str) -> bool:
     """校验 leaf 的 provenance：结果文件存在、非空，且 provenance hash 与
     期望 hash 完全一致。任一条件不满足返回 False（fail-safe，不得复用）。

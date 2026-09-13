@@ -13,6 +13,7 @@ if str(_STAGE_DIR) not in sys.path:
     sys.path.insert(0, str(_STAGE_DIR))
 import logkit as L
 from slurm_utils import wait_for_jobs, check_flags
+from negf_provenance import result_is_readable
 
 def run_cmd(cmd, dry_run=False, env=None, cwd=None):
     L.run(" ".join(map(str, cmd)))
@@ -50,6 +51,23 @@ def barrier_and_check(workdirs, kind, poll_interval, dry_run):
 
     done_dirs, failed_dirs, missing_dirs = check_flags(workdirs, kind)
     L.info(f"{kind} 结果: 完成={len(done_dirs)} 失败={len(failed_dirs)} 缺flag={len(missing_dirs)}")
+
+    # P1-10：done flag 不等于成功。对 DPNEGF，进一步校验结果文件
+    # output/negf.out.pth 存在、非空且可读取；损坏/缺失的 done 目录视作失败，
+    # 让 batch_generate 的 per-task 重试能捕获，而不是拖到批次末尾电导汇总。
+    if kind == "dpnegf":
+        bad_result_dirs = []
+        for d in done_dirs:
+            if not result_is_readable(d):
+                bad_result_dirs.append(d)
+        if bad_result_dirs:
+            for d in bad_result_dirs:
+                L.error(
+                    f"dpnegf done flag 存在但结果文件缺失/空/不可读取: {d}"
+                )
+            # 把这些目录从 done 移到 failed，让下面的统一报错生效。
+            done_dirs = [d for d in done_dirs if d not in set(bad_result_dirs)]
+            failed_dirs.extend(bad_result_dirs)
 
     if failed_dirs or missing_dirs:
         for d in failed_dirs:
@@ -314,6 +332,41 @@ def remove_lammps_dump_files(lammps_dir: Path) -> int:
             removed += 1
             L.clean(f"rm {dump_file}")
     return removed
+
+
+def build_collect_conductance_cmd(
+    python: str,
+    script: Path,
+    root: Path,
+    e_fermi: float,
+    configuration_dirs: list[Path],
+    transport_temperature_k: float | None = None,
+) -> list[str]:
+    """Build the collect_md_conductance.py invocation.
+
+    collect_md_conductance.py only accepts --root / --configuration-dir /
+    --configuration-settings -- it has no --config / --structure-dir options,
+    so passing those makes argparse raise "ambiguous option" *after* all the
+    expensive DPNEGF work has finished. Conductance mode, temperature, and
+    band-edge (Ec/Ev/threshold) settings are read by the collector from each
+    replica's workflow_config.json, so they need not be repeated here.
+    """
+    cmd = [
+        python,
+        str(script),
+        "--root",
+        str(root),
+        "--e-fermi",
+        str(e_fermi),
+    ]
+    if transport_temperature_k is not None:
+        cmd.extend(
+            ["--transport-temperature-k", str(transport_temperature_k)]
+        )
+    for struct_dir in configuration_dirs:
+        cmd.extend(["--configuration-dir", str(struct_dir)])
+    return cmd
+
 
 def main():
     parser = argparse.ArgumentParser(
@@ -743,17 +796,20 @@ def main():
                     f"找不到电导收集 Python: {args.conductance_python or py}"
                 )
 
-            cmd = [
-                conductance_python or (args.conductance_python or py),
-                str(collect_conductance_script),
-                "--config",
-                str(config_path),
-                "--e-fermi",
-                str(args.e_fermi),
-            ]
-
-            for struct_dir in structure_dirs:
-                cmd.extend(["--structure-dir", str(struct_dir)])
+            # 注意：collect_md_conductance.py 只接受 --root /
+            # --configuration-dir / --configuration-settings，不接受
+            # --config / --structure-dir（后者会让 argparse 报
+            # ambiguous option 而在昂贵计算结束后失败）。
+            # 电导模式、温度、带边 (Ec/Ev/threshold) 由收集器从每个
+            # replica 的 workflow_config.json 兜底读取，无需在此重复传入。
+            cmd = build_collect_conductance_cmd(
+                python=conductance_python or (args.conductance_python or py),
+                script=collect_conductance_script,
+                root=root,
+                e_fermi=args.e_fermi,
+                configuration_dirs=structure_dirs,
+                transport_temperature_k=args.transport_temperature_k,
+            )
 
             run_cmd(cmd, dry_run=args.dry_run, env=env)
 

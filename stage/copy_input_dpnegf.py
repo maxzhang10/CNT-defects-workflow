@@ -176,6 +176,16 @@ def update_input_json_for_leaf(
     task_options["emax"] = negf_energy_window[1]
     task_options["self_energy_options"]["cache"] = copy.deepcopy(self_energy_cache)
 
+    # 同步 workflow 的 r_max 到顶层 AtomicData_options.r_max。
+    # 用同一个 cutoff 计算 principal layer 分区与 DPNEGF Hamiltonian 邻接，
+    # 否则 lead 耦合范围（由 r_max 决定的 PL）与模型 cutoff 不一致，
+    # 可能造成 lead 耦合不足或区域尺寸不必要地增大。
+    atomic_options = input_data.get("AtomicData_options")
+    if not isinstance(atomic_options, dict):
+        atomic_options = {}
+        input_data["AtomicData_options"] = atomic_options
+    atomic_options["r_max"] = r_max
+
     stru_options["lead_L"]["id"] = lead_L_id
     stru_options["device"]["id"] = device_id
     stru_options["lead_R"]["id"] = lead_R_id
@@ -201,6 +211,7 @@ def update_input_json_for_leaf(
         f"\n  espacing = {espacing} eV"
         f"\n  energy range = [{negf_energy_window[0]}, {negf_energy_window[1]}] eV"
         f"\n  self-energy cache = {self_energy_cache}"
+        f"\n  AtomicData_options.r_max = {r_max}"
     )
 
 def copy_or_link_file(src: Path, dst: Path, overwrite: bool = True):

@@ -27,7 +27,10 @@ sbatch 成功前不会写 started/failed。
 from pathlib import Path
 from typing import Optional
 import argparse
+import os
+import shlex
 import subprocess
+import sys
 import time
 
 import logkit as L
@@ -36,6 +39,24 @@ from slurm_utils import (
     SlurmSubmitLimitError,
     sbatch_submit_with_retry,
 )
+
+
+def local_lammps_command() -> list[str]:
+    """构造本地 LAMMPS 调用命令。
+
+    local 模式不能复用 SLURM 模板 run.sh —— 它要求 SLURM_SUBMIT_DIR、
+    加载集群 module 并通过 srun 启动，在普通本地环境会立即失败于
+    `SLURM_SUBMIT_DIR is not set`。改为直接调用 LAMMPS 可执行文件。
+
+    命令可通过环境变量 CNT_LAMMPS_CMD 覆盖（例如
+    "mpirun -np 32 lmp_intel_cpu_intelmpi"），默认 "lmp"。
+    """
+    raw = os.environ.get("CNT_LAMMPS_CMD", "lmp").strip()
+    cmd = shlex.split(raw)
+    if not cmd:
+        raise ValueError("CNT_LAMMPS_CMD 解析为空命令")
+    cmd += ["-in", "in.lammps", "-log", "lammps.log"]
+    return cmd
 
 
 def check_required_files(workdir: Path):
@@ -138,15 +159,33 @@ def run_lammps_local(workdir: Path) -> str:
     stdout_path = workdir / "local_run.stdout"
     stderr_path = workdir / "local_run.stderr"
 
-    with stdout_path.open("w", encoding="utf-8") as fout, \
-         stderr_path.open("w", encoding="utf-8") as ferr:
-        result = subprocess.run(
-            ["bash", "run.sh"],
-            cwd=workdir,
-            text=True,
-            stdout=fout,
-            stderr=ferr,
+    # 直接调用 LAMMPS 可执行文件，不复用带 SLURM 环境假设的 run.sh。
+    cmd = local_lammps_command()
+    L.info(f"LAMMPS 本地命令: {' '.join(cmd)} (cwd={workdir})")
+
+    try:
+        with stdout_path.open("w", encoding="utf-8") as fout, \
+             stderr_path.open("w", encoding="utf-8") as ferr:
+            result = subprocess.run(
+                cmd,
+                cwd=workdir,
+                text=True,
+                stdout=fout,
+                stderr=ferr,
+            )
+    except FileNotFoundError as exc:
+        fail_time = time.strftime("%Y-%m-%d %H:%M:%S")
+        (workdir / "lammps_failed.flag").write_text(
+            f"Failed at {fail_time}\n"
+            f"LAMMPS executable not found: {exc}\n",
+            encoding="utf-8",
         )
+        raise RuntimeError(
+            f"LAMMPS 可执行文件未找到，请用环境变量 CNT_LAMMPS_CMD 指定。\n"
+            f"  workdir = {workdir}\n"
+            f"  cmd = {' '.join(cmd)}\n"
+            f"  {exc}"
+        ) from exc
 
     if result.returncode != 0:
         fail_time = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -200,7 +239,14 @@ def submit_lammps_slurm(
     return job_id
 
 
-def main():
+# 遇到上次真实失败 flag 时的退出码。
+# main() 返回它，__main__ 用 sys.exit() 传播；run_multi.py 的 run_cmd
+# 用 check=True 调用，会因此抛 CalledProcessError 中断 local 流程，
+# 避免把旧 failed flag 当作成功并继续消费陈旧 dump。
+EXIT_PRIOR_FAILURE = 2
+
+
+def main() -> int:
     parser = argparse.ArgumentParser(
         description="提交单个 LAMMPS 工作目录（local 或 slurm）"
     )
@@ -260,12 +306,14 @@ def main():
 
     if done_flag.exists():
         L.skip(f"LAMMPS 已完成，跳过: {workdir}")
-        return
+        return 0
 
     if failed_flag.exists():
         L.warn(f"上次 LAMMPS 真正运行失败: {workdir}")
         L.warn(f"如需重跑请删除 {failed_flag}")
-        return
+        # 返回非零，让 orchestrator（check=True）中止 local 流程，
+        # 而不是把旧 failed flag 当成功并继续消费陈旧 dump。
+        return EXIT_PRIOR_FAILURE
 
     if submitted_flag.exists() and job_id_file.exists():
         job_id = job_id_file.read_text(
@@ -274,7 +322,7 @@ def main():
         L.warn(
             f"LAMMPS 之前已提交，跳过重复提交。job_id={job_id}"
         )
-        return
+        return 0
 
     # 处理孤立的 submitted.flag 或 job_id.txt。
     if submitted_flag.exists() != job_id_file.exists():
@@ -314,7 +362,8 @@ def main():
 
     L.info(f"workdir = {workdir}")
     L.info(f"job_id  = {job_id}")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
