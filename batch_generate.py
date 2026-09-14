@@ -14,25 +14,18 @@ from pathlib import Path
 
 
 CHIRAL_CONFIGS = [
-    {
-        "m": 5,
-        "n": 5,
-        "l_def": 8,
-        "N_defects": 2,
-        "structures": ["5775"],
-        # 普通费米能级电导模式：可省略（默认即为 fermi），
-        # "conductance_mode": "fermi",
-        # 带边电导示例：启用时由外部 Ec/Ev 作为化学势定义两个计算中心。
-        # "conductance_mode": "band_edge_bias",
-        # "Ec_eV": 0.32,
-        # "Ev_eV": -0.28,
-        # "fermi_difference_threshold": 1e-6,
-        # DPNEGF 透射谱能量网格步长（eV）。
-        "espacing": 0.1,
-        # DPNEGF 透射谱能量范围 [emin, emax]（eV）。
-        # 该范围同时适用于 fermi 和 band_edge_bias 电导模式。
-        "negf_energy_window": [-0.5, 0.5],
-    }
+       {"m": 7,  "n": 0, "l_def": 2, "N_defects": 0, "structures": ["P"]},
+    {"m": 9,  "n": 0, "l_def": 2, "N_defects": 0, "structures": ["P"]},
+    {"m": 11, "n": 0, "l_def": 2, "N_defects": 0, "structures": ["P"]},
+    {"m": 8,  "n": 2, "l_def":2, "N_defects": 0, "structures": ["P"]},
+    {"m": 12, "n": 3, "l_def": 1, "N_defects": 0, "structures": ["P"]},
+    {"m": 6,  "n": 3, "l_def": 1, "N_defects": 0, "structures": ["P"]},
+    {"m": 8,  "n": 4, "l_def": 1, "N_defects": 0, "structures": ["P"]},
+    {"m": 7,  "n": 4, "l_def": 1, "N_defects": 0, "structures": ["P"]},
+    {"m": 4,  "n": 4, "l_def": 4, "N_defects": 0, "structures": ["P"]},
+    {"m": 6,  "n": 6, "l_def": 3, "N_defects": 0, "structures": ["P"]},
+    {"m": 8,  "n": 8, "l_def": 2, "N_defects": 0, "structures": ["P"]}
+
 ]
 
 
@@ -218,6 +211,11 @@ def build_tasks(
                 l_def,
             )
 
+            # 散射区模式：只生成 l_def 个 uc 的散射区，不拼接电极 PL 缓冲区。
+            # task["length"] 写入 workflow_config.json 的 length 字段，
+            # ele_multi_defects_ele.py 据此进入纯缺陷区模式。
+            length = l_def
+
             density = n_defects / (l_def * T)
 
             folder_name = make_folder_name(
@@ -323,6 +321,7 @@ def make_task_config(task):
         "structures": task["structures"],
         "data_root": str(task["data_root"]),
         "structure_root": str(task["run_root"]),
+        "length": task["length"],
         "seed": task["seed"],
         "lammps_seed": task["lammps_seed"],
         "lammps_replica": task["replica"],

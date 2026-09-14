@@ -59,6 +59,7 @@ def generate_defect_coords(
     edge_margin=1.42,
     seed=None,
     max_trials=20000,
+    total_length=None,
 ):
     """
     在缺陷区内随机生成 N 个缺陷坐标。
@@ -70,6 +71,13 @@ def generate_defect_coords(
     4. 缺陷之间二维柱面展开距离大于 min_sep；
     5. 最终坐标吸附到真实 C 原子上；
     6. 完全由 seed 控制随机性。
+
+    参数
+    ----
+    total_length : int, optional
+        CNT 总长度（晶胞数）。如果 total_length == l_def，则为纯缺陷区
+        （散射区）模式：整管只有 l_def 个 uc，缺陷区从 z=0 开始，不拼接
+        电极 PL 缓冲区；否则为 2PL-2PL-defects-2PL-2PL 电极模式。
     """
     rng = np.random.default_rng(seed)
     cyl = cnt_geometry.tube_to_cyl(tube)
@@ -77,9 +85,16 @@ def generate_defect_coords(
     coords = []
     used_indices = []
 
-    # 名义 defects 区域：2PL-2PL-defects-2PL-2PL
-    z_def_low = 4 * l_PL * T
-    z_def_high = (4 * l_PL + l_def) * T
+    # 判断是否为纯缺陷区（散射区）模式
+    if total_length is not None and total_length == l_def:
+        # 纯缺陷区模式：整个管子都是缺陷区，无电极区
+        z_def_low = 0
+        z_def_high = l_def * T
+        L.info("使用纯缺陷区模式（无电极区）")
+    else:
+        # 正常模式：2PL-2PL-defects-2PL-2PL
+        z_def_low = 4 * l_PL * T
+        z_def_high = (4 * l_PL + l_def) * T
 
     # 实际允许造缺陷的区域：左右各缩小一个 C-C 键长
     z_low = z_def_low + edge_margin
@@ -198,12 +213,17 @@ def main():
     if lammps_seed <= 0:
         raise ValueError(f"lammps_seed 必须为正整数，当前值: {lammps_seed}")
 
-    T, N_uc, l_PL, length = cnt_geometry.geo_info(
+    T, N_uc, l_PL, _ = cnt_geometry.geo_info(
         m,
         n,
         r_max,
         l_def,
     )
+    # length 由 config 决定：未指定时回退到 2PL-2PL-defects-2PL-2PL 电极模式；
+    # 当 length == l_def 时为纯缺陷区（散射区）模式，整管只有 l_def 个 uc。
+    length = config.get("length", l_PL * 8 + l_def)
+    scattering_only = (length == l_def)
+    L.info(f"length      = {length} (scattering_only={scattering_only})")
 
     tube_unit = cnt_geometry.build_unit_cnt(m, n, vacuum=10.0)
     tube_clean = cnt_geometry.clean_cnt_by_shift_wrap_anchor(tube_unit)
@@ -223,6 +243,7 @@ def main():
         min_sep=min_defect_sep,
         edge_margin=edge_margin,
         seed=seed,
+        total_length=length,
     )
 
     density = len(defects_coord_ind) / (l_def * T)
@@ -306,10 +327,15 @@ def main():
 
     for folder, atoms in structures.items():
         atoms_pos = atoms.copy()
-        atoms_lmp = exporters.reposition_hydrogens(
-            atoms,
-            4 * l_PL * N_uc,
-        )
+
+        # 纯缺陷区模式下没有电极区，不需要把末尾 H 原子移回中部散射区。
+        if scattering_only:
+            atoms_lmp = atoms.copy()
+        else:
+            atoms_lmp = exporters.reposition_hydrogens(
+                atoms,
+                4 * l_PL * N_uc,
+            )
 
         output_dir = structure_root / "lammps"
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -324,6 +350,10 @@ def main():
         L.info(f"  POSCAR   -> {poscar_path}")
         L.info(f"  data.lmp -> {lammps_path}")
 
+    # 散射区模式下没有电极原子需要固定，n_fix=0（全部自由）；
+    # 电极模式下固定左右各 2PL 的电极原子。
+    n_fix = 0 if scattering_only else 4 * l_PL * N_uc
+
     lammps_io.prepare_lammps_inputs(
         temperature=temperature,
         chirality=(m, n),
@@ -334,6 +364,7 @@ def main():
         structure_root=structure_root,
         md_steps=md_steps,
         lammps_seed=lammps_seed,
+        n_fix=n_fix,
     )
 
 

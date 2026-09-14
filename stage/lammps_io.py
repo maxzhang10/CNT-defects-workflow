@@ -19,6 +19,7 @@ def prepare_lammps_inputs(
     md_steps=40000,
     files=None,
     lammps_seed=None,
+    n_fix=None,
 ):
     """
     为不同结构生成 LAMMPS 计算目录，并修改 in.lammps。
@@ -27,6 +28,9 @@ def prepare_lammps_inputs(
 
     structure_root 可显式指定当前结构/replica 的根目录；未提供时
     保留旧目录规则 data_root/温度/手性/结构名。
+
+    n_fix 显式指定固定原子数。默认 None 时按电极模式取 4*l_PL*N_uc
+    （左右各 2PL）；散射区模式（无电极区）上层应传 0，让所有原子自由。
     """
     if files is None:
         files = ("in.lammps", "CH.airebo-m", "run.sh")
@@ -58,7 +62,11 @@ def prepare_lammps_inputs(
     if not input_dir.is_dir():
         raise FileNotFoundError(f"源文件夹不存在: {input_dir}")
 
-    n_fix = 4 * l_PL * N_uc
+    # 默认固定左右各 2PL 电极原子；散射区模式由上层传入 n_fix=0。
+    if n_fix is None:
+        n_fix = 4 * l_PL * N_uc
+    else:
+        n_fix = int(n_fix)
     m, n = chirality
 
     for folder, atoms in structures.items():

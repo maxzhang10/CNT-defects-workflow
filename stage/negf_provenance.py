@@ -27,13 +27,14 @@ from typing import Any, Mapping
 
 
 # 影响 negf.out.pth 的 workflow_config 参数：
-#   结构：chirality / l_def / N_defects / structures / seed / r_max /
+#   结构：chirality / l_def / length / N_defects / structures / seed / r_max /
 #         md_steps / md_sampling / temperature
 #   MD 轨迹：lammps_seed
 #   NEGF / Hamiltonian：espacing / negf_energy_window / self_energy_cache
 NEGF_CONFIG_KEYS = (
     "chirality",
     "l_def",
+    "length",
     "N_defects",
     "structures",
     "seed",
