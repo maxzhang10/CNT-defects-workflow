@@ -63,7 +63,6 @@ def check_required_files(workdir: Path):
     required = (
         "data.lmp",
         "in.lammps",
-        "CH.airebo-m",
         "run.sh",
     )
 
@@ -72,6 +71,10 @@ def check_required_files(workdir: Path):
         for name in required
         if not (workdir / name).exists()
     ]
+
+    # DeepMD 势场模型 (.pth) 也必须存在；文件名不固定，按 glob 检查。
+    if not list(workdir.glob("*.pth")):
+        missing.append("*.pth (DeepMD 势场模型)")
 
     if missing:
         raise FileNotFoundError(

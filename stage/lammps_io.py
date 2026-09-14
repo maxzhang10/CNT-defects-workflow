@@ -20,6 +20,7 @@ def prepare_lammps_inputs(
     files=None,
     lammps_seed=None,
     n_fix=None,
+    model_file=None,
 ):
     """
     为不同结构生成 LAMMPS 计算目录，并修改 in.lammps。
@@ -31,9 +32,14 @@ def prepare_lammps_inputs(
 
     n_fix 显式指定固定原子数。默认 None 时按电极模式取 4*l_PL*N_uc
     （左右各 2PL）；散射区模式（无电极区）上层应传 0，让所有原子自由。
+
+    model_file 显式指定 input_dir 中的 DeepMD 势场文件名（.pth）。
+    未指定时自动从 input_dir 中 glob *.pth；恰有一个时直接使用，
+    多个时报错要求显式指定。.pth 文件以软链接方式放入工作目录，
+    与 copy_input_dpnegf.py 的模型处理一致。
     """
     if files is None:
-        files = ("in.lammps", "CH.airebo-m", "run.sh")
+        files = ("in.lammps", "run.sh")
 
     if lammps_seed is None:
         raise ValueError("必须显式传入 lammps_seed")
@@ -62,6 +68,9 @@ def prepare_lammps_inputs(
     if not input_dir.is_dir():
         raise FileNotFoundError(f"源文件夹不存在: {input_dir}")
 
+    # 解析 DeepMD 势场模型文件（.pth 软链接进每个工作目录）。
+    model_filename = resolve_lammps_model(input_dir, model_file)
+
     # 默认固定左右各 2PL 电极原子；散射区模式由上层传入 n_fix=0。
     if n_fix is None:
         n_fix = 4 * l_PL * N_uc
@@ -83,7 +92,7 @@ def prepare_lammps_inputs(
         dst_dir = current_structure_root / "lammps"
         dst_dir.mkdir(parents=True, exist_ok=True)
 
-        # 1. 复制模板文件
+        # 1. 复制模板文件（in.lammps / run.sh）
         for filename in files:
             src_file = input_dir / filename
             dst_file = dst_dir / filename
@@ -93,7 +102,10 @@ def prepare_lammps_inputs(
 
             shutil.copy(str(src_file), str(dst_file))
 
-        # 2. 修改当前结构的 in.lammps
+        # 2. 软链接 DeepMD 势场模型 .pth 到工作目录
+        link_lammps_model(input_dir / model_filename, dst_dir / model_filename)
+
+        # 3. 修改当前结构的 in.lammps
         lammps_file = dst_dir / "in.lammps"
 
         with lammps_file.open(
@@ -109,10 +121,15 @@ def prepare_lammps_inputs(
             for line in lines
         )
 
+        # DeepMD pair_coeff 元素列表：纯 C 为 "C"，含 H 为 "C H"。
+        elements = "C H" if has_hydrogen else "C"
+
         found_nfix = False
         found_velocity = False
         found_nvt = False
         found_run = False
+        found_pair_style = False
+        found_pair_coeff = False
         new_lines = []
 
         for line in lines:
@@ -153,6 +170,16 @@ def prepare_lammps_inputs(
                 line = f"run             {int(md_steps)}\n"
                 found_run = True
 
+            # DeepMD 势场：重写 pair_style 行，指向本次软链接进来的 .pth 模型。
+            if re.match(r"^\s*pair_style\s+deepmd\s+", line):
+                line = f"pair_style deepmd ./{model_filename}\n"
+                found_pair_style = True
+
+            # DeepMD 势场：按是否含氢重写 pair_coeff 元素映射。
+            if re.match(r"^\s*pair_coeff\s+\*\s+\*\s+C(?:\s+H)?\s*$", line):
+                line = f"pair_coeff * * {elements}\n"
+                found_pair_coeff = True
+
             # 含 H 结构：在 mass 1 后加入 mass 2
             if has_hydrogen and re.match(r"^\s*mass\s+1\s+12", line):
                 new_lines.append(line)
@@ -161,13 +188,6 @@ def prepare_lammps_inputs(
                     new_lines.append("mass        2 1\n")
 
                 continue
-
-            # 含 H 结构：势函数元素列表由 C 改为 C H
-            if has_hydrogen and re.match(
-                r"^\s*pair_coeff\s+\*\s+\*\s+\./CH\.airebo-m\s+C\s*$",
-                line,
-            ):
-                line = "pair_coeff * * ./CH.airebo-m  C H\n"
 
             new_lines.append(line)
 
@@ -181,6 +201,10 @@ def prepare_lammps_inputs(
             missing_edits.append("fix 1 mobile nvt temp")
         if not found_run:
             missing_edits.append("run <md_steps>")
+        if not found_pair_style:
+            missing_edits.append("pair_style deepmd")
+        if not found_pair_coeff:
+            missing_edits.append("pair_coeff * * C")
 
         if missing_edits:
             raise RuntimeError(
@@ -197,5 +221,56 @@ def prepare_lammps_inputs(
             f"T={temperature} K，"
             f"md_steps={md_steps}，"
             f"lammps_seed={lammps_seed}，"
+            f"model={model_filename}，"
             f"含H={has_hydrogen}"
         )
+
+
+def resolve_lammps_model(input_dir: Path, model_file=None) -> str:
+    """
+    从 input_dir 中解析 DeepMD 势场模型文件名（.pth）。
+
+    与 copy_input_dpnegf.py 的 collect_input_files 行为一致：
+      - model_file 显式指定时使用该文件；
+      - 否则 glob *.pth，恰有一个时直接用，多个时报错要求显式指定。
+    """
+    input_dir = Path(input_dir).resolve()
+
+    if model_file is not None:
+        selected = input_dir / model_file
+        if not selected.is_file():
+            raise FileNotFoundError(
+                f"指定的 LAMMPS 势场模型文件不存在: {selected}"
+            )
+        return selected.name
+
+    model_files = sorted(input_dir.glob("*.pth"))
+
+    if len(model_files) == 0:
+        raise FileNotFoundError(
+            f"未在 input_dir 中找到 DeepMD 势场模型文件 (.pth): {input_dir}"
+        )
+
+    if len(model_files) > 1:
+        names = "\n".join(f"  {p.name}" for p in model_files)
+        raise ValueError(
+            "input_dir 中找到多个 .pth 势场模型文件，请用 --model-file 指定一个:\n"
+            f"{names}"
+        )
+
+    return model_files[0].name
+
+
+def link_lammps_model(src: Path, dst: Path, overwrite: bool = True):
+    """
+    把 DeepMD 势场 .pth 以软链接放进 LAMMPS 工作目录。
+    与 copy_input_dpnegf.py 的 copy_or_link_file 一致：.pth 用软链接，
+    避免大模型文件被重复复制。
+    """
+    src = src.resolve()
+
+    if overwrite and (dst.exists() or dst.is_symlink()):
+        dst.unlink()
+
+    dst.symlink_to(src)
+    L.debug(f"软链接势场模型: {dst} -> {src}")

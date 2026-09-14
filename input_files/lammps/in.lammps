@@ -11,8 +11,8 @@ read_data	data.lmp
 mass 		1 12
 
 
-pair_style airebo/morse 3.0
-pair_coeff * * ./CH.airebo-m  C
+pair_style deepmd ./lammps_model.pth
+pair_coeff * * C
 
 
 # --- 0. 固定原子：受力和速度清零 ---
