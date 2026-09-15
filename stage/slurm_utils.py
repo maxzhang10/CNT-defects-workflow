@@ -165,9 +165,16 @@ def sbatch_submit_with_retry(
             time.sleep(sleep_seconds)
 
 
+class SlurmQueryError(RuntimeError):
+    """squeue 查询本身失败（非"作业不存在"），不能当作完成。"""
+
+
 def _running_job_ids(job_ids: Iterable[str]):
     """
     查询给定 job_id 中仍存在于 squeue 的作业。
+
+    返回 alive 集合。当 squeue 查询本身失败（空 stdout + 非零返回码，
+    如认证/网络故障）时抛 SlurmQueryError，而不是把空结果当成"全部离队"。
     """
     job_ids = [str(job_id) for job_id in job_ids if job_id]
     if not job_ids:
@@ -186,21 +193,23 @@ def _running_job_ids(job_ids: Iterable[str]):
         capture_output=True,
     )
 
-    # 部分作业已结束时，squeue 可能返回非零。
+    # 部分作业已结束时，squeue 可能返回非零且仍输出存活的 job。
     # 仍从 stdout 中提取还能查到的 job。
-    if result.returncode != 0:
-        alive = {
-            token
-            for token in result.stdout.split()
-            if token.isdigit()
-        }
-        return alive & set(job_ids)
-
     alive = {
         token
         for token in result.stdout.split()
-        if token
+        if token.isdigit()
     }
+
+    # P2-2：非零返回码 + 空 stdout 意味着查询本身失败（认证/网络/调度器
+    # 故障），不是所有作业都已离队。把它当作独立查询错误抛出，否则
+    # wait_for_jobs 会把空 alive 当成完成，配合陈旧 done flag 造成假成功。
+    if result.returncode != 0 and not alive:
+        raise SlurmQueryError(
+            f"squeue 查询失败 (rc={result.returncode}, stderr={result.stderr.strip()})，"
+            f"不能确定作业状态: {job_ids}"
+        )
+
     return alive & set(job_ids)
 
 
@@ -209,6 +218,8 @@ def wait_for_jobs(job_ids, poll_interval=30, label=""):
     阻塞直到给定 job_id 全部离开 squeue。
 
     离开队列不代表计算成功，调用方仍应检查 done/failed flag。
+    squeue 查询本身失败时（SlurmQueryError）重试若干次，仍失败则抛错，
+    不会把查询故障当成"所有作业已离队"。
     """
     job_ids = [str(job_id) for job_id in job_ids if job_id]
     if not job_ids:
@@ -217,8 +228,23 @@ def wait_for_jobs(job_ids, poll_interval=30, label=""):
     prefix = f"[{label}] " if label else ""
     L.info(f"{prefix}等待 {len(job_ids)} 个 SLURM 作业完成…")
 
+    max_query_retries = 5
+    query_retry_delay = min(poll_interval, 30)
+
     while True:
-        alive = _running_job_ids(job_ids)
+        try:
+            alive = _running_job_ids(job_ids)
+        except SlurmQueryError as exc:
+            # 临时查询故障：重试，避免把故障当成完成。
+            if max_query_retries > 0:
+                max_query_retries -= 1
+                L.warn(
+                    f"{prefix}squeue 查询失败，{query_retry_delay:.0f} 秒后重试"
+                    f"（剩余 {max_query_retries} 次）: {exc}"
+                )
+                time.sleep(query_retry_delay)
+                continue
+            raise
 
         if not alive:
             L.ok(f"{prefix}全部 {len(job_ids)} 个作业已离开队列")

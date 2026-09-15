@@ -25,32 +25,55 @@ def read_box_bounds(fin) -> Tuple[np.ndarray, Tuple[float, float, float, float, 
     Read 3 lines after 'ITEM: BOX BOUNDS ...'
     Supports:
       orthorhombic: xlo xhi
-      triclinic:    xlo xhi xy   / ylo yhi xz / zlo zhi yz
+      triclinic:    xlo_bound xhi_bound xy  / ylo_bound yhi_bound xz / zlo_bound zhi_bound yz
+
+    LAMMPS dump 的 triclinic 格式给出的是 *包围盒* bound（已含 tilt 偏移），
+    不是真实盒边界。必须按 LAMMPS 文档规范反推真实 box bounds：
+      xlo = xlo_bound + min(0, xy, xz, xy+xz)
+      xhi = xhi_bound + max(0, xy, xz, xy+xz)
+      ylo = ylo_bound + min(0, yz)
+      yhi = yhi_bound + max(0, yz)
+    （z 不受 tilt 影响。）
 
     Returns:
       H (3x3) lattice matrix with columns a,b,c  (in Ang)
-      tilts (xy, xz, yz) for debugging
+      tilts (xy, xz, yz, Lx, Ly, Lz)
+      origin (xlo, ylo, zlo) 也通过实例属性无法返回，故单独提供 read_box_origin。
     """
     # x line
     p = fin.readline().split()
     if len(p) < 2:
         raise ValueError("Bad BOX BOUNDS x line")
-    xlo, xhi = float(p[0]), float(p[1])
+    xlo_bound, xhi_bound = float(p[0]), float(p[1])
     xy = float(p[2]) if len(p) >= 3 else 0.0
 
     # y line
     p = fin.readline().split()
     if len(p) < 2:
         raise ValueError("Bad BOX BOUNDS y line")
-    ylo, yhi = float(p[0]), float(p[1])
+    ylo_bound, yhi_bound = float(p[0]), float(p[1])
     xz = float(p[2]) if len(p) >= 3 else 0.0
 
     # z line
     p = fin.readline().split()
     if len(p) < 2:
         raise ValueError("Bad BOX BOUNDS z line")
-    zlo, zhi = float(p[0]), float(p[1])
+    zlo_bound, zhi_bound = float(p[0]), float(p[1])
     yz = float(p[2]) if len(p) >= 3 else 0.0
+
+    # P2-4：从包围盒 bound 反推真实 box bounds。
+    has_tilt = (xy != 0.0 or xz != 0.0 or yz != 0.0)
+    if has_tilt:
+        xlo = xlo_bound + min(0.0, xy, xz, xy + xz)
+        xhi = xhi_bound + max(0.0, xy, xz, xy + xz)
+        ylo = ylo_bound + min(0.0, yz)
+        yhi = yhi_bound + max(0.0, yz)
+        zlo = zlo_bound
+        zhi = zhi_bound
+    else:
+        xlo, xhi = xlo_bound, xhi_bound
+        ylo, yhi = ylo_bound, yhi_bound
+        zlo, zhi = zlo_bound, zhi_bound
 
     Lx = xhi - xlo
     Ly = yhi - ylo
@@ -63,19 +86,32 @@ def read_box_bounds(fin) -> Tuple[np.ndarray, Tuple[float, float, float, float, 
     c = np.array([xz, yz, Lz], dtype=float)
 
     H = np.column_stack([a, b, c])  # 3x3, columns are lattice vectors
-    return H, (xy, xz, yz, Lx, Ly, Lz)
+    # 把 origin 存到 H 的属性上，供 wrap 使用。
+    H_origin = np.array([xlo, ylo, zlo], dtype=float)
+    return H, (xy, xz, yz, Lx, Ly, Lz), H_origin
 
 
-def wrap_positions_cartesian(pos: np.ndarray, H: np.ndarray) -> np.ndarray:
+def wrap_positions_cartesian(
+    pos: np.ndarray, H: np.ndarray, origin: Optional[np.ndarray] = None
+) -> np.ndarray:
     """
     Wrap positions into the unit cell defined by lattice matrix H (columns a,b,c).
-    Uses fractional coordinates: s = H^{-1} r ; s = s mod 1 ; r = H s
+    Uses fractional coordinates: s = H^{-1} (r - origin) ; s = s mod 1 ; r = origin + H s
+
+    P2-4：wrap 前必须减去 box origin（xlo/ylo/zlo），否则当 dump lower
+    bounds 非零时 wrap 结果会发生错误平移。
     pos: (N,3)
     """
     Hinv = np.linalg.inv(H)
-    frac = (Hinv @ pos.T).T            # (N,3)
-    frac = frac - np.floor(frac)       # mod 1 to [0,1)
+    if origin is not None:
+        shifted = pos - origin
+    else:
+        shifted = pos
+    frac = (Hinv @ shifted.T).T            # (N,3)
+    frac = frac - np.floor(frac)           # mod 1 to [0,1)
     pos_wrapped = (H @ frac.T).T
+    if origin is not None:
+        pos_wrapped = pos_wrapped + origin
     return pos_wrapped
 
 
@@ -86,15 +122,32 @@ def write_siesta_fdf(
     coord_unit: str = "Ang",
     wrap: bool = False,
     comment: str = "",
+    origin: Optional[np.ndarray] = None,
 ) -> None:
     # Sort by id for reproducibility
     atoms = sorted(atoms, key=lambda t: t[0])
     natoms = len(atoms)
 
+    # P2-5：LAMMPS dump 用 units metal（Å）。若输出单位选 Bohr，必须把
+    # 晶格和坐标从 Å 换算到 Bohr（÷ ase.units.Bohr = ÷ 0.529177...），
+    # 不能只改标签，否则数值被标成 Bohr 但仍是 Å，后续 fdf2xyz 又乘 Bohr，
+    # 结构缩小约 0.529 倍。
+    scale = 1.0
+    if coord_unit == "Bohr":
+        try:
+            from ase.units import Bohr as ASE_BOHR  # Å per Bohr
+        except ImportError:
+            # 1 Bohr = 0.529177210903 Å (CODATA 2018)
+            ASE_BOHR = 0.529177210903
+        scale = 1.0 / ASE_BOHR
+
+    H_out = H * scale
+
     # positions array for optional wrapping
     pos = np.array([[x, y, z] for _, _, x, y, z in atoms], dtype=float)
     if wrap:
-        pos = wrap_positions_cartesian(pos, H)
+        pos = wrap_positions_cartesian(pos, H, origin=origin)
+    pos_out = pos * scale
 
     with open(out_path, "w", encoding="utf-8") as f:
         if comment:
@@ -104,8 +157,8 @@ def write_siesta_fdf(
 
         f.write("%block LatticeVectors\n")
         # H columns are a,b,c -> print as rows: ax ay az etc.
-        a = H[:, 0]; b = H[:, 1]; c = H[:, 2]
-        f.write(f"  {a[0]:.11g}  {a[1]:.11g}  {a[2]:.11g}\n")   
+        a = H_out[:, 0]; b = H_out[:, 1]; c = H_out[:, 2]
+        f.write(f"  {a[0]:.11g}  {a[1]:.11g}  {a[2]:.11g}\n")
         f.write(f"  {b[0]:.11g}  {b[1]:.11g}  {b[2]:.11g}\n")
         f.write(f"  {c[0]:.11g}  {c[1]:.11g}  {c[2]:.11g}\n")
         f.write("%endblock LatticeVectors\n\n")
@@ -125,7 +178,7 @@ def write_siesta_fdf(
         f.write("%block AtomicCoordinatesAndAtomicSpecies\n")
         for i, (aid, t, _x, _y, _z) in enumerate(atoms):
             sym, sid, _ = TYPE_TO_SPECIES[t]
-            x, y, z = pos[i]
+            x, y, z = pos_out[i]
             f.write(f"  {x:.8f}  {y:.8f}  {z:.8f}  {sid}  # id {aid} {sym}\n")
         f.write("%endblock AtomicCoordinatesAndAtomicSpecies\n")
 
@@ -198,7 +251,7 @@ def extract_from_one_dump(
             if not line.startswith("ITEM: BOX BOUNDS"):
                 raise ValueError(f"{dump_path}: expected ITEM: BOX BOUNDS, got {line.strip()}")
 
-            H, tilts = read_box_bounds(fin)
+            H, tilts, origin = read_box_bounds(fin)
             xy, xz, yz, Lx, Ly, Lz = tilts
 
             cols = parse_atoms_header(fin.readline())
@@ -233,7 +286,7 @@ def extract_from_one_dump(
                 ok = False
 
             if ok:
-                frames.append((timestep, H, tilts, atoms))
+                frames.append((timestep, H, tilts, atoms, origin))
 
     # 如果指定了 samples，只保留最后 N 个帧
     if samples is not None and len(frames) > samples:
@@ -241,7 +294,7 @@ def extract_from_one_dump(
 
     # 第二轮：写入 FDF 文件
     written = 0
-    for timestep, H, tilts, atoms in frames:
+    for timestep, H, tilts, atoms, origin in frames:
         xy, xz, yz, Lx, Ly, Lz = tilts
         step_dir = os.path.join(out_base_dir, str(timestep))
 
@@ -262,6 +315,7 @@ def extract_from_one_dump(
             wrap=wrap,
             comment=(f"from {dump_path} timestep {timestep} natoms={len(atoms)} "
                      f"tilt(xy,xz,yz)=({xy},{xz},{yz})"),
+            origin=origin,
         )
         written += 1
 

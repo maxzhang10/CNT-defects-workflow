@@ -3,13 +3,19 @@ import argparse
 from pathlib import Path
 
 import numpy as np
-import torch
-import matplotlib.pyplot as plt
+try:
+    import torch
+except ImportError:
+    torch = None
+try:
+    import matplotlib.pyplot as plt
+except ImportError:
+    plt = None
 
 
 def to_numpy(value):
     """兼容 torch.Tensor、numpy.ndarray 和普通列表。"""
-    if isinstance(value, torch.Tensor):
+    if torch is not None and isinstance(value, torch.Tensor):
         return value.detach().cpu().numpy()
     return np.asarray(value)
 
@@ -145,13 +151,16 @@ def get_group_name(pth_path):
     同时兼容新旧目录结构。
 
     新目录：
-        .../配置名/replica_001/dpnegf/200000/output/negf.out.pth
+        .../温度/手性/配置名/replica_001/dpnegf/200000/output/negf.out.pth
 
     旧目录：
-        .../配置名/dpnegf/40000/output/negf.out.pth
+        .../温度/手性/配置名/dpnegf/40000/output/negf.out.pth
 
-    返回配置名，例如：
-        5775_L008_0.1016A-1
+    P2-10：分组键必须包含温度和手性，否则不同温度/手性的同名配置
+    （如 50K/5_5/DV_DV 与 300K/5_5/DV_DV）会进入同一把 violin。
+
+    返回分组键，例如：
+        500K_5_5_5775_L008_0.1016A-1
     """
     parts = pth_path.parts
 
@@ -173,9 +182,43 @@ def get_group_name(pth_path):
     if parent_name.startswith("replica_"):
         if dpnegf_index < 2:
             return "unknown"
-        return parts[dpnegf_index - 2]
+        config_name = parts[dpnegf_index - 2]
+        # 向上找温度（NNNK）和手性（M_N）。
+        prefix_start = dpnegf_index - 2
+    else:
+        config_name = parent_name
+        prefix_start = dpnegf_index - 1
 
-    return parent_name
+    temperature = None
+    chirality = None
+    for j in range(prefix_start - 1, -1, -1):
+        part = parts[j]
+        if temperature is None and _looks_like_temperature(part):
+            temperature = part
+        if chirality is None and _looks_like_chirality(part):
+            chirality = part
+        if temperature is not None and chirality is not None:
+            break
+
+    prefix = ""
+    if temperature:
+        prefix += temperature
+    if chirality:
+        prefix += "_" + chirality if prefix else chirality
+    if prefix:
+        return f"{prefix}_{config_name}"
+    return config_name
+
+
+def _looks_like_temperature(name: str) -> bool:
+    """匹配形如 '300K'、'500K' 的目录名。"""
+    return name.endswith("K") and name[:-1].isdigit()
+
+
+def _looks_like_chirality(name: str) -> bool:
+    """匹配形如 '5_5'、'9_0' 的手性目录名。"""
+    parts = name.split("_")
+    return len(parts) == 2 and all(p.isdigit() for p in parts)
 
 
 def get_sample_name(pth_path):
@@ -250,14 +293,25 @@ def collect_results(root, fermi_energy=0.0):
 
 def is_dpnegf_result(path):
     """
-    只接受：
-    .../结构名/dpnegf/采样步/output/negf.out.pth
+    同时接受两种合法布局：
+      有 MD 步长：.../配置名/dpnegf/采样步/output/negf.out.pth
+      md_steps=0：.../配置名/dpnegf/output/negf.out.pth
+
+    P2-15：旧版只接受带采样步的布局（向上三级为 dpnegf），
+    无 MD 路径把结果放在 dpnegf/output/negf.out.pth（向上两级为 dpnegf），
+    被静默排除。
     """
-    return (
-        path.name == "negf.out.pth"
-        and path.parent.name == "output"
-        and path.parent.parent.parent.name == "dpnegf"
-    )
+    if path.name != "negf.out.pth":
+        return False
+    if path.parent.name != "output":
+        return False
+    # 有采样步：parent.parent.parent = dpnegf
+    if path.parent.parent.parent.name == "dpnegf":
+        return True
+    # md_steps=0：parent.parent = dpnegf
+    if path.parent.parent.name == "dpnegf":
+        return True
+    return False
 
 def plot_violin(grouped_data, output_path, log_scale=True):
     if not grouped_data:

@@ -240,7 +240,9 @@ def is_dpnegf_workdir(p: Path) -> bool:
     if not list(p.glob("*.xyz")):
         return False
 
-    if not list(p.glob("nnenv*.pth")):
+    # P2-12：接受任意合法名称的 .pth 模型文件，不硬编码 nnenv*.pth。
+    # staging 阶段接受任意 *.pth，工作目录检查应与之一致。
+    if not list(p.glob("*.pth")):
         return False
 
     return True
@@ -270,7 +272,7 @@ def find_dpnegf_workdirs_from_structures(structure_dirs):
 
     return sorted(set(workdirs))
 
-def clean_dpnegf_output_cache(root, save_self_energy=False):
+def clean_dpnegf_output_cache(root, save_self_energy=False, self_energy_save_path=None):
     """
     在 root 目录下递归寻找所有 */output/ 目录，并清理：
 
@@ -279,7 +281,11 @@ def clean_dpnegf_output_cache(root, save_self_energy=False):
     3. output/HS_lead_L.h5
     4. output/HS_lead_R.h5
 
-    只清理形如 */output/... 的内容，避免误删其他同名文件。
+    P2-6：若配置中 self_energy_cache.save_path 指向 leaf 下的独立目录
+    （如 ./self_energy/，而非 output/self_energy），也一并清理，否则
+    即使 save_self_energy=False，实际 ./self_energy/ 仍会保留。
+
+    只清理形如 */output/... 或配置指定的路径，避免误删其他同名文件。
     """
     root = Path(root).resolve()
 
@@ -296,16 +302,36 @@ def clean_dpnegf_output_cache(root, save_self_energy=False):
         "HS_lead_R.h5",
     ]
 
+    # 解析配置中的自能缓存路径名（可能是 "self_energy"、"./self_energy/" 等）。
+    se_dirname = None
+    if self_energy_save_path:
+        se_path = Path(self_energy_save_path)
+        # 取相对路径的最后一段作为目录名（如 "./self_energy/" -> "self_energy"）。
+        se_dirname = se_path.name or se_path.parent.name
+        # 若 save_path 是 output/self_energy，则已被下面的 output 循环覆盖。
+        if se_path.parts and se_path.parts[0] == "output":
+            se_dirname = None  # 已在 output 循环中处理
+
     for output_dir in sorted(root.rglob("output")):
         if not output_dir.is_dir():
             continue
 
-        # 1. 删除 self_energy 目录（如配置要求保存则跳过）
+        leaf_dir = output_dir.parent
+
+        # 1. 删除 output/self_energy 目录（如配置要求保存则跳过）
         self_energy_dir = output_dir / "self_energy"
         if self_energy_dir.is_dir() and not save_self_energy:
             L.clean(f"rm -r {self_energy_dir}")
             shutil.rmtree(self_energy_dir)
             removed_dirs += 1
+
+        # P2-6：删除配置指定的独立自能缓存目录（如 leaf/self_energy）。
+        if se_dirname:
+            alt_se_dir = leaf_dir / se_dirname
+            if alt_se_dir.is_dir() and not save_self_energy:
+                L.clean(f"rm -r {alt_se_dir}")
+                shutil.rmtree(alt_se_dir)
+                removed_dirs += 1
 
         # 2. 删除 HS 矩阵文件
         for fname in hs_files:
@@ -733,7 +759,7 @@ def main():
         if not dpnegf_workdirs:
             raise RuntimeError(
                 "没有找到 DPNEGF 工作目录。请确认每个 leaf 目录下存在：\n"
-                "  input.json / run.py / run.sh / *.xyz / nnenv*.pth\n"
+                "  input.json / run.py / run.sh / *.xyz / *.pth\n"
                 "常见目录应该类似：\n"
                 "  data/300K/5_5/DV_DV/dpnegf/40000"
             )
@@ -772,9 +798,15 @@ def main():
             save_self_energy = config.get("save_self_energy", False)
             if not isinstance(save_self_energy, bool):
                 raise ValueError("save_self_energy must be a boolean")
+            # P2-6：读取配置中的自能缓存路径，确保清理路径与实际写入路径一致。
+            se_cache = config.get("self_energy_cache", {})
+            se_save_path = None
+            if isinstance(se_cache, dict):
+                se_save_path = se_cache.get("save_path")
             clean_dpnegf_output_cache(
                 root,
                 save_self_energy=save_self_energy,
+                self_energy_save_path=se_save_path,
             )
 
             # 仅在本次发现的全部 DPNEGF 工作目录均成功后才删除对应 MD

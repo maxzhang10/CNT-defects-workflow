@@ -92,8 +92,9 @@ def check_required_files(workdir: Path):
     if not list(workdir.glob("*.xyz")):
         missing.append("*.xyz")
 
-    if not list(workdir.glob("nnenv*.pth")):
-        missing.append("nnenv*.pth")
+    # P2-12：接受任意合法名称的 .pth 模型文件，不硬编码 nnenv*.pth。
+    if not list(workdir.glob("*.pth")):
+        missing.append("*.pth")
 
     if missing:
         raise FileNotFoundError(

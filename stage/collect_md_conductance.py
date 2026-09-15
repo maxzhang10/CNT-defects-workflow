@@ -120,6 +120,7 @@ class ReplicaResult:
     ln_Gc_G0: float | None = None
     ln_Gv_G0: float | None = None
     fermi_difference_threshold: float | None = None
+    censored: bool = False
 
 
 @dataclass(frozen=True)
@@ -136,6 +137,7 @@ class ConfigurationSummary:
     expected_replicas: int | None
     valid_replicas: int
     missing_or_failed_replicas: int
+    n_censored_replicas: int
     mean_G0: float
     std_G0: float
     median_G0: float
@@ -161,6 +163,8 @@ class ConfigurationSummary:
     std_ln_Gv_G0: float | None = None
     typical_Gv_G0: float | None = None
     fermi_difference_threshold: float | None = None
+    missing_replica_ids: tuple[int, ...] = ()
+    unexpected_replica_ids: tuple[int, ...] = ()
 
 
 def info(message: str) -> None:
@@ -431,12 +435,17 @@ def interpolate_conductance(
                     f"kernel coverage={coverage:.4f}. Increase the energy range "
                     "around E_F, typically to at least +/-10 k_B T."
             )
+        # P2-11：统一归一化规则，消除 0.995 阈值处的不连续。
+        # 旧版仅在 coverage < 0.995 时除以 coverage，导致同一常数透射谱
+        # 在覆盖率从 0.994 增至 0.996 时结果从 ~1 突降到 ~0.996。
+        # 现在始终除以 coverage，使结果在所有覆盖率下一致地等于
+        # <T(E)*f'(E)> / <f'(E)>，并把未覆盖尾部作为已知的截断误差。
         if coverage < 0.995:
             warn(
                 "energy range is not wide enough for finite-temperature conductance: "
                 f"(coverage={coverage:.4f}). Increase the energy range around E_F, typically to at least +/-10 k_B T."
             )
-            kernel = kernel / coverage
+        kernel = kernel / coverage
 
         conductance = trapezoid_integral(
             transmission_eval * kernel,
@@ -704,6 +713,21 @@ def get_structures_text(config: Mapping[str, Any]) -> str:
     return str(structures)
 
 
+def _config_mismatches(
+    config_a: Mapping[str, Any],
+    config_b: Mapping[str, Any],
+    keys: Sequence[str],
+) -> list[str]:
+    """比较两个 config 在指定 key 上的值，返回不一致描述列表。"""
+    mismatches: list[str] = []
+    for key in keys:
+        va = config_a.get(key)
+        vb = config_b.get(key)
+        if va != vb:
+            mismatches.append(f"{key}: {va!r} != {vb!r}")
+    return mismatches
+
+
 def build_replica_result(
     configuration_dir: Path,
     replica_dir: Path,
@@ -824,6 +848,35 @@ def build_replica_result(
     if result_file.parent.name == "output":
         dpnegf_sample = result_file.parent.parent.name
 
+    # P2-1：区分数值噪声导致的微小负值和实质负值。
+    # 微小负值（|G| < NEG_TOL）按容差裁剪为 0 并标记 censored，
+    # 不进入对数统计；实质负值视为 replica 失败（抛错）。
+    NEG_TOL = 1e-12
+    censored = False
+    if conductance < 0.0:
+        if conductance > -NEG_TOL:
+            conductance = 0.0
+            censored = True
+        else:
+            raise ValueError(
+                f"{replica_dir}: 实质负电导 G/G0={conductance:.10g} < -{NEG_TOL}，"
+                "该 replica 视为失败，不参与统计"
+            )
+    if gc is not None and gc < 0.0:
+        if gc > -NEG_TOL:
+            gc = 0.0
+        else:
+            raise ValueError(
+                f"{replica_dir}: 实质负 Gc/G0={gc:.10g}，该 replica 视为失败"
+            )
+    if gv is not None and gv < 0.0:
+        if gv > -NEG_TOL:
+            gv = 0.0
+        else:
+            raise ValueError(
+                f"{replica_dir}: 实质负 Gv/G0={gv:.10g}，该 replica 视为失败"
+            )
+
     ln_conductance = (
         math.log(conductance)
         if conductance > 0.0
@@ -876,6 +929,7 @@ def build_replica_result(
         fermi_difference_threshold=(
             fermi_difference_threshold if conductance_mode == "band_edge_bias" else None
         ),
+        censored=censored,
     )
 
 
@@ -929,7 +983,12 @@ def summarize_configuration(
         [result.conductance_G0 for result in results],
         dtype=float,
     )
-    positive = values[values > 0.0]
+    # P2-1：censored replica（微小负值裁剪为 0）不进入对数统计，
+    # 但仍报告其存在；valid_replicas 只计非 censored 的有效结果。
+    censored_flags = [result.censored for result in results]
+    n_censored = sum(censored_flags)
+    noncensored_values = values[np.logical_not(censored_flags)]
+    positive = noncensored_values[noncensored_values > 0.0]
 
     expected = expected_replicas_override
     if expected is None:
@@ -961,6 +1020,16 @@ def summarize_configuration(
     inferred_missing = max(0, expected - len(results)) if expected is not None else 0
     total_problems = max(n_problems, inferred_missing)
 
+    # P2-14：显式比较发现的 replica ID 与期望集合 {1..expected}，
+    # 分别报告缺失与越界/重复编号，而不只比较数量。
+    missing_replica_ids: tuple[int, ...] = ()
+    unexpected_replica_ids: tuple[int, ...] = ()
+    if expected is not None:
+        found_ids = {result.replica for result in results}
+        expected_ids = set(range(1, expected + 1))
+        missing_replica_ids = tuple(sorted(expected_ids - found_ids))
+        unexpected_replica_ids = tuple(sorted(found_ids - expected_ids))
+
     mode_values: dict[str, float | str | None] = {"conductance_mode": first.conductance_mode}
     if first.conductance_mode == "band_edge_bias":
         def channel_stats(channel: str) -> tuple[float, float, float | None, float | None, float | None]:
@@ -968,7 +1037,9 @@ def summarize_configuration(
             # mean_ln/std_ln are over the positive channel values only; std_ln uses ddof=1
             # and feeds the SEM error bar of the band-edge localization-length fit.
             channel_values = np.asarray([getattr(item, channel) for item in results], dtype=float)
-            channel_positive = channel_values[channel_values > 0.0]
+            # P2-1：censored replica 不进入对数统计。
+            noncensored_channel = channel_values[np.logical_not(censored_flags)]
+            channel_positive = noncensored_channel[noncensored_channel > 0.0]
             if channel_positive.size:
                 log_vals = np.log(channel_positive)
                 mean_ln = float(np.mean(log_vals))
@@ -1015,8 +1086,11 @@ def summarize_configuration(
         n_defects=first.n_defects,
         density_A_inv=first.density_A_inv,
         expected_replicas=expected,
-        valid_replicas=len(results),
+        valid_replicas=len(results) - n_censored,
         missing_or_failed_replicas=total_problems,
+        n_censored_replicas=n_censored,
+        missing_replica_ids=missing_replica_ids,
+        unexpected_replica_ids=unexpected_replica_ids,
         mean_G0=float(np.mean(values)),
         std_G0=std,
         median_G0=float(np.median(values)),
@@ -1052,6 +1126,9 @@ def build_configuration_log(
         f"expected replicas: {summary.expected_replicas}",
         f"valid replicas: {summary.valid_replicas}",
         f"missing/failed replicas: {summary.missing_or_failed_replicas}",
+        f"censored replicas (clipped to 0): {summary.n_censored_replicas}",
+        f"missing replica IDs: {list(summary.missing_replica_ids)}",
+        f"unexpected replica IDs: {list(summary.unexpected_replica_ids)}",
         "",
         (
             "Summary (Fermi-energy conductance: G/G0 = integral T(E) [-df/dE] dE; "
@@ -1309,6 +1386,41 @@ def main() -> int:
         problems: list[str] = []
         settings = settings_by_dir.get(str(configuration_dir.resolve()), {})
         first_config = read_json(replica_dirs[0] / "workflow_config.json")
+
+        # P2-3：聚合前核对所有 replica 的物理参数一致。
+        # 目录被手工合并/部分重跑/配置漂移时，收集器可把不同温度/带边/偏压
+        # 的结果合并成一组而不报错；此处显式拒绝。
+        consistency_keys = (
+            "chirality",
+            "l_def",
+            "N_defects",
+            "structures",
+            "temperature",
+            "conductance_mode",
+            "Ec_eV",
+            "Ev_eV",
+            "fermi_difference_threshold",
+            "espacing",
+            "negf_energy_window",
+        )
+        inconsistent_dirs = []
+        for replica_dir in replica_dirs[1:]:
+            replica_config = read_json(replica_dir / "workflow_config.json")
+            mismatches = _config_mismatches(first_config, replica_config, consistency_keys)
+            if mismatches:
+                message = (
+                    f"{configuration_dir}: replica 配置与 replica_001 不一致，拒绝汇总: "
+                    + "; ".join(mismatches)
+                )
+                error(message)
+                all_problems.append(message)
+                problems.append(message)
+                inconsistent_dirs.append(replica_dir)
+        if inconsistent_dirs:
+            replica_dirs = [d for d in replica_dirs if d not in inconsistent_dirs]
+        if not replica_dirs:
+            continue
+
         conductance_mode = settings.get("conductance_mode", first_config.get("conductance_mode", "fermi"))
         if conductance_mode not in {"fermi", "band_edge_bias"}:
             message = f"{configuration_dir}: invalid conductance_mode={conductance_mode!r}"
@@ -1429,6 +1541,29 @@ def main() -> int:
             message = (
                 f"{configuration_dir}: expected {summary.expected_replicas} "
                 f"replicas, collected {summary.valid_replicas}"
+            )
+            if summary.missing_replica_ids:
+                message += f"; missing IDs {list(summary.missing_replica_ids)}"
+            if summary.unexpected_replica_ids:
+                message += f"; unexpected IDs {list(summary.unexpected_replica_ids)}"
+            warn(message)
+            all_problems.append(message)
+
+        # P2-14：即使 valid_replicas 数量匹配，也要报告越界/缺失编号。
+        if (
+            summary.expected_replicas is not None
+            and (
+                summary.missing_replica_ids or summary.unexpected_replica_ids
+            )
+            and summary.valid_replicas == summary.expected_replicas
+        ):
+            parts = []
+            if summary.missing_replica_ids:
+                parts.append(f"missing IDs {list(summary.missing_replica_ids)}")
+            if summary.unexpected_replica_ids:
+                parts.append(f"unexpected IDs {list(summary.unexpected_replica_ids)}")
+            message = (
+                f"{configuration_dir}: replica ID mismatch ({', '.join(parts)})"
             )
             warn(message)
             all_problems.append(message)

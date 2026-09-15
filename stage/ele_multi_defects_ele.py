@@ -304,9 +304,26 @@ def main():
     structure_root.mkdir(parents=True, exist_ok=True)
     L.info(f"结构工作目录: {structure_root}")
 
+    # P2-13：持久化实际抽中的缺陷组成到 defects.json。
+    # 旧版 defect_log 仅输出到终端，同一配置目录会混合不同实际缺陷组成，
+    # 后续统计无法从持久化元数据判断每个 replica 的真实类型和位置。
+    defects_meta = {
+        "seed": seed,
+        "type_list": type_list,
+        "defect_log": defect_log,
+        "folder_name": folder_name,
+    }
+    defects_json_path = structure_root / "defects.json"
+    with open(defects_json_path, "w", encoding="utf-8") as f:
+        json.dump(defects_meta, f, indent=2, ensure_ascii=False)
+    L.info(f"defects.json -> {defects_json_path}")
+
     for folder, atoms in structures.items():
-        atoms_pos = atoms.copy()
-        atoms_lmp = exporters.reposition_hydrogens(
+        # P2-9：POSCAR 和 data.lmp 都必须使用 reposition_hydrogens 之后的原子顺序。
+        # 含氢结构（如 MVH）的 H 由 Atoms.append() 加在数组末尾，若不重排，
+        # md_steps=0 路径会直接从 POSCAR 生成 STRUCT.fdf，右电极范围将包含 H
+        # 而少含等量 C，破坏同质碳电极假设。POSCAR 和 data.lmp 用同一份重排后的结构。
+        atoms_repositioned = exporters.reposition_hydrogens(
             atoms,
             4 * l_PL * N_uc,
         )
@@ -317,8 +334,8 @@ def main():
         poscar_path = output_dir / "POSCAR"
         lammps_path = output_dir / "data.lmp"
 
-        exporters.write_poscar(poscar_path, atoms_pos)
-        exporters.write_lammps(lammps_path, atoms_lmp)
+        exporters.write_poscar(poscar_path, atoms_repositioned)
+        exporters.write_lammps(lammps_path, atoms_repositioned)
 
         L.info(f"[WRITE] {folder}")
         L.info(f"  POSCAR   -> {poscar_path}")
