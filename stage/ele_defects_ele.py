@@ -60,7 +60,14 @@ L.info(f"chirality   = {(m, n)}")
 L.info(f"r_max       = {r_max}")
 L.info(f"data_root   = {data_root}")
 
-T, N_uc, l_PL, length = cnt_geometry.geo_info(m, n, r_max, l_def)
+T, N_uc, l_PL, length_full = cnt_geometry.geo_info(m, n, r_max, l_def)
+
+# length 由 config 决定：未指定时回退到 2PL-2PL-defects-2PL-2PL 电极模式；
+# 当 config["length"] == l_def 时为纯缺陷区（散射区）模式，
+# 整管只有 l_def 个 uc，不拼接电极 PL 缓冲区（与 ele_multi_defects_ele.py 一致）。
+length = int(config.get("length", length_full))
+scattering_only = (length == l_def)
+L.info(f"length = {length} (scattering_only={scattering_only})")
 
 # %% [markdown]
 # 坐标排序
@@ -175,8 +182,12 @@ for i, name in enumerate(structures, 1):
 
 for folder, atoms in structures.items():
     atoms_pos = atoms.copy()
-    
-    atoms_lmp = exporters.reposition_hydrogens(atoms, 4*l_PL*N_uc)  # 计算左右电极的原子数，调整 H 原子位置
+
+    # 纯缺陷区模式下没有电极区，不需要把末尾 H 原子移回中部散射区。
+    if scattering_only:
+        atoms_lmp = atoms.copy()
+    else:
+        atoms_lmp = exporters.reposition_hydrogens(atoms, 4*l_PL*N_uc)  # 计算左右电极的原子数，调整 H 原子位置
 
 
     output_dir = data_root / f"{temperature}K" / f"{m}_{n}" / folder / "lammps"
@@ -198,13 +209,17 @@ from itertools import chain
 from numpy import char
 
 
-lammps_io.prepare_lammps_inputs(
-    temperature=temperature,
-    chirality=(m, n),
-    structures=structures,
-    l_PL=l_PL,
-    N_uc=N_uc,
-    data_root=data_root,
-    md_steps=md_steps
-)
+# 散射区模式下只产出 POSCAR/data.lmp，不准备 LAMMPS 电极输入
+# （电极模式下的 prepare_lammps_inputs 需要 lammps_seed 等参数，
+#  由 run_multi.py / ele_multi_defects_ele.py 负责）。
+if not scattering_only:
+    lammps_io.prepare_lammps_inputs(
+        temperature=temperature,
+        chirality=(m, n),
+        structures=structures,
+        l_PL=l_PL,
+        N_uc=N_uc,
+        data_root=data_root,
+        md_steps=md_steps
+    )
 

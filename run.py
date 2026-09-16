@@ -287,6 +287,12 @@ def main():
     )
 
     parser.add_argument(
+        "--only-ele",
+        action="store_true",
+        help="只运行 eledefects.py 生成 POSCAR/结构文件，跳过 LAMMPS 与 DPNEGF。",
+    )
+
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="只打印命令，不实际执行",
@@ -373,9 +379,16 @@ def main():
             dry_run=args.dry_run,
             env=env,
         )
-        # ============================================================
-        # 0.5 运行lammps任务
-        # ============================================================
+
+    # --only-ele：只生成 POSCAR/结构文件，跳过 LAMMPS 与 DPNEGF。
+    if args.only_ele:
+        L.info("--only-ele：已生成结构文件，跳过后续 LAMMPS / DPNEGF 阶段。")
+        return
+
+    # ============================================================
+    # 0.5 运行lammps任务
+    # ============================================================
+    if not args.skip_ele:
         L.phase(2, 6, "LAMMPS 退火")
         lammps_workdirs = find_lammps_workdirs(root)
 
