@@ -17,7 +17,7 @@
         "self_energy_options": {
             "solver": "Sancho-Rubio",
             "parallel": {
-                "cpu_budget": 6
+                "cpu_budget": 48
             },
             "cache": {
                 "use_saved": false,

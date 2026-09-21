@@ -13,16 +13,13 @@ from pathlib import Path
 
 import matplotlib.pyplot as plt
 
-
-
-
 # %%
 INPUT_file =  "./input.json" 
 
 #model =  "./nnsk_dftb.json"
-model_path = "/data/run01/scxk180/dpnegf/CNT-defects-workflow/5_5/500K/5_5/5775_L008_0.1016A-1/replica_001/dpnegf/2000/nnenv.ep181.pth"
+model_path = "/public5/home/t6s008517/dpnegf/tutorial_benchmark/2pl/dpnegf/nnenv.iter201150.pth"
 
-structure =  "./5_5.xyz" 
+structure =  "./9_0.xyz" 
 output = "output"  
 
 if os.path.exists(output):
@@ -31,7 +28,7 @@ if os.path.exists(output):
 
 negf_json = json.load(open(INPUT_file))
 negf_json = normalize_run(negf_json)
-
+#model_json = json.load(open(model))
 
 log_path = output+'/log'
 log_level = logging.INFO
@@ -40,13 +37,13 @@ set_log_handles(log_level, Path(log_path) if log_path else None)
 # model = build_model(model,model_options= model_json['model_options'],
 #                     common_options=model_json['common_options'])
 
+ckpt = torch.load(model_path, map_location="cpu")
 
 
 model = build_model(
     model_path,
-    common_options={"device":"cpu"},
 )
-model.device = "cpu"
+
 
 # %%
 negf = NEGF(
