@@ -20,10 +20,10 @@
 #
 # 本脚本会被 copy_input_dpnegf.py 原样复制到每个 DPNEGF leaf。
 #
-# 状态文件：
-#   作业开始：dpnegf_started.flag
-#   计算成功：dpnegf_done.flag
-#   计算失败：dpnegf_failed.flag
+# 状态文件（落盘逻辑见下方）：
+#   作业开始：started flag
+#   计算成功：done flag
+#   计算失败：failed flag
 #
 # CPU 配置：
 #   --ntasks=1
@@ -38,7 +38,7 @@
 #   --gpus=1
 # ============================================================
 
-set -eo pipefail
+set -Eeuo pipefail
 
 cd "${SLURM_SUBMIT_DIR:-$(pwd)}"
 
@@ -58,30 +58,38 @@ echo "======================================"
 # submitted.flag 和 job_id.txt 由 sub_dpnegf.py 管理。
 rm -f dpnegf_done.flag
 rm -f dpnegf_failed.flag
+rm -f dpnegf_started.flag
+
+on_exit() {
+    rc=$?
+
+    if (( rc != 0 )); then
+        {
+            echo "Failed at $(date)"
+            echo "Exit code: ${rc}"
+            echo "Host: $(hostname)"
+            echo "SLURM_JOB_ID=${SLURM_JOB_ID:-N/A}"
+        } > dpnegf_failed.flag
+
+        echo "[ERROR] DPNEGF failed, exit code=${rc}" >&2
+        return
+    fi
+
+    # 成功：写入 provenance hash（与 output/negf.out.pth 同层，
+    # 用于后续校验 done 结果是否与当前配置一致），并落 done flag。
+    if [ -f expected_negf_config_hash.txt ]; then
+        cp expected_negf_config_hash.txt output/negf_config_hash.txt
+    fi
+    touch dpnegf_done.flag
+    rm -f dpnegf_failed.flag
+}
+
+trap on_exit EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 # 标记作业已经真正开始运行。
 date "+%Y-%m-%d %H:%M:%S" > dpnegf_started.flag
-
-on_error() {
-    exit_code=$?
-
-    echo "======================================"
-    echo "[ERROR] DPNEGF failed"
-    echo "Time: $(date)"
-    echo "Exit code: ${exit_code}"
-    echo "======================================"
-
-    {
-        echo "Failed at $(date)"
-        echo "Exit code: ${exit_code}"
-        echo "Host: $(hostname)"
-        echo "SLURM_JOB_ID=${SLURM_JOB_ID:-N/A}"
-    } > dpnegf_failed.flag
-
-    exit "${exit_code}"
-}
-
-trap on_error ERR
 
 # 加载 DeePTB、DPNEGF 和 CUDA 环境。
 source ~/dptb.sh
@@ -111,14 +119,7 @@ echo "Starting DPNEGF calculation..."
 
 python run.py
 
-# 只有 python run.py 正常返回后才写成功标记。
-date "+%Y-%m-%d %H:%M:%S" > dpnegf_done.flag
-rm -f dpnegf_failed.flag
-
-trap - ERR
-
 echo "======================================"
 echo "DPNEGF finished successfully"
 echo "Finish time: $(date)"
-echo "Done flag: $(pwd)/dpnegf_done.flag"
 echo "======================================"

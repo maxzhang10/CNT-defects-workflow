@@ -4,6 +4,10 @@ Regression test for the P1-1 bug where run_multi.py invoked
 collect_md_conductance.py with unsupported --config / --structure-dir
 options, causing an argparse "ambiguous option" failure after all the
 expensive DPNEGF computation had already finished.
+
+Energy references (Ef/Ec/Ev) and the transport temperature are now read
+directly from each replica's negf.out.pth, so the collect command no longer
+carries --e-fermi or --transport-temperature-k.
 """
 import sys
 from pathlib import Path
@@ -39,7 +43,6 @@ def test_cmd_uses_supported_options_only():
         python=py,
         script=script,
         root=root,
-        e_fermi=0.0,
         configuration_dirs=dirs,
     )
 
@@ -48,8 +51,10 @@ def test_cmd_uses_supported_options_only():
     assert cmd[1] == str(script)
     assert "--root" in cmd
     assert cmd[cmd.index("--root") + 1] == str(root)
-    assert "--e-fermi" in cmd
-    assert cmd[cmd.index("--e-fermi") + 1] == "0.0"
+
+    # Energy references now come from negf.out.pth; no external energy flag.
+    assert "--e-fermi" not in cmd
+    assert "--transport-temperature-k" not in cmd
 
     # The flags that used to trigger the argparse failure must be absent.
     assert "--config" not in cmd
@@ -58,21 +63,18 @@ def test_cmd_uses_supported_options_only():
     # Each configuration directory is passed via the correct --configuration-dir.
     assert _flatten_pairs(cmd, "--configuration-dir") == [str(d) for d in dirs]
 
-    # No transport-temperature-k when none was requested.
-    assert "--transport-temperature-k" not in cmd
 
-
-def test_cmd_includes_transport_temperature_when_provided():
+def test_cmd_has_no_energy_flags_with_single_dir():
+    # Even with a single configuration dir, no external energy flags appear.
     cmd = run_multi.build_collect_conductance_cmd(
         python="/usr/bin/python3",
         script=Path("/repo/stage/collect_md_conductance.py"),
         root=Path("/data"),
-        e_fermi=-0.1,
         configuration_dirs=[Path("/data/DV_DV")],
-        transport_temperature_k=300.0,
     )
-    assert "--transport-temperature-k" in cmd
-    assert cmd[cmd.index("--transport-temperature-k") + 1] == "300.0"
+    assert "--e-fermi" not in cmd
+    assert "--transport-temperature-k" not in cmd
+    assert _flatten_pairs(cmd, "--configuration-dir") == [str(Path("/data/DV_DV"))]
 
 
 def test_cmd_flags_all_appear_before_repeated_configuration_dirs():
@@ -82,9 +84,8 @@ def test_cmd_flags_all_appear_before_repeated_configuration_dirs():
         python="/usr/bin/python3",
         script=Path("/repo/stage/collect_md_conductance.py"),
         root=Path("/data"),
-        e_fermi=0.0,
         configuration_dirs=[],
     )
     assert "--root" in cmd
-    assert "--e-fermi" in cmd
+    assert "--e-fermi" not in cmd
     assert _flatten_pairs(cmd, "--configuration-dir") == []

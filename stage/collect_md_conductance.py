@@ -478,7 +478,12 @@ def validate_band_edge_bias_settings(
     ev: Any,
     threshold: Any,
 ) -> tuple[float, float, float]:
-    """Validate externally supplied band edges and Fermi-window threshold."""
+    """Validate externally supplied band edges and Fermi-window threshold.
+
+    Kept for backward compatibility; the collector no longer consumes external
+    band-edge values (they are read from negf.out.pth), but downstream tooling
+    may still call this for ad-hoc validation.
+    """
     ec_value = optional_float(ec)
     ev_value = optional_float(ev)
     threshold_value = optional_float(threshold)
@@ -491,6 +496,113 @@ def validate_band_edge_bias_settings(
     if not 0.0 < threshold_value < 1.0:
         raise ValueError("fermi_difference_threshold must be between zero and one")
     return ec_value, ev_value, threshold_value
+
+
+# Field names read from each entry of the negf.out.pth `conductance` list.
+_CONDUCTANCE_ENTRY_FIELDS = ("label", "G_over_G0", "mu_absolute_eV", "temperature_K")
+
+
+def _conductance_entry_by_label(
+    payload: Mapping[str, Any],
+    label: str,
+    result_file: Path,
+) -> Mapping[str, Any]:
+    """Return the precomputed conductance entry whose ``label`` matches.
+
+    DPNEGF (new version) writes a ``conductance`` list into negf.out.pth; each
+    entry carries the chemical-potential label it was evaluated at ("Ef" in
+    fermi mode, "Ec"/"Ev" in band_edge_bias mode) together with the actual
+    energy ``mu_absolute_eV`` and the resulting ``G_over_G0``. Matching by label
+    ensures we use exactly the chemical potential DPNEGF applied, rather than
+    recomputing or relying on externally supplied values.
+    """
+    entries = payload.get("conductance")
+    if not isinstance(entries, list) or not entries:
+        raise ValueError(
+            f"{result_file}: missing or empty 'conductance' list. "
+            "Ensure input.json has conductance_options.mu set (e.g. ['Ef'] or "
+            "['Ev','Ec']) and output_options.conductance is enabled."
+        )
+    for entry in entries:
+        if not isinstance(entry, Mapping):
+            continue
+        if str(entry.get("label", "")) == label:
+            missing = [
+                f for f in _CONDUCTANCE_ENTRY_FIELDS if f not in entry
+            ]
+            if missing:
+                raise ValueError(
+                    f"{result_file}: conductance entry label={label!r} is "
+                    f"missing field(s): {', '.join(missing)}"
+                )
+            return entry
+    found_labels = [
+        str(e.get("label", "?"))
+        for e in entries
+        if isinstance(e, Mapping)
+    ]
+    raise ValueError(
+        f"{result_file}: no conductance entry with label={label!r}; "
+        f"found labels={found_labels}. Check input.json conductance_options.mu."
+    )
+
+
+def _entry_float(entry: Mapping[str, Any], key: str) -> float:
+    value = optional_float(entry.get(key))
+    if value is None or not math.isfinite(value):
+        raise ValueError(
+            f"conductance entry label={entry.get('label')!r}: "
+            f"field {key!r} is missing or not finite"
+        )
+    return value
+
+
+def _entry_window(entry: Mapping[str, Any]) -> tuple[float, float] | None:
+    window = entry.get("window_eV")
+    if isinstance(window, (list, tuple)) and len(window) == 2:
+        lo = optional_float(window[0])
+        hi = optional_float(window[1])
+        if lo is not None and hi is not None:
+            return (lo, hi)
+    return None
+
+
+def _band_edge_energy(
+    payload: Mapping[str, Any],
+    key: str,
+    result_file: Path,
+    lead: str = "lead_L",
+) -> float:
+    """Read a band-edge energy (E_c/E_v) recorded in negf.out.pth."""
+    container = payload.get(key)
+    if not isinstance(container, Mapping):
+        raise ValueError(
+            f"{result_file}: missing '{key}' (expected a per-lead mapping); "
+            "band_edge_bias mode requires compute_band_edges in input.json."
+        )
+    value = optional_float(container.get(lead))
+    if value is None:
+        raise ValueError(
+            f"{result_file}: '{key}' has no finite entry for lead {lead!r}; "
+            f"available leads={list(container.keys())}"
+        )
+    return value
+
+
+def _load_energy_grid(payload: Mapping[str, Any], result_file: Path) -> tuple[float, float, int]:
+    """Return (grid_min_eV, grid_max_eV, n_points) from the result file."""
+    grid_value = None
+    for key in ("uni_grid", "energy_grid"):
+        if key in payload:
+            grid_value = payload[key]
+            break
+    if grid_value is None:
+        raise ValueError(f"{result_file}: missing 'uni_grid'/'energy_grid'")
+    grid = np.squeeze(to_numpy(grid_value, "energy grid"))
+    grid = np.ravel(grid)
+    if grid.size < 2 or not np.all(np.isfinite(grid)):
+        raise ValueError(f"{result_file}: energy grid is empty or non-finite")
+    return float(grid[0]), float(grid[-1]), int(grid.size)
 
 
 def fermi_window_half_width(temperature_k: float, threshold: float) -> float:
@@ -731,103 +843,100 @@ def _config_mismatches(
 def build_replica_result(
     configuration_dir: Path,
     replica_dir: Path,
-    e_fermi: float,
-    transport_temperature_k: float | None,
-    reduction: str,
     expected_replicas_override: int | None,
     configured_temperature_k: float | None = None,
     conductance_mode: str = "fermi",
-    band_edges: tuple[float, float] | None = None,
-    fermi_difference_threshold: float | None = None,
 ) -> ReplicaResult:
+    """Build a ReplicaResult by reading precomputed conductance from negf.out.pth.
+
+    The new DPNEGF writes a ``conductance`` list into negf.out.pth; each entry
+    carries the chemical-potential label it was evaluated at ("Ef" in fermi
+    mode, "Ec"/"Ev" in band_edge_bias mode) together with the actual energy
+    ``mu_absolute_eV`` and the resulting ``G_over_G0``. The collector therefore
+    reads G directly by label instead of recomputing the Landauer integral,
+    and reads Ec/Ev/Ef energies from the result file rather than from external
+    parameters. Missing fields/labels are reported with the file path.
+    """
     config = read_json(replica_dir / "workflow_config.json")
     path_meta = parse_path_metadata(configuration_dir)
 
-    # Effective transport temperature precedence:
-    #   explicit --transport-temperature-k override
-    #   -> per-configuration configured_temperature_k
-    #   -> workflow_config.json temperature
-    #   -> path temperature
-    #   -> 300 K fallback.
-    # This is the single resolution used by every conductance path below
-    # (linear response, band-edge half_width, Gc and Gv), so all of them
-    # share one consistent transport temperature.
-    effective_transport_temperature_k = transport_temperature_k
-    if effective_transport_temperature_k is None:
-        effective_transport_temperature_k = configured_temperature_k
-    if effective_transport_temperature_k is None:
-        effective_transport_temperature_k = optional_float(
-            config.get("temperature")
-        )
-    if effective_transport_temperature_k is None:
-        effective_transport_temperature_k = path_meta["temperature_K"]
-    if effective_transport_temperature_k is None:
-        effective_transport_temperature_k = 300.0
-
     replica_number = parse_replica_number(replica_dir)
     result_file = choose_result_file(replica_dir, config)
+    payload = load_torch_file(result_file)
 
-    (
-        conductance,
-        grid_min,
-        grid_max,
-        n_energy,
-        energy_key,
-        transmission_key,
-    ) = process_result_file(
-        result_file=result_file,
-        e_fermi=e_fermi,
-        transport_temperature_k=effective_transport_temperature_k,
-        reduction=reduction,
-    )
+    grid_min, grid_max, n_energy = _load_energy_grid(payload, result_file)
+
+    # Determine the conductance mode from the labels actually present in the
+    # result file, then cross-check against the requested mode so a mismatch
+    # (e.g. workflow_config says band_edge_bias but the .pth only has "Ef")
+    # is reported explicitly rather than silently producing wrong numbers.
+    entries = payload.get("conductance")
+    labels = {
+        str(e.get("label", ""))
+        for e in entries
+        if isinstance(e, Mapping)
+    } if isinstance(entries, list) else set()
+    if {"Ec", "Ev"} <= labels:
+        inferred_mode = "band_edge_bias"
+    elif "Ef" in labels:
+        inferred_mode = "fermi"
+    else:
+        inferred_mode = None
+    if inferred_mode is None:
+        raise ValueError(
+            f"{result_file}: cannot infer conductance mode from labels "
+            f"{sorted(labels)}; expected 'Ef' (fermi) or 'Ev'+'Ec' "
+            "(band_edge_bias). Check input.json conductance_options.mu."
+        )
+    if inferred_mode != conductance_mode:
+        raise ValueError(
+            f"{result_file}: conductance mode mismatch: requested "
+            f"{conductance_mode!r} but result labels imply {inferred_mode!r} "
+            f"(labels={sorted(labels)}). Check input.json conductance_options.mu."
+        )
 
     ec = ev = gap = None
     gc = gv = ln_gc = ln_gv = None
     conduction_text = valence_text = None
+    threshold = None
+    e_ref_eV = optional_float(payload.get("E_ref"))
+    mu_fermi_eV = None
+
     if conductance_mode == "band_edge_bias":
-        if band_edges is None or fermi_difference_threshold is None:
-            raise ValueError("band_edge_bias requires Ec_eV, Ev_eV, and fermi_difference_threshold")
-        ec, ev = band_edges
+        # Ec/Ev are computed by DPNEGF (compute_band_edges) and recorded in the
+        # result file; read them from there rather than from external parameters.
+        ec = _band_edge_energy(payload, "E_c", result_file)
+        ev = _band_edge_energy(payload, "E_v", result_file)
         gap = ec - ev
-        energy, transmission, _, _ = load_transmission_curve(result_file, reduction)
-        grid_min, grid_max = float(energy[0]), float(energy[-1])
-        half_width = fermi_window_half_width(
-            effective_transport_temperature_k, fermi_difference_threshold
-        )
-        # Band-edge Fermi-window coverage/convergence check: the transmission
-        # energy grid must span [edge - half_width, edge + half_width] so the
-        # band-edge window (capturing 1 - threshold of the kernel) is fully
-        # contained -- consistent with the fermi-mode coverage gate, centred on
-        # each band edge and controlled by fermi_difference_threshold.
-        if half_width > 0.0:
-            for edge, label in ((ec, "Ec"), (ev, "Ev")):
-                lower, upper = edge - half_width, edge + half_width
-                if lower < grid_min or upper > grid_max:
-                    raise ValueError(
-                        f"{label}={edge:g} eV Fermi window [{lower:g}, {upper:g}] eV "
-                        f"is not fully contained in the transmission energy range "
-                        f"[{grid_min:g}, {grid_max:g}] eV"
-                    )
-        # Reuse the same linear-response Fermi-window integral as fermi mode,
-        # using each band edge as the chemical potential.
-        gc = interpolate_conductance(
-            energy, transmission, e_fermi=ec,
-            temperature_k=effective_transport_temperature_k,
-        )
-        gv = interpolate_conductance(
-            energy, transmission, e_fermi=ev,
-            temperature_k=effective_transport_temperature_k,
-        )
+
+        ec_entry = _conductance_entry_by_label(payload, "Ec", result_file)
+        ev_entry = _conductance_entry_by_label(payload, "Ev", result_file)
+        gc = _entry_float(ec_entry, "G_over_G0")
+        gv = _entry_float(ev_entry, "G_over_G0")
+        threshold = optional_float(ec_entry.get("omitted_kernel_mass"))
+        ec_window = _entry_window(ec_entry)
+        ev_window = _entry_window(ev_entry)
+        if ec_window is not None:
+            conduction_text = f"[{ec_window[0]:g}, {ec_window[1]:g}]"
+        if ev_window is not None:
+            valence_text = f"[{ev_window[0]:g}, {ev_window[1]:g}]"
+        # Transport temperature is recorded per conductance entry by DPNEGF;
+        # use the conduction-band entry (both entries share the same temperature).
+        effective_transport_temperature_k = _entry_float(ec_entry, "temperature_K")
         ln_gc = math.log(gc) if gc > 0.0 else None
         ln_gv = math.log(gv) if gv > 0.0 else None
-        conduction_text = f"[{ec - half_width:g}, {ec + half_width:g}]"
-        valence_text = f"[{ev - half_width:g}, {ev + half_width:g}]"
+    else:
+        ef_entry = _conductance_entry_by_label(payload, "Ef", result_file)
+        effective_transport_temperature_k = _entry_float(ef_entry, "temperature_K")
+        mu_fermi_eV = _entry_float(ef_entry, "mu_absolute_eV")
 
-    conductance_method = (
-        "zero-temperature interpolation"
-        if effective_transport_temperature_k <= 0.0
-        else "finite-temperature Fermi-window integral"
+    conductance = (
+        (gc + gv) / 2.0
+        if conductance_mode == "band_edge_bias"
+        else _entry_float(ef_entry, "G_over_G0")
     )
+
+    conductance_method = "dpnegf precomputed (" + conductance_mode + ")"
 
     chirality = config.get("chirality")
     chirality_m = path_meta["chirality_m"]
@@ -883,9 +992,19 @@ def build_replica_result(
         else None
     )
 
+    # e_fermi_eV: the actual chemical potential DPNEGF used for the (fermi-mode)
+    # linear-response conductance; in band_edge_bias mode it is not a target, so
+    # report E_ref (the absolute energy reference) instead for context.
+    e_fermi_eV = (
+        mu_fermi_eV
+        if conductance_mode == "fermi"
+        else e_ref_eV
+    )
+
     info(
-        f"{replica_dir}: {energy_key}/{transmission_key}, "
-        f"G/G0({e_fermi:g} eV, {effective_transport_temperature_k:g} K)={conductance:.10g}"
+        f"{replica_dir}: labels={sorted(labels)}, "
+        f"G/G0={conductance:.10g} "
+        f"({effective_transport_temperature_k:g} K)"
     )
 
     return ReplicaResult(
@@ -908,7 +1027,7 @@ def build_replica_result(
         dpnegf_sample=dpnegf_sample,
         conductance_G0=conductance,
         ln_conductance_G0=ln_conductance,
-        e_fermi_eV=e_fermi,
+        e_fermi_eV=e_fermi_eV,
         transport_temperature_K=effective_transport_temperature_k,
         conductance_method=conductance_method,
         grid_min_eV=grid_min,
@@ -926,9 +1045,7 @@ def build_replica_result(
         Gv_G0=gv,
         ln_Gc_G0=ln_gc,
         ln_Gv_G0=ln_gv,
-        fermi_difference_threshold=(
-            fermi_difference_threshold if conductance_mode == "band_edge_bias" else None
-        ),
+        fermi_difference_threshold=threshold,
         censored=censored,
     )
 
@@ -1131,10 +1248,10 @@ def build_configuration_log(
         f"unexpected replica IDs: {list(summary.unexpected_replica_ids)}",
         "",
         (
-            "Summary (Fermi-energy conductance: G/G0 = integral T(E) [-df/dE] dE; "
-            "at T=0, G/G0 = T(E_F))"
+            "Summary (band-edge conductance read from negf.out.pth; "
+            "G/G0 averaged over Gc@Ec and Gv@Ev)"
             if summary.conductance_mode == "band_edge_bias"
-            else "Summary (G/G0 = integral T(E) [-df/dE] dE; at T=0, G/G0 = T(E_F))"
+            else "Summary (G/G0 read from negf.out.pth at Ef)"
         ),
         f"mean:             {summary.mean_G0:.16g}",
         f"std:              {summary.std_G0:.16g}",
@@ -1210,9 +1327,10 @@ def replica_fieldnames() -> list[str]:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Collect linear-response conductance from replica_XXX directories "
-            "using the Landauer Fermi-window integral (or T(E_F) at T=0), "
-            "then write only per-configuration CSV and log files."
+            "Collect precomputed conductance from replica_XXX directories by "
+            "reading the DPNEGF-written negf.out.pth (fermi mode: G at Ef; "
+            "band_edge_bias mode: Gc at Ec, Gv at Ev), then write only "
+            "per-configuration CSV and log files."
         )
     )
     parser.add_argument(
@@ -1235,26 +1353,10 @@ def parse_args() -> argparse.Namespace:
         default=[],
         metavar="JSON",
         help=(
-            "Per-configuration JSON object containing configuration_dir and "
-            "conductance settings. band_edge_bias requires Ec_eV, Ev_eV, and "
-            "fermi_difference_threshold. May be supplied multiple times."
-        ),
-    )
-    parser.add_argument(
-        "--e-fermi",
-        type=float,
-        default=0.0,
-        help="Fermi energy in eV. Default: 0.0.",
-    )
-    parser.add_argument(
-        "--transport-temperature-k",
-        type=float,
-        default=None,
-        help=(
-            "Transport temperature in K. If omitted, use temperature from "
-            "workflow_config.json, then path metadata, then 300 K fallback. "
-            "Set 0 to force zero-temperature interpolation G/G0=T(E_F); "
-            "values >0 use finite-temperature Fermi-window integration."
+            "Per-configuration JSON object with configuration_dir and "
+            "optionally temperature/conductance_mode. Energy references "
+            "(Ef/Ec/Ev) are read from each replica's negf.out.pth and are "
+            "NOT supplied here. May be supplied multiple times."
         ),
     )
     parser.add_argument(
@@ -1267,14 +1369,22 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
-        "--component-reduction",
-        choices=("error", "sum", "mean", "first"),
-        default="error",
+        "--allow-partial",
+        action="store_true",
         help=(
-            "How to combine extra transmission components if T_avg is not "
-            "one-dimensional. Default: error."
+            "Write available results and exit successfully when replicas are "
+            "missing or invalid."
         ),
     )
+    parser.add_argument(
+        "--per-config-csv",
+        default="replica_conductance.csv",
+    )
+    parser.add_argument(
+        "--per-config-log",
+        default="replica_conductance.log",
+    )
+    return parser.parse_args()
     parser.add_argument(
         "--allow-partial",
         action="store_true",
@@ -1300,12 +1410,6 @@ def main() -> int:
     if not root.is_dir():
         error(f"root directory does not exist: {root}")
         return 1
-    if (
-        args.transport_temperature_k is not None
-        and args.transport_temperature_k < 0.0
-    ):
-        error("--transport-temperature-k must be non-negative")
-        return 1
     if args.expected_replicas is not None and args.expected_replicas < 1:
         error("--expected-replicas must be greater than zero")
         return 1
@@ -1321,19 +1425,14 @@ def main() -> int:
             mode = setting.get("conductance_mode", "fermi")
             if mode not in {"fermi", "band_edge_bias"}:
                 raise ValueError("conductance_mode must be 'fermi' or 'band_edge_bias'")
-            if mode == "band_edge_bias":
-                ec, ev, threshold = validate_band_edge_bias_settings(
-                    setting.get("Ec_eV"), setting.get("Ev_eV"),
-                    setting.get("fermi_difference_threshold"),
-                )
             temperature = optional_float(setting.get("temperature"))
             if temperature is None or temperature < 0.0:
                 raise ValueError("configuration setting temperature must be non-negative")
+            # Energy references (Ef/Ec/Ev) are read from each replica's
+            # negf.out.pth; they are NOT supplied here.
             settings_by_dir[path_key] = {
                 "temperature": temperature,
                 "conductance_mode": mode,
-                "band_edges": (ec, ev) if mode == "band_edge_bias" else None,
-                "fermi_difference_threshold": threshold if mode == "band_edge_bias" else None,
             }
     except (json.JSONDecodeError, TypeError, ValueError) as exc:
         error(f"invalid --configuration-settings: {exc}")
@@ -1390,6 +1489,8 @@ def main() -> int:
         # P2-3：聚合前核对所有 replica 的物理参数一致。
         # 目录被手工合并/部分重跑/配置漂移时，收集器可把不同温度/带边/偏压
         # 的结果合并成一组而不报错；此处显式拒绝。
+        # Ec/Ev/Ef 不再作为外部参数存在于 workflow_config，而是由 DPNEGF
+        # 计算后随结果文件输出，因此不参与一致性比较。
         consistency_keys = (
             "chirality",
             "l_def",
@@ -1397,9 +1498,6 @@ def main() -> int:
             "structures",
             "temperature",
             "conductance_mode",
-            "Ec_eV",
-            "Ev_eV",
-            "fermi_difference_threshold",
             "espacing",
             "negf_energy_window",
         )
@@ -1427,64 +1525,14 @@ def main() -> int:
             error(message)
             all_problems.append(message)
             continue
-        if conductance_mode == "band_edge_bias":
-            try:
-                band_edges = settings.get("band_edges")
-                threshold = settings.get("fermi_difference_threshold")
-                if band_edges is None or threshold is None:
-                    ec, ev, threshold = validate_band_edge_bias_settings(
-                        first_config.get("Ec_eV"), first_config.get("Ev_eV"),
-                        first_config.get("fermi_difference_threshold"),
-                    )
-                    band_edges = (ec, ev)
-                # 两个带边的 Fermi 窗口宽度由温度和 threshold 决定。
-                # 小带隙/高温时窗口相交意味着电子、空穴输运贡献不能完全分离；
-                # 这是物理诊断信息，不应阻止用户继续得到带边结果。
-                configured_temperature_for_window = args.transport_temperature_k
-                if configured_temperature_for_window is None:
-                    configured_temperature_for_window = settings.get("temperature")
-                if configured_temperature_for_window is None:
-                    configured_temperature_for_window = optional_float(first_config.get("temperature"))
-                if configured_temperature_for_window is None:
-                    configured_temperature_for_window = parse_path_metadata(configuration_dir)["temperature_K"]
-                if configured_temperature_for_window is None:
-                    configured_temperature_for_window = 300.0
-                half_width = fermi_window_half_width(
-                    configured_temperature_for_window, threshold
-                )
-                ev, ec = band_edges[1], band_edges[0]
-                valence_upper = ev + half_width
-                conduction_lower = ec - half_width
-                if valence_upper >= conduction_lower:
-                    warn(
-                        f"{configuration_dir}: band-edge Fermi windows overlap "
-                        f"([{ev - half_width:g}, {valence_upper:g}] and "
-                        f"[{conduction_lower:g}, {ec + half_width:g}] eV); "
-                        "electron and hole conductance are mixed"
-                    )
-            except ValueError as exc:
-                message = f"{configuration_dir}: invalid band_edge_bias configuration: {exc}"
-                error(message)
-                all_problems.append(message)
-                continue
-        else:
-            band_edges = None
-            threshold = None
-        configured_temperature_k = settings.get("temperature")
 
         for replica_dir in replica_dirs:
             try:
                 result = build_replica_result(
                     configuration_dir=configuration_dir,
                     replica_dir=replica_dir,
-                    e_fermi=args.e_fermi,
-                    transport_temperature_k=args.transport_temperature_k,
-                    reduction=args.component_reduction,
                     expected_replicas_override=args.expected_replicas,
-                    configured_temperature_k=configured_temperature_k,
                     conductance_mode=conductance_mode,
-                    band_edges=band_edges,
-                    fermi_difference_threshold=threshold,
                 )
             except Exception as exc:
                 message = (

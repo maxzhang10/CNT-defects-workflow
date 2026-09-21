@@ -3,6 +3,10 @@
 copy_input_dpnegf.py used r_max only to compute principal-layer partitioning
 but left the top-level AtomicData_options.r_max at the template's fixed 6.5,
 so PL coupling range and Hamiltonian cutoff could diverge when r_max != 6.5.
+
+Energy grid is no longer injected by the workflow (it uses the template's
+energy_grid default), so update_input_json_for_leaf no longer takes
+espacing/negf_energy_window.
 """
 import json
 import sys
@@ -30,9 +34,11 @@ def _make_input_json(path: Path, r_max=6.5):
     """Write a minimal input.json mirroring the template's relevant structure."""
     data = {
         "task_options": {
-            "espacing": 0.1,
-            "emin": -0.5,
-            "emax": 0.5,
+            "energy_grid": {
+                "method": "clenshaw_curtis",
+                "num_points": 33,
+                "half_width": 0.4,
+            },
             "self_energy_options": {"cache": {}},
             "stru_options": {
                 "lead_L": {"id": "0-0"},
@@ -74,8 +80,6 @@ def test_r_max_synced_to_atomic_data_options(tmp_path):
         leaf_dir=tmp_path,
         model_filename="nnenv.pth",
         chirality=(5, 5),
-        espacing=0.1,
-        negf_energy_window=(-0.5, 0.5),
         self_energy_cache={"use_saved": True},
         r_max=r_max,
         n_lead_pl=2,
@@ -97,9 +101,11 @@ def test_r_max_atomic_data_options_created_if_absent(tmp_path):
     _make_struct_fdf(tmp_path / "STRUCT.fdf", n_total)
     data = {
         "task_options": {
-            "espacing": 0.1,
-            "emin": -0.5,
-            "emax": 0.5,
+            "energy_grid": {
+                "method": "clenshaw_curtis",
+                "num_points": 33,
+                "half_width": 0.4,
+            },
             "self_energy_options": {"cache": {}},
             "stru_options": {
                 "lead_L": {"id": "0-0"},
@@ -116,8 +122,6 @@ def test_r_max_atomic_data_options_created_if_absent(tmp_path):
         leaf_dir=tmp_path,
         model_filename="nnenv.pth",
         chirality=(5, 5),
-        espacing=0.1,
-        negf_energy_window=(-0.5, 0.5),
         self_energy_cache=None,
         r_max=r_max,
         n_lead_pl=2,

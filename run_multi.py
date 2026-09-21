@@ -364,31 +364,24 @@ def build_collect_conductance_cmd(
     python: str,
     script: Path,
     root: Path,
-    e_fermi: float,
     configuration_dirs: list[Path],
-    transport_temperature_k: float | None = None,
 ) -> list[str]:
     """Build the collect_md_conductance.py invocation.
 
     collect_md_conductance.py only accepts --root / --configuration-dir /
     --configuration-settings -- it has no --config / --structure-dir options,
     so passing those makes argparse raise "ambiguous option" *after* all the
-    expensive DPNEGF work has finished. Conductance mode, temperature, and
-    band-edge (Ec/Ev/threshold) settings are read by the collector from each
-    replica's workflow_config.json, so they need not be repeated here.
+    expensive DPNEGF work has finished. Conductance values (Ef/Ec/Ev) and the
+    transport temperature are read by the collector directly from each
+    replica's negf.out.pth (precomputed by DPNEGF), so no external energy
+    reference or temperature needs to be passed here.
     """
     cmd = [
         python,
         str(script),
         "--root",
         str(root),
-        "--e-fermi",
-        str(e_fermi),
     ]
-    if transport_temperature_k is not None:
-        cmd.extend(
-            ["--transport-temperature-k", str(transport_temperature_k)]
-        )
     for struct_dir in configuration_dirs:
         cmd.extend(["--configuration-dir", str(struct_dir)])
     return cmd
@@ -452,23 +445,6 @@ def main():
         "--conductance-python",
         default=None,
         help="运行电导收集脚本的 Python；默认复用 --python（需要 torch）",
-    )
-
-    parser.add_argument(
-        "--e-fermi",
-        type=float,
-        default=0.0,
-        help="提取电导所用的费米能，默认 0 eV",
-    )
-
-    parser.add_argument(
-        "--transport-temperature-k",
-        type=float,
-        default=None,
-        help=(
-            "电导计算的输运温度(K)。优先使用该参数；"
-            "未提供时尝试使用 config.temperature。"
-        ),
     )
 
     parser.add_argument(
@@ -832,15 +808,14 @@ def main():
             # --configuration-dir / --configuration-settings，不接受
             # --config / --structure-dir（后者会让 argparse 报
             # ambiguous option 而在昂贵计算结束后失败）。
-            # 电导模式、温度、带边 (Ec/Ev/threshold) 由收集器从每个
-            # replica 的 workflow_config.json 兜底读取，无需在此重复传入。
+            # 电导值（Ef/Ec/Ev）与输运温度由收集器直接从每个 replica 的
+            # negf.out.pth 读取（由 DPNEGF 预计算），无需在此传入外部能量
+            # 参考或温度。
             cmd = build_collect_conductance_cmd(
                 python=conductance_python or (args.conductance_python or py),
                 script=collect_conductance_script,
                 root=root,
-                e_fermi=args.e_fermi,
                 configuration_dirs=structure_dirs,
-                transport_temperature_k=args.transport_temperature_k,
             )
 
             run_cmd(cmd, dry_run=args.dry_run, env=env)

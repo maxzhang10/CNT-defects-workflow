@@ -4,7 +4,6 @@ import argparse
 import copy
 import importlib
 import json
-import math
 import subprocess
 import sys
 import tempfile
@@ -20,18 +19,14 @@ CHIRAL_CONFIGS = [
         "l_def": 8,
         "N_defects": 2,
         "structures": ["5775"],
-        # 普通费米能级电导模式：可省略（默认即为 fermi），
-        # "conductance_mode": "fermi",
-        # 带边电导示例：启用时由外部 Ec/Ev 作为化学势定义两个计算中心。
-        # "conductance_mode": "band_edge_bias",
-        # "Ec_eV": 0.32,
-        # "Ev_eV": -0.28,
-        # "fermi_difference_threshold": 1e-6,
-        # DPNEGF 透射谱能量网格步长（eV）。
-        "espacing": 0.1,
-        # DPNEGF 透射谱能量范围 [emin, emax]（eV）。
-        # 该范围同时适用于 fermi 和 band_edge_bias 电导模式。
-        "negf_energy_window": [-0.5, 0.5],
+        # 电导模式决定写入 input.json 的 conductance_options.mu 标签：
+        #   fermi           -> ["Ef"]      （以费米能级为化学势）
+        #   band_edge_bias  -> ["Ev", "Ec"]（以带边为化学势）
+        # Ec/Ev/Ef 的实际能量值不再由外部提供，而是由 DPNEGF 内部计算
+        # 并随 negf.out.pth 的 conductance 列表输出，由收集器按标签读取。
+        "conductance_mode": "band_edge_bias",
+        # 能量网格（energy_grid: clenshaw_curtis/num_points/half_width）完全
+        # 沿用 input.json 模板默认值，不再由工作流外置。
     }
 ]
 
@@ -66,10 +61,8 @@ TEMPLATE = {
     "md_sampling": {
         "n_samples": 1,
     },
-    # DPNEGF 透射谱能量网格步长（eV）。
-    "espacing": 0.1,
-    # DPNEGF 透射谱的计算范围 [emin, emax]（eV）。
-    "negf_energy_window": [-0.5, 0.5],
+    # 能量网格（energy_grid: clenshaw_curtis/num_points/half_width）完全沿用
+    # input.json 模板默认值，不再由工作流外置 espacing/negf_energy_window。
     # False 保持既有行为：DPNEGF 成功后清理 output/self_energy。
     "save_self_energy": False,
     # 覆盖 DPNEGF input.json 的 self_energy_options.cache 配置。
@@ -151,55 +144,13 @@ def build_tasks(
         conductance_mode = cfg.get("conductance_mode", "fermi")
         if conductance_mode not in {"fermi", "band_edge_bias"}:
             raise ValueError("conductance_mode must be 'fermi' or 'band_edge_bias'")
-        band_edge_settings = {}
-        if conductance_mode == "band_edge_bias":
-            try:
-                ec = float(cfg["Ec_eV"])
-                ev = float(cfg["Ev_eV"])
-                threshold = float(cfg["fermi_difference_threshold"])
-            except (KeyError, TypeError, ValueError) as exc:
-                raise ValueError(
-                    "band_edge_bias requires numeric Ec_eV, Ev_eV, "
-                    "and fermi_difference_threshold"
-                ) from exc
-            if not all(math.isfinite(value) for value in (ec, ev, threshold)):
-                raise ValueError("band_edge_bias settings must be finite")
-            if ev >= ec or not 0.0 < threshold < 1.0:
-                raise ValueError("band_edge_bias requires Ev_eV < Ec_eV and 0 < fermi_difference_threshold < 1")
-            band_edge_settings = {
-                "Ec_eV": ec, "Ev_eV": ev,
-                "fermi_difference_threshold": threshold,
-            }
-        raw_negf_window = cfg.get(
-            "negf_energy_window", TEMPLATE["negf_energy_window"]
-        )
-        if (
-            not isinstance(raw_negf_window, (list, tuple))
-            or len(raw_negf_window) != 2
-        ):
-            raise ValueError("negf_energy_window must be [emin, emax] in eV")
-        try:
-            negf_energy_window = [
-                float(raw_negf_window[0]), float(raw_negf_window[1])
-            ]
-        except (TypeError, ValueError) as exc:
-            raise ValueError("negf_energy_window must contain two numeric values") from exc
-        if (
-            not all(math.isfinite(value) for value in negf_energy_window)
-            or negf_energy_window[0] >= negf_energy_window[1]
-        ):
-            raise ValueError("negf_energy_window requires finite emin < emax")
         save_self_energy = cfg.get(
             "save_self_energy", TEMPLATE["save_self_energy"]
         )
         if not isinstance(save_self_energy, bool):
             raise ValueError("save_self_energy must be a boolean")
-        try:
-            espacing = float(cfg.get("espacing", TEMPLATE["espacing"]))
-        except (TypeError, ValueError) as exc:
-            raise ValueError("espacing must be a positive numeric value in eV") from exc
-        if not math.isfinite(espacing) or espacing <= 0.0:
-            raise ValueError("espacing must be a finite positive value in eV")
+        # 能量网格（energy_grid）完全沿用 input.json 模板默认值，
+        # 不再从 cfg/TEMPLATE 读取 espacing/negf_energy_window。
         for temperature in TEMPERATURES:
             physical_index += 1
 
@@ -293,11 +244,8 @@ def build_tasks(
                     "length": int(length),
                     "seed": structure_seed,
                     "lammps_seed": lammps_seed,
-                    "espacing": espacing,
-                    "negf_energy_window": negf_energy_window,
                     "save_self_energy": save_self_energy,
                     "conductance_mode": conductance_mode,
-                    **band_edge_settings,
                 })
 
     return tasks
@@ -311,6 +259,17 @@ def make_task_config(task):
     structure_root 和 run_multi.py 的 --root 都指向具体 replica 目录。
     """
     config = copy.deepcopy(TEMPLATE)
+
+    # conductance_options.mu 只写入字符串标签（非数值）：
+    #   fermi          -> ["Ef"]
+    #   band_edge_bias -> ["Ev", "Ec"]
+    # Ec/Ev/Ef 的实际能量值由 DPNEGF 计算后随 negf.out.pth 输出，
+    # 由收集器按标签从结果文件读取，不再由外部提供。
+    mu_labels = (
+        ["Ev", "Ec"]
+        if task["conductance_mode"] == "band_edge_bias"
+        else ["Ef"]
+    )
 
     config.update({
         "temperature": task["temperature"],
@@ -330,13 +289,11 @@ def make_task_config(task):
         "density_A_inv": task["density"],
         "configuration_root": str(task["configuration_root"]),
         "md_sampling": {"n_samples": 1},
-        "espacing": task["espacing"],
-        "negf_energy_window": task["negf_energy_window"],
         "save_self_energy": task["save_self_energy"],
         "conductance_mode": task["conductance_mode"],
-        "Ec_eV": task.get("Ec_eV"),
-        "Ev_eV": task.get("Ev_eV"),
-        "fermi_difference_threshold": task.get("fermi_difference_threshold"),
+        "conductance_options": {
+            "mu": mu_labels,
+        },
     })
 
     return config
@@ -680,23 +637,6 @@ def main():
     )
 
     parser.add_argument(
-        "--e-fermi",
-        type=float,
-        default=0.0,
-        help="汇总电导时使用的费米能，默认 0 eV。",
-    )
-
-    parser.add_argument(
-        "--transport-temperature-k",
-        type=float,
-        default=None,
-        help=(
-            "汇总电导时使用的输运温度(K)。默认不传，让每个配置使用各自"
-            " workflow_config.json 中的温度；可通过该参数显式全局覆盖。"
-        ),
-    )
-
-    parser.add_argument(
         "--skip-conductance",
         action="store_true",
         help="跳过批次结束后的跨 replica 电导汇总。",
@@ -719,14 +659,6 @@ def main():
     if args.lammps_repeats < 1:
         raise ValueError(
             "--lammps-repeats 必须大于 0"
-        )
-
-    if (
-        args.transport_temperature_k is not None
-        and args.transport_temperature_k < 0.0
-    ):
-        raise ValueError(
-            "--transport-temperature-k 必须大于等于 0"
         )
 
     workflow_dir = Path(
@@ -930,19 +862,9 @@ def main():
             str(collect_script),
             "--root",
             str(base_root),
-            "--e-fermi",
-            str(args.e_fermi),
             "--expected-replicas",
             str(args.lammps_repeats),
         ]
-
-        if args.transport_temperature_k is not None:
-            collect_cmd.extend(
-                [
-                    "--transport-temperature-k",
-                    str(args.transport_temperature_k),
-                ]
-            )
 
         # 只汇总本次 batch 展开的物理配置，避免把 data_root 下
         # 其他历史配置或测试目录混入本次总表。
@@ -978,9 +900,6 @@ def main():
                             "configuration_dir": str(configuration_root),
                             "temperature": first_task["temperature"],
                             "conductance_mode": first_task["conductance_mode"],
-                            "Ec_eV": first_task.get("Ec_eV"),
-                            "Ev_eV": first_task.get("Ev_eV"),
-                            "fermi_difference_threshold": first_task.get("fermi_difference_threshold"),
                         }
                     ),
                 ]

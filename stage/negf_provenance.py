@@ -30,7 +30,9 @@ from typing import Any, Mapping
 #   结构：chirality / l_def / N_defects / structures / seed / r_max /
 #         md_steps / md_sampling / temperature
 #   MD 轨迹：lammps_seed
-#   NEGF / Hamiltonian：espacing / negf_energy_window / self_energy_cache
+#   NEGF / Hamiltonian：self_energy_cache
+# 能量网格（energy_grid）完全沿用 input.json 模板默认值，不再作为 workflow
+# 参数外置，故 espacing / negf_energy_window 不再纳入 hash。
 NEGF_CONFIG_KEYS = (
     "chirality",
     "l_def",
@@ -42,8 +44,6 @@ NEGF_CONFIG_KEYS = (
     "md_steps",
     "md_sampling",
     "temperature",
-    "espacing",
-    "negf_energy_window",
     "self_energy_cache",
 )
 

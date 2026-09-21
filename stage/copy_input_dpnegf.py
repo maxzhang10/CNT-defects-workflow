@@ -2,7 +2,6 @@
 import os
 import re
 import json
-import math
 import copy
 import shutil
 import argparse
@@ -123,8 +122,6 @@ def update_input_json_for_leaf(
     leaf_dir,
     model_filename,
     chirality,
-    espacing,
-    negf_energy_window,
     self_energy_cache,
     r_max=6.5,
     n_lead_pl=2,
@@ -171,9 +168,8 @@ def update_input_json_for_leaf(
 
     # 保留模板 input.json 中的 ele_T。工作流的 temperature 用于结构/MD，
     # 不应再隐式覆盖 DPNEGF 电极温度。
-    task_options["espacing"] = espacing
-    task_options["emin"] = negf_energy_window[0]
-    task_options["emax"] = negf_energy_window[1]
+    # 能量网格（energy_grid: clenshaw_curtis/num_points/half_width）完全沿用
+    # 模板默认值，不再由工作流注入 espacing/emin/emax（新版 DPNEGF 已弃用）。
     task_options["self_energy_options"]["cache"] = copy.deepcopy(self_energy_cache)
 
     # 同步 workflow 的 r_max 到顶层 AtomicData_options.r_max。
@@ -208,8 +204,6 @@ def update_input_json_for_leaf(
         f"  lead_L.id = {lead_L_id}\n"
         f"  device.id = {device_id}\n"
         f"  lead_R.id = {lead_R_id}"
-        f"\n  espacing = {espacing} eV"
-        f"\n  energy range = [{negf_energy_window[0]}, {negf_energy_window[1]}] eV"
         f"\n  self-energy cache = {self_energy_cache}"
         f"\n  AtomicData_options.r_max = {r_max}"
     )
@@ -284,8 +278,6 @@ def copy_inputs_to_leaf_dirs(
     r_max=6.5,
     n_lead_pl=2,
     l_def=5,
-    espacing=0.1,
-    negf_energy_window=(-0.5, 0.5),
     self_energy_cache=None,
     overwrite=True,
     negf_config_hash=None,
@@ -349,8 +341,6 @@ def copy_inputs_to_leaf_dirs(
                 leaf_dir=current_dir,
                 model_filename=model_filename,
                 chirality=chirality,
-                espacing=espacing,
-                negf_energy_window=negf_energy_window,
                 self_energy_cache=self_energy_cache,
                 r_max=r_max,
                 n_lead_pl=n_lead_pl,
@@ -464,28 +454,8 @@ def main():
     L.info(f"l_def     = {l_def}")
     L.info(f"chirality = {chirality}")
     L.info(f"r_max     = {r_max}")
-    espacing = float(config.get("espacing", 0.1))
-    if not math.isfinite(espacing) or espacing <= 0.0:
-        raise ValueError(
-            f"espacing must be a finite positive value in eV, got {espacing}"
-        )
-    L.info(f"espacing = {espacing} eV")
-    raw_negf_window = config.get("negf_energy_window", [-0.5, 0.5])
-    if not isinstance(raw_negf_window, (list, tuple)) or len(raw_negf_window) != 2:
-        raise ValueError("negf_energy_window must be [emin, emax] in eV")
-    try:
-        negf_energy_window = (float(raw_negf_window[0]), float(raw_negf_window[1]))
-    except (TypeError, ValueError) as exc:
-        raise ValueError("negf_energy_window must contain two numeric values") from exc
-    if (
-        not all(math.isfinite(value) for value in negf_energy_window)
-        or negf_energy_window[0] >= negf_energy_window[1]
-    ):
-        raise ValueError("negf_energy_window requires finite emin < emax")
-    L.info(
-        "negf_energy_window = "
-        f"[{negf_energy_window[0]}, {negf_energy_window[1]}] eV"
-    )
+    # 能量网格（energy_grid）完全沿用 input.json 模板默认值，
+    # 不再由工作流注入 espacing/emin/emax（新版 DPNEGF 已改用 energy_grid）。
     raw_cache = config.get("self_energy_cache")
     if raw_cache is None:
         raise ValueError("self_energy_cache must be configured")
@@ -508,8 +478,6 @@ def main():
         n_lead_pl=args.n_lead_pl,
         overwrite=(not args.no_overwrite),
         l_def=l_def,
-        espacing=espacing,
-        negf_energy_window=negf_energy_window,
         self_energy_cache=self_energy_cache,
         negf_config_hash=compute_negf_config_hash(config),
     )
