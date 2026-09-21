@@ -40,6 +40,7 @@ def _make_input_json(path: Path, r_max=6.5):
                 "half_width": 0.4,
             },
             "self_energy_options": {"cache": {}},
+            "conductance_options": {"mu": ["Ev", "Ec"], "lead": "lead_L"},
             "stru_options": {
                 "lead_L": {"id": "0-0"},
                 "device": {"id": "0-0"},
@@ -81,6 +82,7 @@ def test_r_max_synced_to_atomic_data_options(tmp_path):
         model_filename="nnenv.pth",
         chirality=(5, 5),
         self_energy_cache={"use_saved": True},
+        conductance_mu=["Ef"],
         r_max=r_max,
         n_lead_pl=2,
         l_def=5,
@@ -123,6 +125,7 @@ def test_r_max_atomic_data_options_created_if_absent(tmp_path):
         model_filename="nnenv.pth",
         chirality=(5, 5),
         self_energy_cache=None,
+        conductance_mu=["Ev", "Ec"],
         r_max=r_max,
         n_lead_pl=2,
         l_def=5,

@@ -13,19 +13,25 @@ except ImportError:
     plt = None
 
 
-def to_numpy(value):
-    """兼容 torch.Tensor、numpy.ndarray 和普通列表。"""
-    if torch is not None and isinstance(value, torch.Tensor):
-        return value.detach().cpu().numpy()
-    return np.asarray(value)
-
-
 def load_conductance(pth_path, fermi_energy=0.0):
     """
-    读取 T_avg，并在 fermi_energy 处线性插值。
+    从新版 DPNEGF 的 negf.out.pth 读取预计算电导。
 
-    自动识别 T_avg 中长度与 uni_grid 相同的能量轴，
-    其他维度才进行平均。
+    新版 DPNEGF 把电导结果预计算后写入文件顶层的 ``conductance`` 列表，
+    每项含 ``label``（"Ef" / "Ev" / "Ec"）、``G_over_G0``、``mu_absolute_eV``。
+    这里按标签读取 ``G_over_G0``，不再自己用 T_avg 插值——后者在新版格式里
+    是相对 E_ref 的能量网格，直接拿外部 fermi_energy 插值既不对也不需要。
+
+    标签选择优先级：
+      1. 若 conductance 列表里存在 "Ef" 项，用它（费米模式）；
+      2. 否则若存在 "Ec" 和 "Ev"（带边模式），取两者 G_over_G0 的算术平均，
+         作为该 replica 的代表电导（与 collect_md_conductance.py 的
+         band_edge_bias 口径一致）；
+      3. 都没有则报错，附文件路径与找到的标签。
+
+    fermi_energy 参数仅为保持调用接口兼容保留，不再用于插值；
+    返回的 nearest_energy / nearest_value 取自匹配条目的 mu_absolute_eV /
+    G_over_G0，便于日志中沿用既有输出格式。
     """
     data = torch.load(
         pth_path,
@@ -36,113 +42,37 @@ def load_conductance(pth_path, fermi_energy=0.0):
     if not isinstance(data, dict):
         raise TypeError(f"文件内容不是字典: {pth_path}")
 
-    if "uni_grid" not in data:
-        raise KeyError(f"缺少 uni_grid: {pth_path}")
-
-    if "T_avg" not in data:
-        raise KeyError(f"缺少 T_avg: {pth_path}")
-
-    energy = np.asarray(
-        to_numpy(data["uni_grid"]),
-        dtype=float
-    ).squeeze()
-
-    transmission = np.asarray(
-        to_numpy(data["T_avg"]),
-        dtype=float
-    ).squeeze()
-
-    energy = np.ravel(energy)
-
-    if energy.ndim != 1 or energy.size < 2:
-        raise ValueError(
-            f"uni_grid 形状异常: {data['uni_grid'].shape}"
+    entries = data.get("conductance")
+    if not isinstance(entries, list) or not entries:
+        raise KeyError(
+            f"缺少或为空的 conductance 列表: {pth_path}"
         )
 
-    # 一维 T_avg：最常见情况
-    if transmission.ndim == 1:
-        if transmission.size != energy.size:
-            raise ValueError(
-                f"长度不一致: energy={energy.size}, "
-                f"T_avg={transmission.size}, file={pth_path}"
-            )
+    by_label = {}
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        label = entry.get("label")
+        if isinstance(label, str) and "G_over_G0" in entry:
+            by_label[label] = entry
 
+    if "Ef" in by_label:
+        entry = by_label["Ef"]
+        conductance = float(entry["G_over_G0"])
+        nearest_energy = float(entry.get("mu_absolute_eV", fermi_energy))
+        nearest_value = conductance
+    elif "Ec" in by_label and "Ev" in by_label:
+        gc = float(by_label["Ec"]["G_over_G0"])
+        gv = float(by_label["Ev"]["G_over_G0"])
+        conductance = (gc + gv) / 2.0
+        # 带边模式没有单一 Ef；用 Ec 的 mu 作代表能量，G_over_G0 取均值。
+        nearest_energy = float(by_label["Ec"].get("mu_absolute_eV", fermi_energy))
+        nearest_value = conductance
     else:
-        # 找出长度等于能量点数的轴
-        candidate_axes = [
-            axis
-            for axis, size in enumerate(transmission.shape)
-            if size == energy.size
-        ]
-
-        if len(candidate_axes) != 1:
-            raise ValueError(
-                f"无法唯一确定能量轴: "
-                f"uni_grid.shape={energy.shape}, "
-                f"T_avg.shape={transmission.shape}, "
-                f"candidate_axes={candidate_axes}, "
-                f"file={pth_path}"
-            )
-
-        energy_axis = candidate_axes[0]
-
-        # 把能量轴移到最后
-        transmission = np.moveaxis(
-            transmission,
-            energy_axis,
-            -1
+        found = sorted(by_label.keys())
+        raise KeyError(
+            f"未找到 Ef 或 (Ec+Ev) 电导条目: {pth_path}; 找到的标签: {found}"
         )
-
-        # 只平均非能量维度
-        if transmission.ndim > 1:
-            transmission = transmission.mean(
-                axis=tuple(range(transmission.ndim - 1))
-            )
-
-    transmission = np.ravel(transmission)
-
-    if transmission.size != energy.size:
-        raise ValueError(
-            f"处理后长度仍不一致: "
-            f"energy={energy.size}, "
-            f"T={transmission.size}, file={pth_path}"
-        )
-
-    valid = (
-        np.isfinite(energy)
-        & np.isfinite(transmission)
-    )
-
-    energy = energy[valid]
-    transmission = transmission[valid]
-
-    if energy.size < 2:
-        raise ValueError(f"有效能量点不足: {pth_path}")
-
-    # np.interp 要求能量升序
-    order = np.argsort(energy)
-    energy = energy[order]
-    transmission = transmission[order]
-
-    if not energy[0] <= fermi_energy <= energy[-1]:
-        raise ValueError(
-            f"E_F={fermi_energy} eV 超出能量范围 "
-            f"[{energy[0]}, {energy[-1]}]: {pth_path}"
-        )
-
-    conductance = float(
-        np.interp(
-            fermi_energy,
-            energy,
-            transmission
-        )
-    )
-
-    nearest_index = int(
-        np.argmin(np.abs(energy - fermi_energy))
-    )
-    nearest_energy = float(energy[nearest_index])
-    nearest_value = float(transmission[nearest_index])
 
     return conductance, nearest_energy, nearest_value
 

@@ -123,6 +123,7 @@ def update_input_json_for_leaf(
     model_filename,
     chirality,
     self_energy_cache,
+    conductance_mu,
     r_max=6.5,
     n_lead_pl=2,
     l_def=5,
@@ -172,6 +173,15 @@ def update_input_json_for_leaf(
     # 模板默认值，不再由工作流注入 espacing/emin/emax（新版 DPNEGF 已弃用）。
     task_options["self_energy_options"]["cache"] = copy.deepcopy(self_energy_cache)
 
+    # 同步 workflow config 的 conductance_options.mu 标签到 input.json，
+    # 覆盖模板默认值（费米模式 ["Ef"] / 带边模式 ["Ev","Ec"]）。
+    # 只覆盖 mu，保留模板中 conductance_options 的其余字段（如 lead）。
+    conductance_options = task_options.get("conductance_options")
+    if not isinstance(conductance_options, dict):
+        conductance_options = {}
+        task_options["conductance_options"] = conductance_options
+    conductance_options["mu"] = list(conductance_mu)
+
     # 同步 workflow 的 r_max 到顶层 AtomicData_options.r_max。
     # 用同一个 cutoff 计算 principal layer 分区与 DPNEGF Hamiltonian 邻接，
     # 否则 lead 耦合范围（由 r_max 决定的 PL）与模型 cutoff 不一致，
@@ -204,6 +214,7 @@ def update_input_json_for_leaf(
         f"  lead_L.id = {lead_L_id}\n"
         f"  device.id = {device_id}\n"
         f"  lead_R.id = {lead_R_id}"
+        f"\n  conductance_options.mu = {conductance_mu}"
         f"\n  self-energy cache = {self_energy_cache}"
         f"\n  AtomicData_options.r_max = {r_max}"
     )
@@ -279,6 +290,7 @@ def copy_inputs_to_leaf_dirs(
     n_lead_pl=2,
     l_def=5,
     self_energy_cache=None,
+    conductance_mu=None,
     overwrite=True,
     negf_config_hash=None,
 ):
@@ -342,6 +354,7 @@ def copy_inputs_to_leaf_dirs(
                 model_filename=model_filename,
                 chirality=chirality,
                 self_energy_cache=self_energy_cache,
+                conductance_mu=conductance_mu,
                 r_max=r_max,
                 n_lead_pl=n_lead_pl,
                 l_def=l_def,
@@ -468,6 +481,26 @@ def main():
     self_energy_cache = {"use_saved": use_saved, "save_path": save_path}
     L.info(f"self_energy_cache = {self_energy_cache}")
 
+    # conductance_options.mu 标签决定 DPNEGF 在哪些化学势处计算电导：
+    #   费米模式 -> ["Ef"]；带边模式 -> ["Ev","Ec"]。
+    # 必须从 workflow config 同步到每个 leaf 的 input.json，覆盖模板默认值，
+    # 否则 input.json 会保留模板里的标签，与 workflow_config.json 的模式不一致。
+    raw_conductance_options = config.get("conductance_options")
+    if not isinstance(raw_conductance_options, dict):
+        raise ValueError("conductance_options must be configured (object with mu)")
+    raw_mu = raw_conductance_options.get("mu")
+    if not isinstance(raw_mu, list) or not raw_mu:
+        raise ValueError("conductance_options.mu must be a non-empty list of labels")
+    valid_labels = {"Ef", "Ev", "Ec"}
+    conductance_mu = []
+    for label in raw_mu:
+        if not isinstance(label, str) or label not in valid_labels:
+            raise ValueError(
+                f"conductance_options.mu entries must be one of {sorted(valid_labels)}; got {label!r}"
+            )
+        conductance_mu.append(label)
+    L.info(f"conductance_options.mu = {conductance_mu}")
+
     n_failed = copy_inputs_to_leaf_dirs(
         input_dir=args.input_dir,
         root_dir=args.root,
@@ -479,6 +512,7 @@ def main():
         overwrite=(not args.no_overwrite),
         l_def=l_def,
         self_energy_cache=self_energy_cache,
+        conductance_mu=conductance_mu,
         negf_config_hash=compute_negf_config_hash(config),
     )
 
