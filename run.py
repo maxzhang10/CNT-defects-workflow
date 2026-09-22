@@ -126,9 +126,16 @@ def is_lammps_workdir(p: Path) -> bool:
     if p.name != "lammps":
         return False
 
-    required = ["data.lmp", "in.lammps", "CH.airebo-m", "run.sh"]
+    required = ["data.lmp", "in.lammps", "run.sh"]
 
-    return all((p / name).exists() for name in required)
+    if not all((p / name).exists() for name in required):
+        return False
+
+    # 力场文件：接受任意 *.pth 机器学习力场，不写死文件名。
+    if not list(p.glob("*.pth")):
+        return False
+
+    return True
 
 
 def find_lammps_workdirs(root: Path):
@@ -377,7 +384,7 @@ def main():
             raise RuntimeError(
                 f"没有找到 LAMMPS 工作目录。请确认 {root} 下存在类似:\n"
                 f"  data/300K/5_5/DV_DV/lammps\n"
-                f"并且其中包含 data.lmp / in.lammps / CH.airebo-m / run.sh"
+                f"并且其中包含 data.lmp / in.lammps / *.pth / run.sh"
             )
 
         L.info(f"找到 LAMMPS 工作目录: {len(lammps_workdirs)} 个")

@@ -1,10 +1,30 @@
 #!/usr/bin/env python3
 
+import os
 import re
 import shutil
 from pathlib import Path
 
 import logkit as L
+
+
+def symlink_force(src: Path, dst: Path) -> None:
+    """建软连接 dst -> src，已存在则先删后建。
+
+    机器学习力场（.pth）体积大，每个 lammps 工作目录若各拷一份会
+    大量重复占用空间；这里统一软连接到 input_dir 下的源文件。
+    用绝对路径建链，使 leaf 目录整体迁移后连接仍然有效。
+    """
+    src_resolved = src.resolve()
+
+    if dst.is_symlink() or dst.exists():
+        if dst.is_symlink() or dst.is_file():
+            dst.unlink()
+        else:
+            # 目录（理论上不会出现），用 rmtree 兜底。
+            shutil.rmtree(dst)
+
+    os.symlink(src_resolved, dst)
 
 
 def prepare_lammps_inputs(
@@ -19,6 +39,7 @@ def prepare_lammps_inputs(
     md_steps=40000,
     files=None,
     lammps_seed=None,
+    model_file=None,
 ):
     """
     为不同结构生成 LAMMPS 计算目录，并修改 in.lammps。
@@ -29,7 +50,9 @@ def prepare_lammps_inputs(
     保留旧目录规则 data_root/温度/手性/结构名。
     """
     if files is None:
-        files = ("in.lammps", "CH.airebo-m", "run.sh")
+        # 力场（.pth）单独从 input_dir 里 glob，不写死文件名；
+        # 这里只列普通模板文件，in.lammps 之后会被就地改写故走拷贝。
+        files = ("in.lammps", "run.sh")
 
     if lammps_seed is None:
         raise ValueError("必须显式传入 lammps_seed")
@@ -58,6 +81,33 @@ def prepare_lammps_inputs(
     if not input_dir.is_dir():
         raise FileNotFoundError(f"源文件夹不存在: {input_dir}")
 
+    # 力场文件：input_dir 下任意 *.pth 都视为 DeepMD 机器学习力场。
+    # 体积大，leaf 目录用软连接指向它，不写死文件名。
+    model_files = sorted(input_dir.glob("*.pth"))
+
+    if len(model_files) == 0:
+        raise FileNotFoundError(
+            f"未在 input_dir 中找到 .pth 力场文件: {input_dir}"
+        )
+
+    if model_file is not None:
+        model_src = input_dir / model_file
+        if not model_src.is_file():
+            raise FileNotFoundError(
+                f"指定的力场文件不存在: {model_src}"
+            )
+        model_src = model_src.resolve()
+    else:
+        if len(model_files) > 1:
+            names = "\n".join(f"  {p.name}" for p in model_files)
+            raise ValueError(
+                f"input_dir 中找到多个 .pth 力场文件，"
+                f"请用 model_file 指定一个:\n{names}"
+            )
+        model_src = model_files[0].resolve()
+
+    model_filename = model_src.name
+
     n_fix = 4 * l_PL * N_uc
     m, n = chirality
 
@@ -75,7 +125,9 @@ def prepare_lammps_inputs(
         dst_dir = current_structure_root / "lammps"
         dst_dir.mkdir(parents=True, exist_ok=True)
 
-        # 1. 复制模板文件
+        # 1. 分发模板文件
+        # in.lammps / run.sh 体积小且 in.lammps 之后会被就地改写，走拷贝；
+        # *.pth 机器学习力场体积大，改用软连接避免重复占用空间。
         for filename in files:
             src_file = input_dir / filename
             dst_file = dst_dir / filename
@@ -84,6 +136,9 @@ def prepare_lammps_inputs(
                 raise FileNotFoundError(f"模板文件不存在: {src_file}")
 
             shutil.copy(str(src_file), str(dst_file))
+
+        # 力场文件：软连接到 input_dir 下的源 .pth，保留源文件名。
+        symlink_force(model_src, dst_dir / model_filename)
 
         # 2. 修改当前结构的 in.lammps
         lammps_file = dst_dir / "in.lammps"
@@ -154,12 +209,23 @@ def prepare_lammps_inputs(
 
                 continue
 
+            # 把 pair_style deepmd ./<任意>.pth 改写成实际的力场文件名
+            # （input_dir 里 glob 出的 .pth 文件名不固定）。
+            if re.match(r"^\s*pair_style\s+deepmd\s+\S+\.pth\s*$", line):
+                line = re.sub(
+                    r"(^\s*pair_style\s+deepmd\s+)\S+\.pth(\s*$)",
+                    rf"\g<1>./{model_filename}\g<2>",
+                    line,
+                )
+
             # 含 H 结构：势函数元素列表由 C 改为 C H
+            # DeepMD 的 pair_coeff 形如 "pair_coeff * * C"，模型路径在
+            # pair_style 行而非 pair_coeff 行，故只匹配元素列表。
             if has_hydrogen and re.match(
-                r"^\s*pair_coeff\s+\*\s+\*\s+\./CH\.airebo-m\s+C\s*$",
+                r"^\s*pair_coeff\s+\*\s+\*\s+C\s*$",
                 line,
             ):
-                line = "pair_coeff * * ./CH.airebo-m  C H\n"
+                line = "pair_coeff * * C H\n"
 
             new_lines.append(line)
 

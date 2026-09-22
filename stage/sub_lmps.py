@@ -63,7 +63,6 @@ def check_required_files(workdir: Path):
     required = (
         "data.lmp",
         "in.lammps",
-        "CH.airebo-m",
         "run.sh",
     )
 
@@ -72,6 +71,10 @@ def check_required_files(workdir: Path):
         for name in required
         if not (workdir / name).exists()
     ]
+
+    # 力场文件：接受任意 *.pth 机器学习力场，不写死文件名。
+    if not list(workdir.glob("*.pth")):
+        missing.append("*.pth")
 
     if missing:
         raise FileNotFoundError(
