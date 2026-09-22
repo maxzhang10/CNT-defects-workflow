@@ -38,12 +38,9 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 source /public5/soft/modules/module.sh
-module load deepmdkit/v3.2.0b0_pytorch
+module load lammps/oneAPI.2022.1/7Feb2024-no_lib
 
-# DeePMD/PyTorch CPU 线程设置
-export OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK:-1}"
-export DP_INTRA_OP_PARALLELISM_THREADS="${SLURM_CPUS_PER_TASK:-1}"
-export DP_INTER_OP_PARALLELISM_THREADS=1
+export OMP_NUM_THREADS=1
 
 date '+%F %T' > lammps_started.flag
 
@@ -57,43 +54,18 @@ echo "SLURM_NTASKS=${SLURM_NTASKS}"
 echo "SLURM_CPUS_PER_TASK=${SLURM_CPUS_PER_TASK}"
 echo "SLURM_JOB_CPUS_PER_NODE=${SLURM_JOB_CPUS_PER_NODE}"
 echo "OMP_NUM_THREADS=${OMP_NUM_THREADS}"
-echo "DP_INTRA_OP_PARALLELISM_THREADS=${DP_INTRA_OP_PARALLELISM_THREADS}"
-echo "DP_INTER_OP_PARALLELISM_THREADS=${DP_INTER_OP_PARALLELISM_THREADS}"
 echo
-
-if [[ ! -f "in.lammps" ]]; then
-    echo "[ERROR] Cannot find input file: $(pwd)/in.lammps"
-    exit 1
-fi
-
-if command -v lmp_mpi >/dev/null 2>&1; then
-    LMP_CMD="$(command -v lmp_mpi)"
-elif command -v lmp >/dev/null 2>&1; then
-    LMP_CMD="$(command -v lmp)"
-elif command -v lammps_mpi >/dev/null 2>&1; then
-    LMP_CMD="$(command -v lammps_mpi)"
-else
-    echo "[ERROR] Cannot find LAMMPS executable."
-    echo "[INFO] Current PATH=${PATH}"
-    exit 1
-fi
-
-if ! command -v mpirun >/dev/null 2>&1; then
-    echo "[ERROR] Cannot find mpirun."
-    exit 1
-fi
-
-NPROC="${SLURM_NTASKS:-1}"
-
-echo "LAMMPS executable: ${LMP_CMD}"
-echo "MPI executable: $(command -v mpirun)"
-echo "MPI processes: ${NPROC}"
+echo "LAMMPS executable:"
+which lmp_intel_cpu_intelmpi
 echo "======================================"
 
-mpirun -np "${NPROC}" \
-    "${LMP_CMD}" \
+srun \
+    --ntasks="${SLURM_NTASKS}" \
+    --cpus-per-task="${SLURM_CPUS_PER_TASK}" \
+    --cpu-bind=cores \
+    lmp_intel_cpu_intelmpi \
     -in in.lammps \
-    > lammps.log 2>&1
+    -log lammps.log
 
 date '+%F %T' > lammps_done.flag
 rm -f lammps_failed.flag
