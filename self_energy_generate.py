@@ -14,29 +14,23 @@ from pathlib import Path
 
 CHIRAL_CONFIGS = [
     {
-        "m": 5,
-        "n": 5,
-        "l_def": 8,
-        "N_defects": 2,
+        "m": 11,
+        "n": 0,
+        "l_def": 3,
+        "N_defects": 0,
         "structures": ["5775"],
-        # 电导模式决定写入 input.json 的 conductance_options.mu 标签：
-        #   fermi           -> ["Ef"]      （以费米能级为化学势）
-        #   band_edge_bias  -> ["Ev", "Ec"]（以带边为化学势）
-        # Ec/Ev/Ef 的实际能量值不再由外部提供，而是由 DPNEGF 内部计算
-        # 并随 negf.out.pth 的 conductance 列表输出，由收集器按标签读取。
-        "conductance_mode": "band_edge_bias",
-        # 能量网格（energy_grid: clenshaw_curtis/num_points/half_width）完全
-        # 沿用 input.json 模板默认值，不再由工作流外置。
+        "conductance_mode": "band_edge_bias"
     }
+
 ]
 
 
-TEMPERATURES = [500]
+TEMPERATURES = [100]
 
 
 # 每个物理配置独立运行的 LAMMPS 轨迹数。
 # 可由命令行 --lammps-repeats 覆盖。
-DEFAULT_LAMMPS_REPEATS = 2
+DEFAULT_LAMMPS_REPEATS =1
 
 # 两类随机种子分开管理：
 # seed 控制缺陷结构；同一物理配置的多个 replica 共用同一个 seed。
@@ -50,13 +44,13 @@ TEMPLATE = {
     "chirality": [5, 5],
     "r_max": 6.50,
     "data_root": (
-        "./"
+        "/data/run01/scxk180/dpnegf/cc_workflow/self_energy/"
         
     ),
     "structures": ["5775"],
     "N_defects": 3,
     "l_def": 5,
-    "md_steps": 50000,
+    "md_steps":0,
     # 每条独立 LAMMPS 轨迹只取最后一帧做 DPNEGF。
     "md_sampling": {
         "n_samples": 1,
@@ -64,11 +58,11 @@ TEMPLATE = {
     # 能量网格（energy_grid: clenshaw_curtis/num_points/half_width）完全沿用
     # input.json 模板默认值，不再由工作流外置 espacing/negf_energy_window。
     # False 保持既有行为：DPNEGF 成功后清理 output/self_energy。
-    "save_self_energy": False,
+    "save_self_energy": True,
     # 覆盖 DPNEGF input.json 的 self_energy_options.cache 配置。
     "self_energy_cache": {
-        "use_saved": True,
-        "save_path": "./self_energy/",
+        "use_saved": False,
+        "save_path": "./self_energy",
     },
 }
 
@@ -299,6 +293,84 @@ def make_task_config(task):
     return config
 
 
+# 必须保留的输入文件模式（相对于 run_root）
+REQUIRED_INPUT_FILES = [
+    "workflow_config.json",
+    "*.in",           # LAMMPS 输入文件
+    "*.data",         # LAMMPS 数据文件
+    "*.xyz",          # 结构文件
+    "POSCAR",         # VASP 输入
+    "input.json",     # DPNEGF 输入配置
+]
+
+
+def cleanup_failed_directory(run_root):
+    """
+    清理失败目录中的输出文件和哨兵文件，只保留必须的输入文件。
+
+    删除的内容包括：
+    - 日志文件 (*.log, *.out, *.err)
+    - 结果文件 (*.csv, *.txt, conductance_*)
+    - SLURM 输出 (*.slurm-out, slurm-*.out)
+    - 临时目录 (lammps/, dpnegf/, tmp/)
+    - 完成标记文件 (*.done, *.flag, SUCCESS, FAILED)
+    """
+    if not run_root.exists():
+        return
+
+    # 要删除的文件模式
+    output_patterns = [
+        "*.log",
+        "*.out",
+        "*.err",
+        "*.csv",
+        "*.txt",
+        "*.done",
+        "*.flag",
+        "*.slurm-out",
+        "slurm-*.out",
+        "conductance_*",
+        "SUCCESS",
+        "FAILED",
+        "*.traj",
+        "*.dump",
+        "*.restart",
+    ]
+
+    # 要删除的目录
+    dir_names = [
+        "lammps",
+        "dpnegf",
+        "tmp",
+        "__pycache__",
+    ]
+
+    deleted_count = 0
+
+    # 删除匹配模式的文件
+    for pattern in output_patterns:
+        for file_path in run_root.glob(pattern):
+            if file_path.is_file():
+                try:
+                    file_path.unlink()
+                    deleted_count += 1
+                except OSError:
+                    pass
+
+    # 删除特定目录
+    for dir_name in dir_names:
+        dir_path = run_root / dir_name
+        if dir_path.exists() and dir_path.is_dir():
+            try:
+                import shutil
+                shutil.rmtree(dir_path)
+                deleted_count += 1
+            except OSError:
+                pass
+
+    print(f"        [CLEANUP] 清理完成，删除 {deleted_count} 项")
+
+
 def run_single_task(
     task,
     scheduler,
@@ -412,9 +484,41 @@ def run_single_task(
         ]
 
         print(
-            f"[START] {task_id}  "
-            f"density={task['density']:.4f}A^-1  "
-            f"replica={task['replica']}/{task['lammps_repeats']}",
+            f"[START] {task_id}",
+            flush=True,
+        )
+
+        print(
+            f"        root    = {run_root}",
+            flush=True,
+        )
+
+        print(
+            f"        l_def   = {task['l_def']}",
+            flush=True,
+        )
+
+        print(
+            f"        defects = {task['N_defects']}",
+            flush=True,
+        )
+
+        print(
+            f"        density = "
+            f"{task['density']:.6f} A^-1",
+            flush=True,
+        )
+
+        print(
+            f"        replica = "
+            f"{task['replica']}/{task['lammps_repeats']}",
+            flush=True,
+        )
+
+        print(
+            f"        seeds   = "
+            f"structure:{task['seed']} "
+            f"lammps:{task['lammps_seed']}",
             flush=True,
         )
 
@@ -440,15 +544,6 @@ def run_single_task(
             flush=True,
         )
 
-        if result.returncode != 0:
-            print(
-                f"[FAIL] {task_id}\n"
-                f"        dir   = {run_root.resolve()}\n"
-                f"        exit  = {result.returncode}\n"
-                f"        (目录已保留，未自动清理或重试)",
-                flush=True,
-            )
-
         return (
             task_id,
             result.returncode,
@@ -458,11 +553,15 @@ def run_single_task(
         elapsed = time.time() - start
 
         print(
-            f"[FAIL] {task_id}\n"
-            f"        dir   = {run_root.resolve()}\n"
-            f"        error = {type(exc).__name__}: {exc}\n"
-            f"        (目录已保留，未自动清理或重试)",
+            f"[ERROR] {task_id}: "
+            f"{type(exc).__name__}: {exc}",
             file=sys.stderr,
+            flush=True,
+        )
+
+        print(
+            f"[FAIL] {task_id} "
+            f"elapsed={elapsed / 60:.1f} min",
             flush=True,
         )
 
@@ -498,7 +597,7 @@ def main():
     parser.add_argument(
         "--max-parallel",
         type=int,
-        default=50,
+        default=16,
         help=(
             "同时启动的独立 workflow 数。默认不限制，"
             "即一次启动全部展开任务；例如 3 个配置 × 5 次重复 = 15。"
@@ -535,6 +634,13 @@ def main():
         "--skip-conductance",
         action="store_true",
         help="跳过批次结束后的跨 replica 电导汇总。",
+    )
+
+    parser.add_argument(
+        "--max-retries",
+        type=int,
+        default=2,
+        help="任务失败后的最大重试次数，默认 2 次。",
     )
 
     args = parser.parse_args()
@@ -604,60 +710,102 @@ def main():
         )
 
     print("=" * 70)
-    print(f"[INFO] 总任务数: {len(tasks)}  "
-          f"每配置轨迹数: {args.lammps_repeats}  "
-          f"并行: {max_workers}  scheduler: {args.scheduler}")
-    print(f"[INFO] data_root: {base_root}")
+    print(f"[INFO] 总任务数:       {len(tasks)}")
+    print(f"[INFO] 每配置轨迹数:   {args.lammps_repeats}")
+    print(f"[INFO] 独立任务目录数: {len(tasks)}")
+    print(f"[INFO] 并行 workflow:  {max_workers}")
+    print(f"[INFO] scheduler:      {args.scheduler}")
+    print(f"[INFO] workflow_dir:   {workflow_dir}")
+    print(f"[INFO] data_root:      {base_root}")
 
     print("[INFO] 任务目录：")
 
     for task in tasks:
         print(
             f"  {task['task_id']}\n"
-            f"    -> {task['run_root']}"
+            f"    -> {task['run_root']}\n"
+            f"       lammps_seed={task['lammps_seed']}"
         )
 
     print("=" * 70)
 
     all_results = {}
+    retry_counts = {}
     start = time.time()
 
-    # 每个 task 都有独立 run_root，并发执行所有任务。
-    # 单个任务失败不中断整个批次：保留其目录文件，记录失败信息，
-    # 由调用方事后检查并决定是否手动重跑。
-    with ThreadPoolExecutor(
-        max_workers=max_workers
-    ) as executor:
-        future_to_task = {
-            executor.submit(
-                run_single_task,
-                task,
-                args.scheduler,
-                workflow_dir,
-            ): task
-            for task in tasks
-        }
+    # 准备任务队列，支持重试
+    pending_tasks = list(tasks)
+    completed_tasks = set()
 
-        for future in as_completed(
-            future_to_task
-        ):
-            task = future_to_task[future]
-            task_id = task["task_id"]
+    while pending_tasks:
+        # 每个 task 都有独立 run_root，
+        # 因此不再按温度/手性分组串行。
+        with ThreadPoolExecutor(
+            max_workers=max_workers
+        ) as executor:
+            future_to_task = {
+                executor.submit(
+                    run_single_task,
+                    task,
+                    args.scheduler,
+                    workflow_dir,
+                ): task
+                for task in pending_tasks
+            }
 
-            try:
-                result = future.result()
-                returncode = result[1]
-            except Exception as exc:
-                print(
-                    f"[ERROR] 未捕获异常 "
-                    f"{task_id}: "
-                    f"{type(exc).__name__}: {exc}",
-                    file=sys.stderr,
-                    flush=True,
-                )
-                returncode = 1
+            # 清空待处理列表，准备收集下一轮（重试）任务
+            pending_tasks = []
 
-            all_results[task_id] = (task_id, returncode)
+            for future in as_completed(
+                future_to_task
+            ):
+                task = future_to_task[future]
+                task_id = task["task_id"]
+
+                try:
+                    result = future.result()
+                    returncode = result[1]
+                except Exception as exc:
+                    print(
+                        f"[ERROR] 未捕获异常 "
+                        f"{task_id}: "
+                        f"{type(exc).__name__}: {exc}",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                    returncode = 1
+
+                # 检查任务是否成功
+                if returncode == 0:
+                    all_results[task_id] = (task_id, 0)
+                    completed_tasks.add(task_id)
+                else:
+                    # 任务失败，检查是否需要重试
+                    current_retries = retry_counts.get(task_id, 0)
+
+                    if current_retries < args.max_retries:
+                        retry_counts[task_id] = current_retries + 1
+
+                        print(
+                            f"[RETRY] {task_id} "
+                            f"第 {retry_counts[task_id]}/{args.max_retries} 次重试",
+                            flush=True,
+                        )
+
+                        # 清理失败目录
+                        cleanup_failed_directory(task["run_root"])
+
+                        # 将任务加入下一轮重试队列
+                        pending_tasks.append(task)
+                    else:
+                        # 重试次数已用完
+                        print(
+                            f"[MAX_RETRY] {task_id} "
+                            f"已达到最大重试次数 {args.max_retries}，放弃",
+                            flush=True,
+                        )
+                        all_results[task_id] = (task_id, returncode)
+                        completed_tasks.add(task_id)
 
     # 转换结果为列表格式
     all_results_list = list(all_results.values())
@@ -682,6 +830,10 @@ def main():
         f"失败: {len(failed)}"
     )
 
+    if retry_counts:
+        total_retries = sum(retry_counts.values())
+        print(f"总重试次数: {total_retries}")
+
     print(
         f"总耗时: "
         f"{elapsed / 60:.1f} min"
@@ -691,14 +843,7 @@ def main():
         print("失败任务：")
 
         for task_id in failed:
-            task = next(
-                t for t in tasks
-                if t["task_id"] == task_id
-            )
-            print(
-                f"  {task_id}\n"
-                f"    -> {task['run_root'].resolve()}"
-            )
+            print(f"  {task_id}")
 
         return 1
 
