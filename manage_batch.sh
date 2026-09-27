@@ -13,9 +13,6 @@ PREV_LOG_FILE="$SCRIPT_DIR/batch_generate.log.prev"
 # manage 调度器自身日志
 MANAGER_LOG="$SCRIPT_DIR/manage_batch.log"
 
-# batch_generate.py 失败后，等待10分钟再次运行
-RETRY_INTERVAL=600
-
 
 is_running() {
     [[ -f "$PID_FILE" ]] || return 1
@@ -46,8 +43,7 @@ start_job() {
         log_file="$2"
         prev_log_file="$3"
         status_file="$4"
-        retry_interval="$5"
-        pid_file="$6"
+        pid_file="$5"
 
         cd "$script_dir" || exit 1
 
@@ -65,69 +61,64 @@ start_job() {
 
         echo "[$(date "+%F %T")] 调度器启动，PID=$$"
         echo "[$(date "+%F %T")] 工作目录：$script_dir"
-        echo "[$(date "+%F %T")] 失败重试间隔：${retry_interval}s"
 
-        round=0
+        round=1
+        start_time="$(date "+%F %T")"
 
-        while true; do
-            round=$((round + 1))
-            start_time="$(date "+%F %T")"
+        printf "%s running PID=%s round=%s\n" \
+            "$start_time" "$$" "$round" > "$status_file"
 
-            printf "%s running PID=%s round=%s\n" \
-                "$start_time" "$$" "$round" > "$status_file"
+        echo
+        echo "============================================================"
+        echo "[$start_time] 第 ${round} 轮运行 batch_generate.py"
+        echo "============================================================"
 
-            echo
-            echo "============================================================"
-            echo "[$start_time] 第 ${round} 轮运行 batch_generate.py"
-            echo "============================================================"
+        # 当前轮日志转为上一轮日志
+        if [[ -f "$log_file" ]]; then
+            mv -f "$log_file" "$prev_log_file"
+        fi
 
-            # 当前轮日志转为上一轮日志
-            if [[ -f "$log_file" ]]; then
-                mv -f "$log_file" "$prev_log_file"
-            fi
+        # 创建新的当前轮日志
+        : > "$log_file"
 
-            # 创建新的当前轮日志
-            : > "$log_file"
+        echo "[$(date "+%F %T")] 当前轮日志：$log_file"
 
-            echo "[$(date "+%F %T")] 当前轮日志：$log_file"
+        # manage不控制并行参数，完全交给batch_generate.py自身配置
+        if python batch_generate.py >"$log_file" 2>&1; then
+            rc=0
+        else
+            rc=$?
+        fi
 
-            # manage不控制并行参数，完全交给batch_generate.py自身配置
-            if python batch_generate.py >"$log_file" 2>&1; then
-                rc=0
-            else
-                rc=$?
-            fi
+        end_time="$(date "+%F %T")"
 
-            end_time="$(date "+%F %T")"
+        # 返回0：工作流完成，调度器自动退出
+        if [[ "$rc" -eq 0 ]]; then
+            echo "[$end_time] 第 ${round} 轮正常结束，全部任务完成"
+            echo "[$end_time] 调度器自动退出"
 
-            # 返回0：工作流完成，调度器自动退出
-            if [[ "$rc" -eq 0 ]]; then
-                echo "[$end_time] 第 ${round} 轮正常结束，全部任务完成"
-                echo "[$end_time] 调度器自动退出"
+            printf "%s completed PID=%s round=%s result=success\n" \
+                "$end_time" "$$" "$round" > "$status_file"
 
-                printf "%s completed PID=%s round=%s result=success\n" \
-                    "$end_time" "$$" "$round" > "$status_file"
+            rm -f "$pid_file"
+            exit 0
+        fi
 
-                rm -f "$pid_file"
-                exit 0
-            fi
+        # 返回非0：仅记录失败、保留日志与全部任务目录，然后退出。
+        # 绝不自动重试、重交或重新启动 batch_generate.py。
+        echo "[$end_time] 第 ${round} 轮失败，exit=$rc"
+        echo "[$end_time] 调度器退出；未自动重试或重交，请查看 $log_file"
 
-            # 返回非0：等待一段时间后重试
-            echo "[$end_time] 第 ${round} 轮失败，exit=$rc"
-            echo "[$end_time] ${retry_interval} 秒后重新运行"
+        printf "%s completed PID=%s round=%s result=failed exit=%s auto_retry=false\n" \
+            "$end_time" "$$" "$round" "$rc" > "$status_file"
 
-            printf "%s sleeping PID=%s round=%s result=failed next_retry_in=%ss\n" \
-                "$end_time" "$$" "$round" "$retry_interval" \
-                > "$status_file"
-
-            sleep "$retry_interval"
-        done
+        rm -f "$pid_file"
+        exit "$rc"
     ' bash \
         "$SCRIPT_DIR" \
         "$LOG_FILE" \
         "$PREV_LOG_FILE" \
         "$STATUS_FILE" \
-        "$RETRY_INTERVAL" \
         "$PID_FILE" \
         >>"$MANAGER_LOG" 2>&1 &
 
@@ -142,9 +133,8 @@ start_job() {
         return 1
     fi
 
-    echo "自动检查任务已启动"
+    echo "批处理管理器已启动"
     echo "PID          : $pid"
-    echo "失败重试间隔: ${RETRY_INTERVAL} 秒"
     echo
     echo "状态         : $0 status"
     echo "当前日志     : $0 log"
@@ -291,7 +281,7 @@ case "${1:-start}" in
     *)
         echo "用法：$0 {start|status|stop|restart|log|previous-log|manager-log}"
         echo
-        echo "  start        启动自动检查任务"
+        echo "  start        启动一次 batch_generate.py；成功或失败后自动退出"
         echo "  status       查看运行状态"
         echo "  stop         停止本地调度器"
         echo "  restart      重启本地调度器"
