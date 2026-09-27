@@ -418,12 +418,23 @@ def run_single_task(
             flush=True,
         )
 
-        result = subprocess.run(
-            cmd,
-            cwd=workflow_dir,
-            text=True,
-            check=False,
-        )
+        # 隔离 run_multi.py 的详细输出：每个 replica 的完整内部日志
+        # （含全部 INFO 与 traceback）写入其自身目录的 workflow.log，
+        # 不再混入 batch 主日志，便于失败时排查。
+        # 以写入模式打开，覆盖已有同名 workflow.log（无需显式删除）。
+        workflow_log = run_root / "workflow.log"
+        with workflow_log.open(
+            "w",
+            encoding="utf-8",
+        ) as log_file:
+            result = subprocess.run(
+                cmd,
+                cwd=workflow_dir,
+                stdout=log_file,
+                stderr=subprocess.STDOUT,
+                text=True,
+                check=False,
+            )
 
         elapsed = time.time() - start
 
@@ -443,8 +454,9 @@ def run_single_task(
         if result.returncode != 0:
             print(
                 f"[FAIL] {task_id}\n"
-                f"        dir   = {run_root.resolve()}\n"
-                f"        exit  = {result.returncode}\n"
+                f"        dir        = {run_root.resolve()}\n"
+                f"        exit       = {result.returncode}\n"
+                f"        detail_log = {workflow_log.resolve()}\n"
                 f"        (目录已保留，未自动清理或重试)",
                 flush=True,
             )
@@ -465,6 +477,8 @@ def run_single_task(
             file=sys.stderr,
             flush=True,
         )
+        # 注意：此处异常发生在 subprocess.run 之前（目录已建/未建），
+        # run_multi.py 未启动，没有 workflow.log 可指。
 
         return (
             task_id,
@@ -605,18 +619,9 @@ def main():
 
     print("=" * 70)
     print(f"[INFO] 总任务数: {len(tasks)}  "
-          f"每配置轨迹数: {args.lammps_repeats}  "
-          f"并行: {max_workers}  scheduler: {args.scheduler}")
+          f"每配置 replica 数: {args.lammps_repeats}  "
+          f"并发: {max_workers}  scheduler: {args.scheduler}")
     print(f"[INFO] data_root: {base_root}")
-
-    print("[INFO] 任务目录：")
-
-    for task in tasks:
-        print(
-            f"  {task['task_id']}\n"
-            f"    -> {task['run_root']}"
-        )
-
     print("=" * 70)
 
     all_results = {}
