@@ -67,7 +67,7 @@ T, N_uc, l_PL, length = cnt_geometry.geo_info(m, n, r_max, l_def)
 
 # %%
 
-tube_unit = cnt_geometry.build_unit_cnt(m, n, vacuum=10.0)
+tube_unit = cnt_geometry.build_unit_cnt(m, n, vacuum=50.0)
 tube_clean = cnt_geometry.clean_cnt_by_shift_wrap_anchor(tube_unit) 
 tube = tube_clean * (1, 1, length) 
 
