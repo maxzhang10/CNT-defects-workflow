@@ -1,0 +1,57 @@
+# CNT
+
+units           metal
+boundary        p p p
+atom_style      atomic
+
+neighbor        2.0 bin
+neigh_modify    every 1 delay 0 check yes
+
+read_data       data.lmp
+mass            1 12
+
+
+pair_style      deepmd ./CNT_defects.pth
+pair_coeff      * * C
+
+
+
+# 每一端固定的原子数
+variable nfix equal N
+
+# 计算右端固定区的起始原子 ID
+variable natoms equal atoms
+variable istart equal v_natoms-v_nfix+1
+
+# 定义左右固定组
+group fixed_left  id 1:${nfix}
+group fixed_right id ${istart}:${natoms}
+group fixed union fixed_left fixed_right
+
+# 除两端固定原子外，其余原子作为可动散射区
+group mobile subtract all fixed
+
+# 固定原子：受力清零
+fix freeze fixed setforce 0.0 0.0 0.0
+
+
+
+
+thermo_style custom step pe etotal press fnorm fmax
+thermo       10
+
+# 每 10 次优化迭代保存一帧
+dump            opt all custom 10 optimization.dump id type x y z
+dump_modify     opt sort id
+
+min_style       cg
+min_modify dmax 0.1 norm max
+minimize        0.0 1.0e-3 10000 100000
+
+undump          opt
+
+# 保存最终结构
+write_data      optimized.data
+write_dump      all custom optimized.dump id type x y z modify sort id
+
+

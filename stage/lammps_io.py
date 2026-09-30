@@ -40,28 +40,47 @@ def prepare_lammps_inputs(
     files=None,
     lammps_seed=None,
     model_file=None,
+    lammps_mode="md",
 ):
     """
     为不同结构生成 LAMMPS 计算目录，并修改 in.lammps。
 
-    lammps_seed 只控制当前独立 LAMMPS 轨迹，必须由上层显式传入。
+    lammps_mode:
+        "md"  —— 热弛豫 MD。拷贝 in.lammps 模板，改写温度、随机种子、
+                 md_steps 等字段；lammps_seed 必填。
+        "opt" —— 纯几何优化。拷贝 opt.lammps 模板（落到工作目录时仍命名
+                 为 in.lammps，run.sh / sub_lmps.py / 工作目录识别无需
+                 改动），只改写固定原子数 nfix（及含 H 时的 mass/pair_coeff），
+                 不涉及温度、种子与步数；lammps_seed 忽略。
+
+    lammps_seed 只控制当前独立 LAMMPS 轨迹，md 模式下必须由上层显式传入。
 
     structure_root 可显式指定当前结构/replica 的根目录；未提供时
     保留旧目录规则 data_root/温度/手性/结构名。
     """
-    if files is None:
-        # 力场（.pth）单独从 input_dir 里 glob，不写死文件名；
-        # 这里只列普通模板文件，in.lammps 之后会被就地改写故走拷贝。
-        files = ("in.lammps", "run.sh")
-
-    if lammps_seed is None:
-        raise ValueError("必须显式传入 lammps_seed")
-
-    lammps_seed = int(lammps_seed)
-    if lammps_seed <= 0:
+    if lammps_mode not in ("md", "opt"):
         raise ValueError(
-            f"lammps_seed 必须为正整数，当前值: {lammps_seed}"
+            f"lammps_mode 必须为 'md' 或 'opt'，当前值: {lammps_mode}"
         )
+
+    if files is None:
+        if lammps_mode == "opt":
+            # opt 模板拷贝时重命名为 in.lammps，下游统一只认 in.lammps。
+            files = (("opt.lammps", "in.lammps"), ("run.sh", "run.sh"))
+        else:
+            # 力场（.pth）单独从 input_dir 里 glob，不写死文件名；
+            # 这里只列普通模板文件，in.lammps 之后会被就地改写故走拷贝。
+            files = (("in.lammps", "in.lammps"), ("run.sh", "run.sh"))
+
+    if lammps_mode == "md":
+        if lammps_seed is None:
+            raise ValueError("md 模式必须显式传入 lammps_seed")
+
+        lammps_seed = int(lammps_seed)
+        if lammps_seed <= 0:
+            raise ValueError(
+                f"lammps_seed 必须为正整数，当前值: {lammps_seed}"
+            )
 
     data_root = Path(data_root).resolve()
 
@@ -128,9 +147,9 @@ def prepare_lammps_inputs(
         # 1. 分发模板文件
         # in.lammps / run.sh 体积小且 in.lammps 之后会被就地改写，走拷贝；
         # *.pth 机器学习力场体积大，改用软连接避免重复占用空间。
-        for filename in files:
-            src_file = input_dir / filename
-            dst_file = dst_dir / filename
+        for src_name, dst_name in files:
+            src_file = input_dir / src_name
+            dst_file = dst_dir / dst_name
 
             if not src_file.is_file():
                 raise FileNotFoundError(f"模板文件不存在: {src_file}")
@@ -163,42 +182,43 @@ def prepare_lammps_inputs(
         new_lines = []
 
         for line in lines:
-            # 修改固定原子数
+            # 修改固定原子数（md / opt 两种模式都需要）
             if re.match(r"^\s*variable\s+nfix\s+equal\s+", line):
                 line = f"variable nfix equal {n_fix}\n"
                 found_nfix = True
 
-            # 修改初始速度温度与随机种子：
-            # velocity mobile create <temperature> <seed> ...
-            if re.match(r"^\s*velocity\s+mobile\s+create\s+", line):
-                parts = line.split()
-                if len(parts) < 5:
-                    raise RuntimeError(
-                        f"velocity create 行格式不完整: {line.rstrip()}"
-                    )
+            if lammps_mode == "md":
+                # 修改初始速度温度与随机种子：
+                # velocity mobile create <temperature> <seed> ...
+                if re.match(r"^\s*velocity\s+mobile\s+create\s+", line):
+                    parts = line.split()
+                    if len(parts) < 5:
+                        raise RuntimeError(
+                            f"velocity create 行格式不完整: {line.rstrip()}"
+                        )
 
-                parts[3] = str(temperature)
-                parts[4] = str(lammps_seed)
-                line = " ".join(parts) + "\n"
-                found_velocity = True
+                    parts[3] = str(temperature)
+                    parts[4] = str(lammps_seed)
+                    line = " ".join(parts) + "\n"
+                    found_velocity = True
 
-            # 修改 NVT 热浴温度
-            if re.match(r"^\s*fix\s+1\s+mobile\s+nvt\s+temp\s+", line):
-                parts = line.split()
-                if len(parts) < 7:
-                    raise RuntimeError(
-                        f"NVT fix 行格式不完整: {line.rstrip()}"
-                    )
+                # 修改 NVT 热浴温度
+                if re.match(r"^\s*fix\s+1\s+mobile\s+nvt\s+temp\s+", line):
+                    parts = line.split()
+                    if len(parts) < 7:
+                        raise RuntimeError(
+                            f"NVT fix 行格式不完整: {line.rstrip()}"
+                        )
 
-                parts[5] = str(float(temperature))
-                parts[6] = str(float(temperature))
-                line = " ".join(parts) + "\n"
-                found_nvt = True
+                    parts[5] = str(float(temperature))
+                    parts[6] = str(float(temperature))
+                    line = " ".join(parts) + "\n"
+                    found_nvt = True
 
-            # 修改热弛豫 MD 步数
-            if re.match(r"^\s*run\s+\d+\s*(?:#.*)?$", line):
-                line = f"run             {int(md_steps)}\n"
-                found_run = True
+                # 修改热弛豫 MD 步数
+                if re.match(r"^\s*run\s+\d+\s*(?:#.*)?$", line):
+                    line = f"run             {int(md_steps)}\n"
+                    found_run = True
 
             # 含 H 结构：在 mass 1 后加入 mass 2
             if has_hydrogen and re.match(r"^\s*mass\s+1\s+12", line):
@@ -230,15 +250,17 @@ def prepare_lammps_inputs(
             new_lines.append(line)
 
         # 这些字段缺失时直接报错，避免模板没有被真正改到。
+        # opt 模板没有 velocity/nvt/run 行，只要求 nfix。
         missing_edits = []
         if not found_nfix:
             missing_edits.append("variable nfix equal")
-        if not found_velocity:
-            missing_edits.append("velocity mobile create")
-        if not found_nvt:
-            missing_edits.append("fix 1 mobile nvt temp")
-        if not found_run:
-            missing_edits.append("run <md_steps>")
+        if lammps_mode == "md":
+            if not found_velocity:
+                missing_edits.append("velocity mobile create")
+            if not found_nvt:
+                missing_edits.append("fix 1 mobile nvt temp")
+            if not found_run:
+                missing_edits.append("run <md_steps>")
 
         if missing_edits:
             raise RuntimeError(
@@ -249,11 +271,20 @@ def prepare_lammps_inputs(
         with lammps_file.open("w", encoding="utf-8") as file:
             file.writelines(new_lines)
 
-        L.info(
-            f"已生成 {dst_dir}，"
-            f"nfix={n_fix}，"
-            f"T={temperature} K，"
-            f"md_steps={md_steps}，"
-            f"lammps_seed={lammps_seed}，"
-            f"含H={has_hydrogen}"
-        )
+        if lammps_mode == "md":
+            L.info(
+                f"已生成 {dst_dir}，"
+                f"mode=md，"
+                f"nfix={n_fix}，"
+                f"T={temperature} K，"
+                f"md_steps={md_steps}，"
+                f"lammps_seed={lammps_seed}，"
+                f"含H={has_hydrogen}"
+            )
+        else:
+            L.info(
+                f"已生成 {dst_dir}，"
+                f"mode=opt（几何优化，模板 opt.lammps），"
+                f"nfix={n_fix}，"
+                f"含H={has_hydrogen}"
+            )

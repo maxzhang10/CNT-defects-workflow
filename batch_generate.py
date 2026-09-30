@@ -44,6 +44,12 @@ DEFAULT_LAMMPS_REPEATS = 2
 BASE_STRUCTURE_SEED = 20260705
 BASE_LAMMPS_SEED = 23456789
 
+# LAMMPS 模式，全局作用于整个批次：
+#   "md"  —— NVT 热退火，从 config 读取温度/md_steps/lammps_seed；
+#   "opt" —— 只做几何优化，LAMMPS 输入改用 input_files/lammps/opt.lammps
+#            （拷贝到工作目录时命名为 in.lammps），只改写固定原子数 nfix，
+#            不消费温度/步数/种子。
+LAMMPS_MODE = "opt"
 
 TEMPLATE = {
     "temperature": 300,
@@ -260,6 +266,14 @@ def make_task_config(task):
     """
     config = copy.deepcopy(TEMPLATE)
 
+    # LAMMPS 模式全局唯一：模块级 LAMMPS_MODE（缺省 "md"）对整个批次生效，
+    # 写入每个 replica 的 config，不在 CHIRAL_CONFIGS 单独覆盖。
+    lammps_mode = LAMMPS_MODE
+    if lammps_mode not in ("md", "opt"):
+        raise ValueError(
+            f"lammps_mode 必须为 'md' 或 'opt'，当前值: {lammps_mode}"
+        )
+
     # conductance_options.mu 只写入字符串标签（非数值）：
     #   fermi          -> ["Ef"]
     #   band_edge_bias -> ["Ev", "Ec"]
@@ -272,6 +286,7 @@ def make_task_config(task):
     )
 
     config.update({
+        "lammps_mode": lammps_mode,
         "temperature": task["temperature"],
         "chirality": [
             task["m"],

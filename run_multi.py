@@ -489,6 +489,20 @@ def main():
     if md_steps < 0:
         raise ValueError("md_steps must be greater than or equal to zero")
 
+    # LAMMPS 模式：
+    #   "md" （缺省）NVT 热退火，温度/步数/种子由 config 驱动；
+    #   "opt" 只做几何优化（模板为 input_files/lammps/opt.lammps，
+    #         拷贝后命名为 in.lammps），不消费 md_steps。
+    lammps_mode = config.get("lammps_mode", "md")
+    if lammps_mode not in ("md", "opt"):
+        raise ValueError(
+            f"lammps_mode 必须为 'md' 或 'opt'，当前值: {lammps_mode}"
+        )
+
+    # 是否需要运行 LAMMPS：md 模式 md_steps=0 时直接用 POSCAR 跳过；
+    # opt 模式始终要跑（优化本身就是 LAMMPS 任务）。
+    run_lammps = (lammps_mode == "opt") or (md_steps > 0)
+
     # 独立轨迹模式：一次 run_multi.py 对应一条 LAMMPS 轨迹，
     # 后续固定只提取 md_steps 对应的最后一帧。
 
@@ -562,10 +576,10 @@ def main():
         # ============================================================
         # 0.5 运行lammps任务
         # ============================================================
-        L.phase(2, 7, "LAMMPS 退火")
+        L.phase(2, 7, "LAMMPS 几何优化" if lammps_mode == "opt" else "LAMMPS 退火")
         lammps_workdirs = find_lammps_workdirs(root)
 
-        if md_steps == 0:
+        if not run_lammps:
             L.info("md_steps=0，跳过 LAMMPS 运行，直接使用 POSCAR")
         elif not lammps_workdirs:
             raise RuntimeError(
@@ -574,7 +588,7 @@ def main():
                 f"并且其中包含 data.lmp / in.lammps / *.pth / run.sh"
             )
 
-        if md_steps > 0:
+        if run_lammps:
             L.info(f"找到 LAMMPS 工作目录: {len(lammps_workdirs)} 个")
             for i, w in enumerate(lammps_workdirs, 1):
                 L.item(i, len(lammps_workdirs), w)
@@ -583,7 +597,7 @@ def main():
 
         # SLURM 屏障：等所有 LAMMPS 作业跑完再进入 dump->fdf（后者依赖 dump 产物）。
         # local 模式下每个 sub_lmps 已阻塞跑完，这里等价于一次性 flag 复核。
-        if md_steps > 0 and args.scheduler == "slurm":
+        if run_lammps and args.scheduler == "slurm":
             barrier_and_check(
                 lammps_workdirs, "lammps",
                 poll_interval=args.poll_interval,
@@ -593,13 +607,13 @@ def main():
     # 1. 查找含 dump 的结构目录
     # ============================================================
     L.phase(3, 7, "dump -> fdf")
-    structure_dirs = find_poscar_structure_dirs(root) if md_steps == 0 else find_structure_dirs(root)
+    structure_dirs = find_poscar_structure_dirs(root) if not run_lammps else find_structure_dirs(root)
 
     if not structure_dirs:
         raise RuntimeError(
             (
                 f"没有找到结构目录。请确认 {root} 下存在 POSCAR 文件。"
-                if md_steps == 0 else
+                if not run_lammps else
                 f"没有找到结构目录。请确认 {root} 下是否存在 dump / *.dump / *.lammpstrj 文件。\n"
                 f"注意：eledefects.py 通常只生成 lammps 输入文件；如果还没运行 LAMMPS，就不会有 dump。"
             )
@@ -615,7 +629,7 @@ def main():
     for struct_dir in structure_dirs:
         outroot = struct_dir / "dpnegf"
 
-        if md_steps == 0:
+        if not run_lammps:
             poscar_dir = struct_dir / "lammps" if (struct_dir / "lammps" / "POSCAR").is_file() else struct_dir
             if not (poscar_dir / "POSCAR").is_file():
                 raise FileNotFoundError(f"md_steps=0 时找不到 POSCAR: {poscar_dir / 'POSCAR'}")
@@ -634,24 +648,46 @@ def main():
         else:
             dump_root = struct_dir
 
-        # 每条独立 LAMMPS 轨迹只取最后一帧。
-        # md_steps 必须与 in.lammps 中的 run <N> 一致。
-        L.info(
-            f"单轨迹末帧采样: timestep={md_steps}, samples=1"
-        )
+        if lammps_mode == "opt":
+            # 几何优化产物是 optimization.dump / optimized.dump，
+            # 其 timestep 是优化迭代步数，与 md_steps 无关。
+            # 取最后一帧优化结构：--every 1 后由 --samples 1 截取末帧，
+            # 同时允许 timestep 0（未做 minimize 时保底）。
+            L.info("几何优化末帧采样: optimized.dump, samples=1")
+            cmd = [
+                py,
+                str(dump2fdf),
+                "--root",
+                str(dump_root),
+                "--outroot",
+                str(outroot),
+                "--dump-name",
+                "optimized.dump",
+                "--every",
+                "1",
+                "--samples",
+                "1",
+                "--no-skip-zero",
+            ]
+        else:
+            # 每条独立 LAMMPS 轨迹只取最后一帧。
+            # md_steps 必须与 in.lammps 中的 run <N> 一致。
+            L.info(
+                f"单轨迹末帧采样: timestep={md_steps}, samples=1"
+            )
 
-        cmd = [
-            py,
-            str(dump2fdf),
-            "--root",
-            str(dump_root),
-            "--outroot",
-            str(outroot),
-            "--every",
-            str(md_steps),
-            "--samples",
-            "1",
-        ]
+            cmd = [
+                py,
+                str(dump2fdf),
+                "--root",
+                str(dump_root),
+                "--outroot",
+                str(outroot),
+                "--every",
+                str(md_steps),
+                "--samples",
+                "1",
+            ]
         run_cmd(cmd, dry_run=args.dry_run, env=env)
 
     # ============================================================

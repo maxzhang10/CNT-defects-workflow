@@ -170,6 +170,14 @@ def load_config(config_path=None):
 def main():
     config = load_config()
 
+    # lammps_mode: "md"（缺省，热弛豫 MD）或 "opt"（纯几何优化）。
+    # opt 模式不做热运动，lammps_seed 无意义，不再强制。
+    lammps_mode = config.get("lammps_mode", "md")
+    if lammps_mode not in ("md", "opt"):
+        raise ValueError(
+            f"lammps_mode 必须为 'md' 或 'opt'，当前值: {lammps_mode}"
+        )
+
     required_keys = [
         "temperature",
         "chirality",
@@ -177,8 +185,9 @@ def main():
         "l_def",
         "N_defects",
         "structures",
-        "lammps_seed",
     ]
+    if lammps_mode == "md":
+        required_keys.append("lammps_seed")
     missing_keys = [key for key in required_keys if key not in config]
     if missing_keys:
         raise KeyError(f"config 缺少必要字段: {missing_keys}")
@@ -191,12 +200,15 @@ def main():
     md_steps = int(config.get("md_steps", 40000))
 
     # seed：控制缺陷位置和缺陷类型。
-    # lammps_seed：只控制这一条 LAMMPS 热运动轨迹。
+    # lammps_seed：只控制这一条 LAMMPS 热运动轨迹（opt 模式忽略）。
     seed = int(config.get("seed", 20260705))
-    lammps_seed = int(config["lammps_seed"])
+    lammps_seed = int(config.get("lammps_seed", 0)) or None
 
-    if lammps_seed <= 0:
-        raise ValueError(f"lammps_seed 必须为正整数，当前值: {lammps_seed}")
+    if lammps_mode == "md":
+        if lammps_seed is None or lammps_seed <= 0:
+            raise ValueError(
+                f"lammps_seed 必须为正整数，当前值: {config.get('lammps_seed')}"
+            )
 
     T, N_uc, l_PL, length = cnt_geometry.geo_info(
         m,
@@ -233,7 +245,10 @@ def main():
     L.info(f"线密度: {density:.4f} 缺陷/Å")
     L.info(f"二维柱面最小间距: {min_defect_sep:.2f} Å")
     L.info(f"缺陷结构 seed: {seed}")
-    L.info(f"LAMMPS seed: {lammps_seed}")
+    if lammps_mode == "md":
+        L.info(f"LAMMPS seed: {lammps_seed}")
+    else:
+        L.info("LAMMPS mode: opt（纯几何优化，不使用 lammps_seed）")
 
     L.info("缺陷坐标：")
     for coord, idx in zip(defects_coord_ind, pristine_indices):
@@ -351,6 +366,7 @@ def main():
         structure_root=structure_root,
         md_steps=md_steps,
         lammps_seed=lammps_seed,
+        lammps_mode=lammps_mode,
     )
 
 
