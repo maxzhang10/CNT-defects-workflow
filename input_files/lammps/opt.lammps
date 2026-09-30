@@ -43,6 +43,7 @@ thermo       10
 # 每 10 次优化迭代保存一帧
 dump            opt all custom 10 optimization.dump id type x y z
 dump_modify     opt sort id
+dump_modify     opt format line "%d %d %.15f %.15f %.15f"
 
 min_style       cg
 min_modify dmax 0.1 norm max
@@ -51,7 +52,4 @@ minimize        0.0 1.0e-3 10000 100000
 undump          opt
 
 # 保存最终结构
-write_data      optimized.data
-write_dump      all custom optimized.dump id type x y z modify sort id
-
-
+write_dump all custom optimized.dump id type x y z  modify sort id format line "%d %d %.15f %.15f %.15f"
