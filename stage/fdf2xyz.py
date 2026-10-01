@@ -1,6 +1,8 @@
 # %%
 import os
 import re
+import shutil
+import subprocess
 import numpy as np
 import json
 from ase import Atoms
@@ -414,6 +416,19 @@ def FDF_to_xyz(
         f.writelines(lines)
 
     L.ok(f"转换完成: {fdf_path} -> {xyz_path} | natoms={len(atoms)}")
+
+    # 6. 由 STRUCT.fdf 生成 POSCAR（sgeom 原地输出到同一 leaf 目录）。
+    sgeom = shutil.which("sgeom")
+    if sgeom is None:
+        raise FileNotFoundError(
+            "生成 POSCAR 需要 sgeom 命令，但当前环境中未找到"
+        )
+    subprocess.run(
+        [sgeom, "STRUCT.fdf", "POSCAR"],
+        cwd=output_dir,
+        check=True,
+    )
+    L.ok(f"生成 POSCAR: {os.path.join(output_dir, 'POSCAR')}")
 
 def main():
     parser = argparse.ArgumentParser(

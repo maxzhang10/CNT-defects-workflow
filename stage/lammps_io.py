@@ -229,11 +229,13 @@ def prepare_lammps_inputs(
 
                 continue
 
-            # 把 pair_style deepmd ./<任意>.pth 改写成实际的力场文件名
+            # 把 pair_style deepmd <任意>.pth 改写成实际的力场文件名
             # （input_dir 里 glob 出的 .pth 文件名不固定）。
-            if re.match(r"^\s*pair_style\s+deepmd\s+\S+\.pth\s*$", line):
+            # 模板里的旧路径可能是相对/绝对路径，也可能带英文双引号，
+            # 统一改写成指向工作目录内软链接的 ./<filename>（不带引号）。
+            if re.match(r'^\s*pair_style\s+deepmd\s+"?\S+\.pth"?\s*$', line):
                 line = re.sub(
-                    r"(^\s*pair_style\s+deepmd\s+)\S+\.pth(\s*$)",
+                    r'(^\s*pair_style\s+deepmd\s+)"?\S+\.pth"?(\s*$)',
                     rf"\g<1>./{model_filename}\g<2>",
                     line,
                 )
