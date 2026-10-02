@@ -131,9 +131,14 @@ def CNT_MVH (tube, index2):
     #Atoms.append() 只会把新原子加在列表末尾，所以先加H没问题，不会改变C的索引
     return tube_MVH
 
-def CNT_5775 (tube ,index3,neighbor_rank=0):
+def CNT_5775 (tube ,index3,neighbor_rank=None,rng=None):
     near_list = find_nearest(tube,index3)
-    nb0 = near_list[neighbor_rank][1]    #nb0 指的是三个近邻原子里的0号，可以修改neighbor_rank为 1、2
+    if neighbor_rank is None:
+        # 从三个近邻原子里随机选一个
+        if rng is None:
+            rng = np.random.default_rng()
+        neighbor_rank = int(rng.integers(0, len(near_list)))
+    nb0 = near_list[neighbor_rank][1]    #nb0 指的是三个近邻原子里的0号，可以修改neighbor_rank为 1、2；传 None 则随机
     tube_5775 = add_57(tube, index3,nb0+1)
     return tube_5775
 
