@@ -7,6 +7,7 @@ import json
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -50,6 +51,40 @@ BASE_LAMMPS_SEED = 23456789
 #            （拷贝到工作目录时命名为 in.lammps），只改写固定原子数 nfix，
 #            不消费温度/步数/种子。
 LAMMPS_MODE = "opt"
+
+
+class ProgressRecorder:
+    """
+    记录每个物理配置的 replica 任务进度，追加写入 record.log。
+
+    每行格式：
+        [时间] 配置相对路径: 完成数/总数 (当前 task_id OK/FAIL)
+
+    计数按 task_id 去重，任务无论 OK/FAIL 都计入"已完成"，
+    表示该 replica 的 workflow 已经跑完一轮、不会再被本批次重试。
+    """
+
+    def __init__(self, log_path, total_by_config):
+        self._log_path = log_path
+        self._total_by_config = total_by_config
+        self._done_by_config = {
+            config: set() for config in total_by_config
+        }
+        self._lock = threading.Lock()
+
+    def record(self, config_name, task_id, status):
+        with self._lock:
+            done = self._done_by_config[config_name]
+            done.add(task_id)
+            total = self._total_by_config[config_name]
+            timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+            line = (
+                f"[{timestamp}] {config_name}: "
+                f"{len(done)}/{total} done "
+                f"({task_id} {status})\n"
+            )
+            with self._log_path.open("a", encoding="utf-8") as f:
+                f.write(line)
 
 TEMPLATE = {
     "temperature": 300,
@@ -214,6 +249,13 @@ def build_tasks(
                     f"rep{replica:03d}"
                 )
 
+                # record.log 里按此名称聚合 replica 进度
+                config_name = (
+                    f"{int(temperature)}K/"
+                    f"{m}_{n}/"
+                    f"{folder_name}"
+                )
+
                 root_key = str(run_root.resolve())
 
                 if root_key in used_roots:
@@ -231,6 +273,7 @@ def build_tasks(
 
                 tasks.append({
                     "task_id": task_id,
+                    "config_name": config_name,
                     "temperature": int(temperature),
                     "m": m,
                     "n": n,
@@ -479,6 +522,7 @@ def run_single_task(
         return (
             task_id,
             result.returncode,
+            status,
         )
 
     except Exception as exc:
@@ -498,6 +542,7 @@ def run_single_task(
         return (
             task_id,
             1,
+            "FAIL",
         )
 
     finally:
@@ -642,6 +687,24 @@ def main():
     all_results = {}
     start = time.time()
 
+    # 每个物理配置的 replica 总数，用于 record.log 进度计数
+    total_by_config = {}
+    for task in tasks:
+        total_by_config[task["config_name"]] = (
+            total_by_config.get(task["config_name"], 0) + 1
+        )
+
+    record_log = base_root / "record.log"
+    recorder = ProgressRecorder(record_log, total_by_config)
+    with record_log.open("a", encoding="utf-8") as f:
+        f.write(
+            f"\n===== batch start {time.strftime('%Y-%m-%d %H:%M:%S')} "
+            f"({len(tasks)} tasks, "
+            f"{len(total_by_config)} configurations) =====\n"
+        )
+
+    print(f"[INFO] record.log: {record_log}")
+
     # 每个 task 都有独立 run_root，并发执行所有任务。
     # 单个任务失败不中断整个批次：保留其目录文件，记录失败信息，
     # 由调用方事后检查并决定是否手动重跑。
@@ -667,6 +730,7 @@ def main():
             try:
                 result = future.result()
                 returncode = result[1]
+                status = result[2]
             except Exception as exc:
                 print(
                     f"[ERROR] 未捕获异常 "
@@ -676,6 +740,13 @@ def main():
                     flush=True,
                 )
                 returncode = 1
+                status = "FAIL"
+
+            recorder.record(
+                task["config_name"],
+                task_id,
+                status,
+            )
 
             all_results[task_id] = (task_id, returncode)
 
@@ -706,6 +777,20 @@ def main():
         f"总耗时: "
         f"{elapsed / 60:.1f} min"
     )
+
+    # 批次结束时在 record.log 写一行每个配置的最终进度汇总
+    with record_log.open("a", encoding="utf-8") as f:
+        f.write(
+            f"----- batch end {time.strftime('%Y-%m-%d %H:%M:%S')} "
+            f"(success {len(all_results_list) - len(failed)}"
+            f"/{len(all_results_list)}) -----\n"
+        )
+        for config_name in sorted(total_by_config):
+            done = len(recorder._done_by_config[config_name])
+            f.write(
+                f"  {config_name}: "
+                f"{done}/{total_by_config[config_name]} done\n"
+            )
 
     if failed:
         print("失败任务：")

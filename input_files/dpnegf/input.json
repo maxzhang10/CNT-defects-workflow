@@ -3,6 +3,7 @@
         "task": "negf",
         "scf": false,
         "block_tridiagonal": true,
+        "btd_initialization": "direct",
         "ele_T": 300,
         "unit": "eV",
         "scf_options": {
@@ -109,7 +110,7 @@
         "eta_lead": 1e-05,
         "eta_device": 1e-05,
         "output_options": {
-            "dos": true,
+            "dos": false,
             "tc": true,
             "ldos": false,
             "current_nscf": false,
