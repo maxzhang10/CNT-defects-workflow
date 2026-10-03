@@ -139,15 +139,34 @@ def cyl_distance_2d(theta1, z1, theta2, z2):
 
     return np.sqrt(ds**2 + dz**2)
 
+def is_metallic(m, n):
+    """(m - n) 能被 3 整除时为金属管。"""
+    return (m - n) % 3 == 0
+
+
+def fixed_pl_per_side(m, n):
+    """
+    每侧固定原子占据的 PL 数。
+
+    金属管：  2PL电极 + 2PL缓冲 = 4，总体 2PL-2PL-defects-2PL-2PL；
+    半导体管：2PL电极 + 4PL加厚 = 6，总体 2PL-4PL-defects-4PL-2PL，
+              加厚的 4PL 同样作为固定原子。
+    """
+    return 4 if is_metallic(m, n) else 6
+
+
 def geo_info(m, n, r_max, l_def):
     T = calculate_unit_cell_length(m, n)
     N_uc = calculate_atom_count(m, n, 1)
     l_PL = math.floor(r_max / T) + 1
 
-    # 2PL-2PL-defects-2PL-2PL
-    length = l_PL * 8 + l_def
+    n_fix_pl = fixed_pl_per_side(m, n)
+    length = l_PL * 2 * n_fix_pl + l_def
 
-    L.debug("结构为 2PL-2PL-defects-2PL-2PL")
+    if is_metallic(m, n):
+        L.debug("结构为 2PL-2PL-defects-2PL-2PL（金属管）")
+    else:
+        L.debug("结构为 2PL-4PL-defects-4PL-2PL（半导体管）")
     L.debug(f"defects区 为 {l_def} 个uc")
     L.debug(f"unit cell长度为 T = {T}")
     L.debug(f"unit cell 原子数N_uc = {N_uc}")

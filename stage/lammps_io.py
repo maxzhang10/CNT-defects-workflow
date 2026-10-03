@@ -7,6 +7,8 @@ from pathlib import Path
 
 import logkit as L
 
+import cnt_geometry
+
 
 def symlink_force(src: Path, dst: Path) -> None:
     """建软连接 dst -> src，已存在则先删后建。
@@ -127,8 +129,10 @@ def prepare_lammps_inputs(
 
     model_filename = model_src.name
 
-    n_fix = 4 * l_PL * N_uc
     m, n = chirality
+    # 每侧固定 PL 数与结构生成保持一致：
+    # 金属管 2PL电极+2PL缓冲=4，半导体管 2PL电极+4PL加厚=6。
+    n_fix = cnt_geometry.fixed_pl_per_side(m, n) * l_PL * N_uc
 
     for folder, atoms in structures.items():
         if structure_root is None:

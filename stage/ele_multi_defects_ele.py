@@ -55,6 +55,8 @@ def generate_defect_coords(
     T,
     l_PL,
     l_def,
+    m,
+    n,
     min_sep=4.26,
     edge_margin=1.42,
     seed=None,
@@ -77,9 +79,12 @@ def generate_defect_coords(
     coords = []
     used_indices = []
 
-    # 名义 defects 区域：2PL-2PL-defects-2PL-2PL
-    z_def_low = 4 * l_PL * T
-    z_def_high = (4 * l_PL + l_def) * T
+    # 名义 defects 区域：
+    # 金属管 2PL-2PL-defects-2PL-2PL（左侧 4PL 后开始）；
+    # 半导体管 2PL-4PL-defects-4PL-2PL（左侧 6PL 后开始）。
+    n_fix_pl = cnt_geometry.fixed_pl_per_side(m, n)
+    z_def_low = n_fix_pl * l_PL * T
+    z_def_high = (n_fix_pl * l_PL + l_def) * T
 
     # 实际允许造缺陷的区域：左右各缩小一个 C-C 键长
     z_low = z_def_low + edge_margin
@@ -232,6 +237,8 @@ def main():
         T=T,
         l_PL=l_PL,
         l_def=l_def,
+        m=m,
+        n=n,
         min_sep=min_defect_sep,
         edge_margin=edge_margin,
         seed=seed,
@@ -340,7 +347,7 @@ def main():
         # 而少含等量 C，破坏同质碳电极假设。POSCAR 和 data.lmp 用同一份重排后的结构。
         atoms_repositioned = exporters.reposition_hydrogens(
             atoms,
-            4 * l_PL * N_uc,
+            cnt_geometry.fixed_pl_per_side(m, n) * l_PL * N_uc,
         )
 
         output_dir = structure_root / "lammps"

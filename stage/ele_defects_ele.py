@@ -176,7 +176,7 @@ for i, name in enumerate(structures, 1):
 for folder, atoms in structures.items():
     atoms_pos = atoms.copy()
     
-    atoms_lmp = exporters.reposition_hydrogens(atoms, 4*l_PL*N_uc)  # 计算左右电极的原子数，调整 H 原子位置
+    atoms_lmp = exporters.reposition_hydrogens(atoms, cnt_geometry.fixed_pl_per_side(m, n)*l_PL*N_uc)  # 计算左右电极的原子数，调整 H 原子位置
 
 
     output_dir = data_root / f"{temperature}K" / f"{m}_{n}" / folder / "lammps"
