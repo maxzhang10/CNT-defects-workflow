@@ -42,7 +42,8 @@ def multi_defects_ele(tube, coords, type_list, seed=None):
         elif defect_type == "DV":
             new_tube = defects.CNT_DV(new_tube, current_index)
         elif defect_type == "5775":
-            new_tube = defects.CNT_5775(new_tube, current_index)
+            # 5775 的朝向随机，传入同一个 rng 保证整个构型可复现
+            new_tube = defects.CNT_5775(new_tube, current_index, rng=rng)
         else:
             raise ValueError(f"未知缺陷类型: {defect_type}")
 
@@ -206,7 +207,11 @@ l_def = int(config["l_def"])
 md_steps = int(config.get("md_steps", 40000))
 T, N_uc, l_PL, _ = cnt_geometry.geo_info(m, n, r_max, l_def)
 length = config.get("length", l_PL * 8 + l_def)  # 如果 config 中指定了 length，则使用它，否则使用默认值
+# 纯散射区模式：length == l_def 时整管都是缺陷区，无电极区，
+# 只输出 POSCAR（散射区 TB 数据集用途），不生成 LAMMPS 输入
+pure_scatter = (length == l_def)
 L.info(f"l_def       = {l_def}")
+L.info(f"length      = {length}（{'纯散射区模式' if pure_scatter else '完整器件模式'}）")
 # %%
 tube_unit = cnt_geometry.build_unit_cnt(m, n, vacuum=10.0)
 tube_clean = cnt_geometry.clean_cnt_by_shift_wrap_anchor(tube_unit) 
@@ -224,7 +229,7 @@ cnt_geometry.set_reference_cyl(tube)   # 规定中心轴
 # =========================
 
 N = int(config["N_defects"])
-seed = 20260705
+seed = int(config.get("seed", 20260705))
 
 # 二维柱面展开距离屏蔽半径
 # 目的：避免两个缺陷核心拓扑重叠
@@ -303,8 +308,8 @@ structures = {
 for folder, atoms in structures.items():
     atoms_pos = atoms.copy()
 
-    # 纯缺陷区模式下没有电极区，不需要调整 H 原子位置
-    if length == l_def:
+    if pure_scatter:
+        # 纯散射区模式下没有电极区，不需要调整 H 原子位置
         atoms_lmp = atoms.copy()
     else:
         atoms_lmp = exporters.reposition_hydrogens(atoms, 4*l_PL*N_uc)  # 计算左右电极的原子数，调整 H 原子位置

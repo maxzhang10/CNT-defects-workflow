@@ -106,24 +106,27 @@ z_t     = z1 + dz
 # 生成单、双缺陷管
 
 # %%
+# 5775 的朝向是随机的，用 config 里的 seed 固定，保证 distillation 构型可复现
+rng = np.random.default_rng(int(config.get("seed", 20260705)))
+
 #生成单缺陷结构
 tube_MVH   = defects.CNT_MVH(tube, index)
 tube_DV    = defects.CNT_DV(tube, index)
-tube_5775  = defects.CNT_5775(tube, index)
+tube_5775  = defects.CNT_5775(tube, index, rng=rng)
 
 
 # 先只算一次第二个缺陷的 index
 idx2_MVH       = cnt_geometry.coord_to_index(tube_MVH, theta_t, z_t)
 tube_MVH_MVH   = defects.CNT_MVH(tube_MVH, idx2_MVH)
 tube_MVH_DV    = defects.CNT_DV(tube_MVH, idx2_MVH)
-tube_MVH_5775  = defects.CNT_5775(tube_MVH, idx2_MVH)
+tube_MVH_5775  = defects.CNT_5775(tube_MVH, idx2_MVH, rng=rng)
 # ===== 下面开始 DV 为第一个缺陷 =====
 idx2_DV        = cnt_geometry.coord_to_index(tube_DV, theta_t, z_t)
 tube_DV_DV     = defects.CNT_DV(tube_DV, idx2_DV)
-tube_DV_5775   = defects.CNT_5775(tube_DV, idx2_DV)
+tube_DV_5775   = defects.CNT_5775(tube_DV, idx2_DV, rng=rng)
 # ===== 5775 为第一个缺陷 =====
 idx2_5775      = cnt_geometry.coord_to_index(tube_5775, theta_t, z_t)
-tube_5775_5775 = defects.CNT_5775(tube_5775, idx2_5775)
+tube_5775_5775 = defects.CNT_5775(tube_5775, idx2_5775, rng=rng)
 
 # %% [markdown]
 # 输出管结构文件
