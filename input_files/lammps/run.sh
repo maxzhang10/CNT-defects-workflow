@@ -36,7 +36,7 @@ echo "SLURM_CPUS_PER_TASK=${SLURM_CPUS_PER_TASK:-N/A}"
 echo "CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-N/A}"
 echo "======================================"
 
-module load deepmdkit/v3.2.0b0_pytorch
+source ~/dpmd.sh
 
 # DeePMD/PyTorch CPU 线程设置
 export OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK:-1}"
