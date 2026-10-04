@@ -1,5 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=cnt_lmp
+#SBATCH --exclude=wqd10nba06g6
 #SBATCH -p gpu_4090
 #SBATCH --gpus=1
 #SBATCH --ntasks=1
@@ -58,6 +59,8 @@ elif command -v lmp >/dev/null 2>&1; then
     LMP_CMD="$(command -v lmp)"
 elif command -v lammps_mpi >/dev/null 2>&1; then
     LMP_CMD="$(command -v lammps_mpi)"
+elif command -v lmp_mpi_4090 >/dev/null 2>&1; then
+    LMP_CMD="$(command -v lmp_mpi_4090)"
 else
     echo "[ERROR] Cannot find LAMMPS executable."
     echo "[INFO] Current PATH=${PATH}"
