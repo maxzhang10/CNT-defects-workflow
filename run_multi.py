@@ -314,11 +314,19 @@ def clean_dpnegf_output_cache(root, save_self_energy=False, self_energy_save_pat
     se_dirname = None
     if self_energy_save_path:
         se_path = Path(self_energy_save_path)
-        # 取相对路径的最后一段作为目录名（如 "./self_energy/" -> "self_energy"）。
-        se_dirname = se_path.name or se_path.parent.name
-        # 若 save_path 是 output/self_energy，则已被下面的 output 循环覆盖。
-        if se_path.parts and se_path.parts[0] == "output":
-            se_dirname = None  # 已在 output 循环中处理
+        if se_path.is_absolute():
+            # 绝对路径是跨 leaf / 跨 replica 的共享缓存（按手性区分），
+            # 由用户自行管理，不随 leaf 缓存一起清理；也避免把路径
+            # 最后一段误当作 leaf 内的目录名删除同名目录。
+            L.clean(
+                f"self_energy_cache.save_path 为绝对路径，跳过自动清理: {se_path}"
+            )
+        else:
+            # 取相对路径的最后一段作为目录名（如 "./self_energy/" -> "self_energy"）。
+            se_dirname = se_path.name or se_path.parent.name
+            # 若 save_path 是 output/self_energy，则已被下面的 output 循环覆盖。
+            if se_path.parts and se_path.parts[0] == "output":
+                se_dirname = None  # 已在 output 循环中处理
 
     for output_dir in sorted(root.rglob("output")):
         if not output_dir.is_dir():

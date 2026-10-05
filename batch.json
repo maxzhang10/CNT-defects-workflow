@@ -22,7 +22,6 @@
       "l_def": 8,
       "N_defects": 2,
       "structures": ["5775"],
-      "conductance_mode": "band_edge_bias",
       "replicas": 2
     }
   ]

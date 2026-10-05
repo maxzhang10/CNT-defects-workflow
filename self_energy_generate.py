@@ -134,15 +134,22 @@ def build_tasks(
     physical_index = 0
     task_index = 0
 
+    # stage 目录已由 load_cnt_geometry 加入 sys.path。
+    import batch_config as bc
+
     for cfg in CHIRAL_CONFIGS:
-        conductance_mode = cfg.get("conductance_mode", "fermi")
-        if conductance_mode not in {"fermi", "band_edge_bias"}:
-            raise ValueError("conductance_mode must be 'fermi' or 'band_edge_bias'")
+        conductance_mode = bc.conductance_mode_for_chirality(cfg["m"], cfg["n"])
         save_self_energy = cfg.get(
             "save_self_energy", TEMPLATE["save_self_energy"]
         )
         if not isinstance(save_self_energy, bool):
             raise ValueError("save_self_energy must be a boolean")
+        # 可选：按手性覆盖自能缓存路径，不同手性使用不同 self_energy 文件。
+        # save_path 支持 {m} {n} {chirality} {data_root} 占位符。
+        se_cache_raw = cfg.get("self_energy_cache", TEMPLATE["self_energy_cache"])
+        se_cache_raw = bc._validate_self_energy_cache(
+            se_cache_raw, "self_energy_cache", "CHIRAL_CONFIGS"
+        )
         # 能量网格（energy_grid）完全沿用 input.json 模板默认值，
         # 不再从 cfg/TEMPLATE 读取 espacing/negf_energy_window。
         for temperature in TEMPERATURES:
@@ -153,6 +160,9 @@ def build_tasks(
             l_def = int(cfg["l_def"])
             n_defects = int(cfg["N_defects"])
             structures = list(cfg["structures"])
+            se_cache = bc.resolve_self_energy_cache(
+                se_cache_raw, m=m, n=n, data_root=base_root
+            )
 
             # 必须使用与结构生成脚本相同的 geo_info，
             # 确保这里算出的密度和目录名完全一致。
@@ -239,6 +249,7 @@ def build_tasks(
                     "seed": structure_seed,
                     "lammps_seed": lammps_seed,
                     "save_self_energy": save_self_energy,
+                    "self_energy_cache": se_cache,
                     "conductance_mode": conductance_mode,
                 })
 
@@ -284,6 +295,7 @@ def make_task_config(task):
         "configuration_root": str(task["configuration_root"]),
         "md_sampling": {"n_samples": 1},
         "save_self_energy": task["save_self_energy"],
+        "self_energy_cache": task["self_energy_cache"],
         "conductance_mode": task["conductance_mode"],
         "conductance_options": {
             "mu": mu_labels,

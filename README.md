@@ -1,124 +1,189 @@
-# CNT 缺陷工作流批量运行说明
+# CNT 缺陷输运工作流
 
-本文档介绍 `manage_batch.sh`（批处理管理器）与 `batch_generate.py` 的用法。
+本仓库用于批量生成 CNT 缺陷结构，运行 LAMMPS 分子动力学或结构优化，生成 DPNEGF 输入并计算输运性质。批量入口是 `batch_generate.py`，单个目录入口是 `run_multi.py`。
 
-## 快速开始
+## 1. 运行前准备
 
-```bash
-# 启动一个批次（前台等待，建议 nohup 挂后台并保存输出）
-nohup ./manage_batch.sh batch_generate.py start > batch_generate.out 2>&1 &
+计算节点需要具备：
 
-# 查看状态 / 停止
-./manage_batch.sh batch_generate.py status
-./manage_batch.sh batch_generate.py stop
-```
+- Python 环境及仓库依赖（DPNEGF、DeePTB、PyTorch 等）；
+- LAMMPS、MPI；
+- 使用 Slurm 时可用的 `sbatch`、`squeue`、`scancel`；
+- 与 `input_files/` 或 `cluster_input/` 模板匹配的 `run.sh`、模型文件和输入文件。
 
-批次参数（并发数、replica 数、数据目录）通过 `start` 后面的参数透传给
-batch 脚本：
+`input_files/` 是默认模板，`cluster_input/` 保存集群相关模板。脚本中的 `run.sh` 会加载节点上的 `~/dpmd.sh` 或 `~/dptb.sh`，如集群环境不同，需要先修改对应模板。
 
-```bash
-./manage_batch.sh batch_generate.py start --lammps-repeats 20 --max-parallel 50 --data-root ./
-```
+## 2. 批量运行（推荐）
 
-## 多批次并发：用不同的脚本名区分实例
+批量参数写在 `batch.json` 或 `batch.py` 中。默认探测顺序是当前目录下的 `batch.py`、`batch.json`，也可以用 `--config` 显式指定。
 
-`manage_batch.sh` 以 **batch 脚本名**作为实例标识。想跑第二个批次，
-复制一份脚本、改个名字（改里面的配置也行），用各自的脚本名管理：
+### 最小示例
+
+当前示例配置可直接检查：
 
 ```bash
-cp batch_generate.py batch_generate_1.py
-cp batch_generate.py batch_generate_2.py
-
-# 两个批次并发运行
-nohup ./manage_batch.sh batch_generate_1.py start --data-root ./data_1 --lammps-repeats 20 > b1.out 2>&1 &
-nohup ./manage_batch.sh batch_generate_2.py start --data-root ./data_2 --lammps-repeats 20 > b2.out 2>&1 &
-
-# 分别管理
-./manage_batch.sh batch_generate_2.py status
-./manage_batch.sh batch_generate_2.py stop
+python batch_generate.py --config batch.json --scheduler slurm --max-parallel 2
 ```
 
-脚本基名只能包含字母、数字、下划线和连字符。
+正式运行建议保存日志：
 
-**注意**：并发实例必须使用不同的 `--data-root`，否则 replica 目录重叠会互相
-写坏；所有实例的 `--max-parallel` 之和不要超过 Slurm 队列配额。
-
-## 产生的文件（刻意保持最少）
-
-manage 自身**只生成一个 `<基名>.pids`**，记录运行中的进程号（供
-status/stop 使用），批次结束后自动删除。不再生成
-`.log / .status / .manager.log / .log.prev` 等文件。
-
-batch 的输出直接回显到终端，想留档就在启动时重定向（如上例的
-`> b1.out`）。其余信息都在数据目录里：
-
-- **进度**：`<data_root>/record.log`（每个 replica 完成一行 + 汇总）；
-- **细节**：每个 replica 目录下的 `workflow.log`（完整内部日志含报错）；
-- **参数**：每个 replica 目录下的 `workflow_config.json`（启动时落盘的
-  完整配置，参数溯源以它为准）。
-
-## 命令一览
-
-```
-manage_batch.sh <batch脚本.py> <命令> [batch参数...]
-
-  start        启动一次该 batch 脚本；成功或失败后自动退出（不自动重试）
-  status       查看运行状态（进程树 + Slurm 队列）
-  stop         停止本地调度器及 batch 进程（已提交的 Slurm 作业不会被取消）
-  restart      重启
+```bash
+nohup python batch_generate.py \
+  --config batch.json \
+  --scheduler slurm \
+  --max-parallel 20 \
+  > batch_generate.out 2>&1 &
 ```
 
-## batch_generate.py 常用参数
+调试时可使用本地串行调度，或只打印命令：
 
-```
-python batch_generate.py \
-    --scheduler slurm          # 或 local
-    --lammps-repeats 20        # 每个物理配置的 replica（种子）数
-    --max-parallel 50          # 同时启动的 workflow 数
-    --data-root ./             # 数据根目录
-    --skip-conductance         # 跳过批次结束后的跨 replica 电导汇总
+```bash
+python batch_generate.py --config batch.json --scheduler local --max-parallel 1
+python batch_generate.py --config batch.json --scheduler slurm --max-parallel 2 --skip-conductance
 ```
 
-物理配置（手性、缺陷类型、缺陷数、温度等）在 `batch_generate.py` 顶部的
-`CHIRAL_CONFIGS` / `TEMPERATURES` 中定义；每个配置会展开成
-`--lammps-repeats` 个 replica，写入
-`data_root/<温度>K/<m>_<n>/<缺陷配置>/replica_XXX/`。
+`--max-parallel` 是同时运行的独立 workflow 数；Slurm 模式下每个 workflow 内部会按 LAMMPS、DPNEGF 阶段提交作业并等待阶段结束。所有 workflow 成功后，默认自动进行跨 replica 电导汇总；`--skip-conductance` 可跳过该步骤。
 
-## record.log：replica 进度记录
+### 配置字段
 
-每次批次运行时，batch 脚本会在 `data_root/record.log` 追加记录每个
-物理配置的 replica 完成进度：
+`batch.json` 的核心结构如下：
 
+```json
+{
+  "template": {
+    "r_max": 6.5,
+    "md_steps": 50000,
+    "save_self_energy": false,
+    "self_energy_cache": {
+      "use_saved": true,
+      "save_path": "{data_root}/self_energy/{chirality}/"
+    },
+    "md_sampling": {"n_samples": 1}
+  },
+  "temperatures": [500],
+  "lammps_mode": "opt",
+  "base_structure_seed": 20260705,
+  "base_lammps_seed": 23456789,
+  "data_root": ".",
+  "configs": [
+    {
+      "chirality": [5, 5],
+      "l_def": 8,
+      "N_defects": 2,
+      "structures": ["5775"],
+      "replicas": 2
+    }
+  ]
+}
 ```
-===== batch start 2026-10-02 14:01:53 (20 tasks, 1 configurations) =====
-[2026-10-02 14:05:12] 500K/5_5/5775_L008_0.1016A-1: 1/20 done (500K_5_5_5775_L008_0.1016A-1_rep003 OK)
-[2026-10-02 14:06:40] 500K/5_5/5775_L008_0.1016A-1: 2/20 done (500K_5_5_5775_L008_0.1016A-1_rep001 FAIL)
-...
------ batch end 2026-10-02 16:20:00 (success 19/20) -----
-  500K/5_5/5775_L008_0.1016A-1: 20/20 done
+
+说明：
+
+- `chirality`、`l_def`、`N_defects`、`structures`、`replicas` 是每个配置的必需字段；
+- `lammps_mode` 为 `opt`（结构优化）或 `md`（分子动力学）；
+- 电导模式由手性自动判断：`(m - n) % 3 == 0` 的金属管使用 `fermi`，其余半导体管使用 `band_edge_bias`；
+- 每个配置单独设置 `replicas`，不同长度可以使用不同 replica 数；
+- 两个 base seed 分别控制缺陷结构和 LAMMPS 轨迹。相同配置的 replica 序号会得到稳定的 seed；
+- `self_energy_cache.save_path` 支持 `{m}`、`{n}`、`{chirality}`、`{data_root}` 占位符。若多个 replica 共享自能，建议使用包含 `{data_root}` 的路径。
+
+需要循环、条件或批量生成多个配置时，可使用 `batch.py`。它必须导出与 `batch.json` 相同的配置字段，具体格式和校验规则见 `stage/batch_config.py` 顶部说明。
+
+## 3. 批量目录和输出
+
+每个任务写入：
+
+```text
+<data_root>/<temperature>K/<m>_<n>/<defect_name>/replica_XXX/
+├── lammps/
+├── dpnegf/<md_step>/
+├── workflow_config.json
+└── workflow.log
 ```
 
-- 每个 replica 的 workflow 跑完一轮（无论 OK 还是 FAIL）都会追加一行；
-- 结尾汇总块给出每个配置的最终 `完成数/总数` 与整批成功数；
-- 文件为追加模式，同一 data_root 多次批次不会清掉历史记录；
-- 每个并发实例的 record.log 写在各自的 `--data-root` 下。
+缺陷目录名由结构类型、缺陷长度和密度组成，例如 `5775_L008_0.1016A-1`。批次根目录下的 `record.log` 记录每个 replica 的完成进度。DPNEGF 工作目录中的常见状态文件包括：
 
-## 参数溯源
+- `lammps_done.flag` / `lammps_failed.flag`；
+- `dpnegf_done.flag` / `dpnegf_failed.flag`；
+- `job_id.txt`、`slurm-<jobid>.out`、`slurm-<jobid>.err`；
+- `output/negf.out.pth` 和电导结果文件。
 
-想知道某次运行用了什么参数，按此顺序查：
+任务参数以对应 replica 目录内的 `workflow_config.json` 为准。结果检查可运行：
 
-1. **每个 replica 目录的 `workflow_config.json`**（最准确）：任务启动时实际
-   落盘的完整配置，不会被后续修改 batch 脚本影响；
-2. **启动时保存的输出**（如 `b1.out`）：开头有总任务数、replica 数、并发、
-   scheduler、data_root；
-3. **运行中的进程命令行**：`status` 拿到 PID 后 `ps -p <PID> -o args`。
+```bash
+./check.sh
+```
 
-## 失败处理
+## 4. 管理批处理进程
 
-`manage_batch.sh` **不会自动重试**：batch 脚本返回非 0 时直接结束，
-失败任务的目录与日志全部保留。排查方式：
+`manage_batch.sh` 适合让批量脚本在后台运行。它管理的是本地 Python 调度器，不会自动取消已经提交到 Slurm 的作业。
 
-1. 看启动输出末尾的失败任务列表（或 `record.log` 里的 FAIL 行）；
-2. 每个 replica 的详细日志在其目录下的 `workflow.log`；
-3. 修复后手动重跑（注意：若 config 有变更，旧结果的 provenance hash 不一致
-   会触发 P0-4 保护，需删除对应 `dpnegf_done.flag` 与 `output/` 再重算）。
+```bash
+./manage_batch.sh start
+./manage_batch.sh status
+./manage_batch.sh log
+./manage_batch.sh manager-log
+./manage_batch.sh stop
+./manage_batch.sh restart
+```
+
+日志文件包括 `batch_generate.log`、`batch_generate.log.prev` 和 `manage_batch.log`。批次成功或失败后调度器都会退出，不会自动重试。
+
+## 5. 单个结构或已有数据的工作流
+
+`run_multi.py` 会执行以下阶段：生成缺陷结构（eledefects）→ 运行 LAMMPS → dump 转 FDF/XYZ → 准备 DPNEGF → 运行 DPNEGF → 汇总电导。
+
+对已有数据目录运行：
+
+```bash
+python run_multi.py --root ./data --scheduler slurm
+```
+
+常用选项：
+
+```bash
+python run_multi.py --root ./data --scheduler local
+python run_multi.py --root ./data --skip-ele
+python run_multi.py --root ./data --skip-dpnegf
+python run_multi.py --root ./data --skip-conductance
+python run_multi.py --root ./data --dry-run
+python run_multi.py --root ./data --config ./config.json
+```
+
+`run.py` 是不包含最终跨 replica 汇总的单目录版本，参数与 `run_multi.py` 的基础选项相同：
+
+```bash
+python run.py --root ./data/500K/5_5/5775_L008_0.1016A-1/replica_001
+```
+
+`run.py` 只负责生成并执行单个目录的后处理流程；需要选择 `local` 或 `slurm` 调度方式时使用 `run_multi.py`。
+
+## 6. 失败任务重提
+
+先检查，不修改任何任务：
+
+```bash
+python resubmit_negf.py ./data
+```
+
+确认失败目录后再重置 `output/`、清理旧状态并重新提交：
+
+```bash
+python resubmit_negf.py ./data --submit --max-submit 10 --scheduler slurm
+```
+
+该脚本默认使用 Slurm；本地调试可以指定 `--scheduler local`。重提前应先查看对应目录的 `workflow.log`、`slurm-*.err` 和 `dpnegf_failed.flag`。如果修改了输入配置或模型，旧的 `output/` 和 done flag 不能直接复用。
+
+## 7. 常用维护命令
+
+```bash
+# 查看当前用户的 Slurm 作业
+squeue -u "$USER"
+
+# 按仓库提供的作业名取消作业
+./cancel.sh
+
+# 删除共享自能缓存（执行前确认路径）
+./rm_self_energy.sh
+```
+
+不要让两个并发批次使用相同的 `data_root`，否则 replica 目录和 `record.log` 会相互覆盖。修改 Slurm 分区、GPU、CPU 或环境加载方式时，应同步修改相应的 `run.sh` 模板。

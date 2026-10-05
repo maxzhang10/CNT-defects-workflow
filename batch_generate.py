@@ -230,7 +230,18 @@ def build_tasks(batch, base_root):
                     "save_self_energy": cfg.get(
                         "save_self_energy", template["save_self_energy"]
                     ),
-                    "conductance_mode": cfg["conductance_mode"],
+                    # 按手性解析自能缓存路径（per-config 覆盖优先，
+                    # 否则用 template），实现不同手性使用不同的
+                    # self_energy 文件。
+                    "self_energy_cache": bc.resolve_self_energy_cache(
+                        cfg["self_energy_cache"]
+                        if cfg["self_energy_cache"] is not None
+                        else template["self_energy_cache"],
+                        m=m,
+                        n=n,
+                        data_root=base_root,
+                    ),
+                    "conductance_mode": bc.conductance_mode_for_chirality(m, n),
                 })
 
     return tasks
@@ -276,6 +287,8 @@ def make_task_config(task, batch):
         "configuration_root": str(task["configuration_root"]),
         "md_sampling": {"n_samples": 1},
         "save_self_energy": task["save_self_energy"],
+        # 覆盖 template 的自能缓存为按手性解析后的路径（None 表示沿用）。
+        "self_energy_cache": task["self_energy_cache"],
         "conductance_mode": task["conductance_mode"],
         "conductance_options": {
             "mu": mu_labels,

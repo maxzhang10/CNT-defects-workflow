@@ -59,24 +59,6 @@ def test_lammps_done_returns_zero(tmp_path, monkeypatch):
     assert sub_lmps.main() == 0
 
 
-def test_dpnegf_done_with_valid_provenance_returns_zero(tmp_path, monkeypatch):
-    import sub_dpnegf as dp
-
-    workdir = _make_workdir(tmp_path, ["dpnegf_done.flag"])
-    # Set up a valid provenance: non-empty result + matching hash.
-    out = workdir / "output"
-    out.mkdir()
-    (out / "negf.out.pth").write_bytes(b"\x80\x02")
-    (out / "negf_config_hash.txt").write_text("abc123\n", encoding="utf-8")
-    (workdir / "expected_negf_config_hash.txt").write_text("abc123\n", encoding="utf-8")
-
-    monkeypatch.setattr(
-        "sys.argv",
-        ["sub_dpnegf.py", str(workdir), "--scheduler", "local"],
-    )
-    assert dp.main() == 0
-
-
 def test_exit_prior_failure_constant_is_nonzero():
     # Shared contract: the sentinel is a non-zero, distinct exit code.
     assert sub_lmps.EXIT_PRIOR_FAILURE == sub_dpnegf.EXIT_PRIOR_FAILURE

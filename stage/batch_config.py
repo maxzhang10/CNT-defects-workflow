@@ -28,12 +28,35 @@ batch.json —— 简单配置、工具生成时使用：
       "l_def": 8,
       "N_defects": 2,
       "structures": ["5775"],
-      "conductance_mode": "band_edge_bias",   # fermi / band_edge_bias
-      "replicas": 20            # 必填：每个物理配置显式声明自己的
+      "replicas": 20,           # 必填：每个物理配置显式声明自己的
                                 # replica 数，不同长度可设不同值
+      "self_energy_cache": {    # 可选：覆盖 template 同名配置，
+        "use_saved": true,      # 实现不同手性使用不同 self_energy 文件
+        "save_path": "{data_root}/self_energy/{chirality}/"
+      }
     }
   ]
 }
+
+按手性自能缓存（self_energy_cache）
+----------------------------------
+电极自能只依赖手性，与缺陷类型 / 散射区长度 / replica 无关，
+因此同一手性的所有任务可以共享一份自能缓存文件。
+
+template.self_energy_cache 是全局默认；任一 config 可用同名键覆盖。
+save_path 支持以下占位符，在任务展开时解析：
+
+    {m} {n}       手性指数
+    {chirality}   "m_n" 形式（如 13_1）
+    {data_root}   批次数据根目录（已解析为绝对路径）
+
+相对路径保持相对语义（DPNEGF 按各 leaf 工作目录解析，即每个 leaf
+一份独立缓存）；要跨 leaf / 跨 replica 共享，用 {data_root} 组成
+绝对路径，例如 "{data_root}/self_energy/{chirality}/"。
+
+注意：save_self_energy=false 时 run_multi 的自动清理只处理 leaf
+内部的相对路径缓存；共享的绝对路径缓存由用户自行管理
+（如 rm_self_energy.sh 或手动删除）。
 
 batch.py —— 配置项多、需要循环/变量/条件时使用（同名变量赋值即可）：
 
@@ -43,7 +66,6 @@ batch.py —— 配置项多、需要循环/变量/条件时使用（同名变�
             "l_def": l,
             "N_defects": 2,
             "structures": ["5775"],
-            "conductance_mode": "band_edge_bias",
             "replicas": 20 if l <= 8 else 40,
         }
         for l in (5, 8, 12)
@@ -53,7 +75,14 @@ batch.py —— 配置项多、需要循环/变量/条件时使用（同名变�
     base_structure_seed = 20260705
     base_lammps_seed = 23456789
     data_root = "."
-    template = {"r_max": 6.5}
+    template = {
+        "r_max": 6.5,
+        # 按手性区分自能缓存（同手性的所有任务共享一份）：
+        "self_energy_cache": {
+            "use_saved": True,
+            "save_path": "{data_root}/self_energy/{chirality}/",
+        },
+    }
 
     # 只写数据生成逻辑（循环/变量/算术），命名空间为白名单，
     # 不注入 import / open 等能力。
@@ -87,7 +116,6 @@ DEFAULT_TEMPLATE = {
     "md_sampling": {"n_samples": 1},
 }
 
-CONDUCTANCE_MODES = ("fermi", "band_edge_bias")
 LAMMPS_MODES = ("md", "opt")
 
 _REQUIRED_CONFIG_KEYS = (
@@ -119,10 +147,61 @@ def _require_bool(value, name, path):
     return value
 
 
+def conductance_mode_for_chirality(m, n):
+    """Infer transport mode from CNT chirality."""
+    return "fermi" if (int(m) - int(n)) % 3 == 0 else "band_edge_bias"
+
+
+def _validate_self_energy_cache(cache, name, path):
+    """校验 self_energy_cache 配置，返回标准 dict。"""
+    if not isinstance(cache, dict):
+        _fail(path, f"{name} 必须为对象，当前值: {cache!r}")
+    use_saved = cache.get("use_saved")
+    save_path = cache.get("save_path")
+    _require_bool(use_saved, f"{name}.use_saved", path)
+    if not isinstance(save_path, str) or not save_path:
+        _fail(path, f"{name}.save_path 必须为非空字符串，当前值: {save_path!r}")
+    return {"use_saved": use_saved, "save_path": save_path}
+
+
+def resolve_self_energy_cache(cache, *, m, n, data_root):
+    """
+    解析 self_energy_cache.save_path 中的按手性占位符。
+
+    支持的占位符：{m} {n} {chirality}（"m_n" 形式）{data_root}。
+    其余字段（use_saved）原样保留。相对路径不改动，保持 DPNEGF
+    按 leaf 工作目录解析的语义。
+    """
+    if cache is None:
+        return None
+    resolved = dict(cache)
+    save_path = resolved.get("save_path")
+    if isinstance(save_path, str):
+        try:
+            resolved["save_path"] = save_path.format(
+                m=int(m),
+                n=int(n),
+                chirality=f"{int(m)}_{int(n)}",
+                data_root=str(data_root),
+            )
+        except KeyError as exc:
+            raise BatchConfigError(
+                f"self_energy_cache.save_path 含未知占位符 {exc}；"
+                "仅支持 {{m}} {{n}} {{chirality}} {{data_root}}，"
+                f"当前值: {save_path!r}"
+            )
+    return resolved
+
+
 def validate_config_entry(entry, index, path):
     """校验单个物理配置条目，返回补齐 chirality 后的新 dict。"""
     if not isinstance(entry, dict):
         _fail(path, f"configs[{index}] 必须为对象，当前值: {entry!r}")
+
+    # 手性接受两种写法：chirality: [m, n]，或分开的 m: .., n: ..（多手性
+    # 批次用循环生成时常用后者，见仓库 batch.py 模板）。
+    if "chirality" not in entry and "m" in entry and "n" in entry:
+        entry = {**entry, "chirality": [entry["m"], entry["n"]]}
 
     missing = [k for k in _REQUIRED_CONFIG_KEYS if k not in entry]
     if missing:
@@ -159,13 +238,19 @@ def validate_config_entry(entry, index, path):
             f"如 [\"5775\"]，当前值: {structures!r}",
         )
 
-    conductance_mode = entry.get("conductance_mode", "fermi")
-    if conductance_mode not in CONDUCTANCE_MODES:
-        _fail(
+    if "conductance_mode" in entry:
+        _fail(path, f"configs[{index}] 不再接受 conductance_mode，请由 chirality 自动判断")
+    conductance_mode = conductance_mode_for_chirality(m, n)
+
+    if "self_energy_cache" in entry:
+        # per-config 覆盖：不同手性 / 配置可用不同的自能缓存路径。
+        entry_cache = _validate_self_energy_cache(
+            entry["self_energy_cache"],
+            f"configs[{index}].self_energy_cache",
             path,
-            f"configs[{index}].conductance_mode 必须为 "
-            f"{' / '.join(CONDUCTANCE_MODES)}，当前值: {conductance_mode!r}",
         )
+    else:
+        entry_cache = None
 
     out = dict(entry)
     out["m"] = m
@@ -179,6 +264,8 @@ def validate_config_entry(entry, index, path):
     out["replicas"] = _require_int(
         entry["replicas"], f"configs[{index}].replicas", path
     )
+    # per-config 自能缓存覆盖；None 表示沿用 template。
+    out["self_energy_cache"] = entry_cache
     return out
 
 
@@ -191,6 +278,8 @@ _PY_BUILTINS_ALLOW = (
 )
 
 # batch.py 中会被收集的顶层变量名（其余变量如循环临时量自动忽略）。
+# 配置列表接受 configs 或 CHIRAL_CONFIGS（后者为多手性批次的惯用名，
+# 见仓库 batch.py 模板），二选一。
 _BATCH_PY_KEYS = (
     "template",
     "temperatures",
@@ -198,6 +287,7 @@ _BATCH_PY_KEYS = (
     "base_structure_seed",
     "base_lammps_seed",
     "data_root",
+    "CHIRAL_CONFIGS",
     "configs",
 )
 
@@ -227,6 +317,9 @@ def _validate_batch(raw, path):
         _fail(path, f"template 必须为对象，当前值: {template_raw!r}")
     template = {**DEFAULT_TEMPLATE, **template_raw}
     _require_bool(template["save_self_energy"], "template.save_self_energy", path)
+    template["self_energy_cache"] = _validate_self_energy_cache(
+        template["self_energy_cache"], "template.self_energy_cache", path
+    )
 
     temperatures = raw.get("temperatures")
     if (
@@ -333,6 +426,8 @@ def load_batch_py(path):
         for key in _BATCH_PY_KEYS
         if key in safe_globals
     }
+    if "configs" not in raw and "CHIRAL_CONFIGS" in raw:
+        raw["configs"] = raw.pop("CHIRAL_CONFIGS")
     return _validate_batch(raw, path)
 
 
