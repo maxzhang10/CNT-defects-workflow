@@ -494,10 +494,11 @@ def parse_args():
 
     parser.add_argument(
         "--config",
-        default="batch.json",
+        default=None,
         help=(
-            "批配置 JSON 路径，默认 ./batch.json。"
-            "格式见 stage/batch_config.py 的模块 docstring。"
+            "批配置文件路径（batch.py 或 batch.json，格式见 "
+            "stage/batch_config.py 的模块 docstring）。"
+            "缺省依次探测 ./batch.py、./batch.json。"
         ),
     )
 
@@ -548,7 +549,19 @@ def main():
         args.workflow_dir
     ).resolve()
 
-    batch = bc.load_batch_config(args.config)
+    config_arg = args.config
+    if config_arg is None:
+        for candidate in ("batch.py", "batch.json"):
+            if Path(candidate).is_file():
+                config_arg = candidate
+                break
+        else:
+            raise FileNotFoundError(
+                "未指定 --config，且当前目录下找不到 batch.py / batch.json"
+            )
+    print(f"[INFO] 批配置文件: {Path(config_arg).resolve()}")
+
+    batch = bc.load(config_arg)
     base_root = batch["data_root"]
 
     run_multi_path = (

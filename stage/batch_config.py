@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """
-批次配置（batch.json）的加载、校验与任务展开。
+批次配置（batch.json 或 batch.py）的加载、校验与任务展开。
 
-batch.json 是批任务的唯一配置入口，取代旧版 batch_generate.py 内的
+批任务是配置驱动的：配置文件取代旧版 batch_generate.py 内的
 TEMPLATE / CHIRAL_CONFIGS / TEMPERATURES / BASE_*_SEED 全局常量。
 
-文件格式
---------
+支持两种格式（按文件后缀分派，校验规则完全一致）：
+
+batch.json —— 简单配置、工具生成时使用：
+
 {
   "template": {           # 所有物理配置的公共默认值（可选）
     "r_max": 6.5,
@@ -19,7 +21,7 @@ TEMPLATE / CHIRAL_CONFIGS / TEMPERATURES / BASE_*_SEED 全局常量。
   "lammps_mode": "opt",          # "md" NVT 退火 / "opt" 几何优化
   "base_structure_seed": 20260705,
   "base_lammps_seed": 23456789,
-  "data_root": ".",              # 相对路径按 batch.json 所在目录解析
+  "data_root": ".",              # 相对路径按配置文件所在目录解析
   "configs": [
     {
       "chirality": [5, 5],
@@ -33,13 +35,36 @@ TEMPLATE / CHIRAL_CONFIGS / TEMPERATURES / BASE_*_SEED 全局常量。
   ]
 }
 
+batch.py —— 配置项多、需要循环/变量/条件时使用（同名变量赋值即可）：
+
+    configs = [
+        {
+            "chirality": [5, 5],
+            "l_def": l,
+            "N_defects": 2,
+            "structures": ["5775"],
+            "conductance_mode": "band_edge_bias",
+            "replicas": 20 if l <= 8 else 40,
+        }
+        for l in (5, 8, 12)
+    ]
+    temperatures = [500]
+    lammps_mode = "opt"
+    base_structure_seed = 20260705
+    base_lammps_seed = 23456789
+    data_root = "."
+    template = {"r_max": 6.5}
+
+    # 只写数据生成逻辑（循环/变量/算术），命名空间为白名单，
+    # 不注入 import / open 等能力。
+
 确定性约定
 ----------
 任务枚举顺序固定为 configs 顺序 × temperatures 顺序 × replica 序号。
-seed = base_seed + task_index，同一物理目录（由 chirality/l_def/
-N_defects/structures/密度/温度决定）的 replica 序号固定，与 replicas
-总数无关：调大某个 config 的 replicas 只会追加新 replica，不影响已有
-replica 的 seed 与目录。
+seed = base_seed + config 内 replica 序号，同一物理目录（由
+chirality/l_def/N_defects/structures/密度/温度决定）的 replica 序号
+固定，与 replicas 总数无关：调大某个 config 的 replicas 只会追加新
+replica，不影响已有 replica 的 seed 与目录。
 """
 
 from __future__ import annotations
@@ -157,34 +182,45 @@ def validate_config_entry(entry, index, path):
     return out
 
 
-def load_batch_config(path):
+# batch.py 加载时注入的白名单命名空间：只放数据生成用到的工具，
+# 不给 import / open / exec 等能力。配置文件是数据不是脚本。
+_PY_BUILTINS_ALLOW = (
+    "dict", "list", "tuple", "set", "int", "float", "str", "bool",
+    "len", "range", "enumerate", "zip", "sorted", "min", "max",
+    "sum", "abs", "round",
+)
+
+# batch.py 中会被收集的顶层变量名（其余变量如循环临时量自动忽略）。
+_BATCH_PY_KEYS = (
+    "template",
+    "temperatures",
+    "lammps_mode",
+    "base_structure_seed",
+    "base_lammps_seed",
+    "data_root",
+    "configs",
+)
+
+
+def _validate_batch(raw, path):
     """
-    加载并校验 batch.json，返回补齐默认值后的配置 dict：
+    校验原始配置 dict 并补齐默认值，返回标准 batch dict：
 
         {
           "template": {...},          # 公共物理参数（默认值 + template 覆盖）
           "temperatures": [int, ...],
           "lammps_mode": "md"|"opt",
-          "replicas": int,            # 全局默认 replica 数
           "base_structure_seed": int,
           "base_lammps_seed": int,
           "data_root": Path,          # 已解析为绝对路径
           "configs": [ {...}, ... ],  # 每项已校验并补齐 m/n 等字段
         }
 
+    JSON 与 PY 两种格式共用这一套校验，报错行为完全一致。
     所有格式问题在加载时一次性报出（fail-fast），不等到任务展开中途。
     """
-    path = Path(path).resolve()
-    if not path.is_file():
-        raise FileNotFoundError(f"batch 配置文件不存在: {path}")
-
-    try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as exc:
-        _fail(path, f"JSON 解析失败: {exc}")
-
     if not isinstance(raw, dict):
-        _fail(path, "顶层必须为 JSON 对象")
+        _fail(path, "顶层必须为对象")
 
     template_raw = raw.get("template", {})
     if not isinstance(template_raw, dict):
@@ -223,7 +259,7 @@ def load_batch_config(path):
     data_root_raw = raw.get("data_root", ".")
     if not isinstance(data_root_raw, str) or not data_root_raw:
         _fail(path, f"data_root 必须为非空字符串，当前值: {data_root_raw!r}")
-    # 相对路径按 batch.json 所在目录解析，保证从任意 cwd 启动行为一致。
+    # 相对路径按配置文件所在目录解析，保证从任意 cwd 启动行为一致。
     data_root = Path(data_root_raw).expanduser()
     if not data_root.is_absolute():
         data_root = (path.parent / data_root).resolve()
@@ -246,3 +282,63 @@ def load_batch_config(path):
         "data_root": data_root,
         "configs": configs,
     }
+
+
+def load_batch_config(path):
+    """从 batch.json 加载批次配置（格式见模块 docstring）。"""
+    path = Path(path).resolve()
+    if not path.is_file():
+        raise FileNotFoundError(f"batch 配置文件不存在: {path}")
+
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        _fail(path, f"JSON 解析失败: {exc}")
+
+    return _validate_batch(raw, path)
+
+
+def load_batch_py(path):
+    """
+    从 batch.py 加载批次配置：在只有数据工具的白名单命名空间中
+    exec 文件内容，收集同名顶层变量后走与 JSON 完全相同的校验。
+
+    只应写数据生成逻辑（循环 / 变量 / 算术），文件不会获得
+    import / open 等能力。
+    """
+    path = Path(path).resolve()
+    if not path.is_file():
+        raise FileNotFoundError(f"batch 配置文件不存在: {path}")
+
+    import builtins
+    safe_globals = {
+        "__builtins__": {
+            name: getattr(builtins, name)
+            for name in _PY_BUILTINS_ALLOW
+        },
+    }
+
+    try:
+        code = compile(
+            path.read_text(encoding="utf-8"),
+            str(path),
+            "exec",
+        )
+        exec(code, safe_globals)
+    except Exception as exc:
+        _fail(path, f"配置脚本执行失败: {type(exc).__name__}: {exc}")
+
+    raw = {
+        key: safe_globals[key]
+        for key in _BATCH_PY_KEYS
+        if key in safe_globals
+    }
+    return _validate_batch(raw, path)
+
+
+def load(path):
+    """按文件后缀分派加载 batch 配置（.py / 其他一律按 JSON）。"""
+    path = Path(path)
+    if path.suffix == ".py":
+        return load_batch_py(path)
+    return load_batch_config(path)
