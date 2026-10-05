@@ -14,6 +14,7 @@ if str(_STAGE_DIR) not in sys.path:
 import logkit as L
 from slurm_utils import wait_for_jobs, check_flags
 from negf_provenance import result_is_readable
+import cnt_geometry
 
 def run_cmd(cmd, dry_run=False, env=None, cwd=None):
     L.run(" ".join(map(str, cmd)))
@@ -559,6 +560,29 @@ def main():
     L.info(f"CNT_STRUCTURE_ROOT = {root}")
     L.info(f"root               = {root}")
     L.info(f"stage              = {stage}")
+
+    # ---- 结构构成摘要：便于核对 DPNEGF 电极 / 输运区划分 ----
+    # 输出到每个 replica 自己的 workflow.log（batch_generate 把
+    # run_multi 的 stdout 重定向到 run_root/workflow.log）。
+    m, n = int(config["chirality"][0]), int(config["chirality"][1])
+    info = cnt_geometry.describe_structure(
+        m, n,
+        float(config["r_max"]),
+        int(config["l_def"]),
+    )
+    L.phase(0, 7, "结构构成摘要")
+    L.info(f"  手性/类型       : {info['chirality']}  ({info['kind']})")
+    L.info(f"  总构成          : {info['composition']}")
+    L.info(f"  原子构成        : {info['composition_atoms']}")
+    L.info(f"  单胞长度 T      : {info['T_A']} Å")
+    L.info(f"  单胞原子数 N_uc : {info['N_uc']}")
+    L.info(f"  每个 PL 含 uc   : {info['l_PL_uc']}")
+    L.info(f"  每侧缓冲层      : {info['buffer_pl']} PL  "
+           f"({'4PL加厚' if info['buffer_pl'] == 4 else '2PL'})")
+    L.info(f"  每侧固定原子    : {info['fixed_atoms_per_side']}  "
+           f"(2PL电极 + {info['buffer_pl']}PL缓冲)")
+    L.info(f"  总 uc 数        : {info['total_uc']}")
+    L.info(f"  总原子数        : {info['total_atoms']}")
 
     # ============================================================
     # 0. 先运行 eledefects.py

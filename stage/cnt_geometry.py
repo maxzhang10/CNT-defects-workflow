@@ -175,3 +175,58 @@ def geo_info(m, n, r_max, l_def):
     L.debug(f"总体原子数 = {N_uc * length}")
 
     return T, N_uc, l_PL, length
+
+
+def describe_structure(m, n, r_max, l_def):
+    """
+    返回结构构成的可读摘要，用于 workflow.log 开头，便于核对
+    DPNEGF 电极 / 输运区划分是否正确。
+
+    返回 dict，例如半导体管 (10,5) r_max=6.5 l_def=5:
+    {
+      "chirality": "10_5",
+      "kind": "半导体管",
+      "T_A": 2.4595,
+      "N_uc": 56,
+      "l_PL_uc": 3,
+      "buffer_pl": 4,
+      "l_def_uc": 5,
+      "total_uc": 33,
+      "total_atoms": 1848,
+      "fixed_atoms_per_side": 336,
+      "lead_atoms": 168,
+      "composition": "2PL-4PL-5uc-4PL-2PL",
+      "composition_atoms": "336C(电极) + 672C(缓冲固定) + 280C(输运区) + 672C(缓冲固定) + 336C(电极)",
+    }
+    """
+    T, N_uc, l_PL, length = geo_info(m, n, r_max, l_def)
+    n_fix = fixed_pl_per_side(m, n)
+    buffer_pl = n_fix - 2          # 加厚缓冲层的 PL 数（不含 2PL 电极）
+    kind = "金属管" if is_metallic(m, n) else "半导体管"
+
+    lead_atoms = 2 * l_PL * N_uc
+    buffer_atoms = buffer_pl * l_PL * N_uc
+    defect_atoms = l_def * N_uc
+
+    composition = f"2PL-{buffer_pl}PL-{l_def}uc-{buffer_pl}PL-2PL"
+    composition_atoms = (
+        f"{lead_atoms}C(左电极) + {buffer_atoms}C(左缓冲固定) + "
+        f"{defect_atoms}C(输运区,含{l_def}uc缺陷带) + "
+        f"{buffer_atoms}C(右缓冲固定) + {lead_atoms}C(右电极)"
+    )
+
+    return {
+        "chirality": f"{m}_{n}",
+        "kind": kind,
+        "T_A": round(T, 4),
+        "N_uc": N_uc,
+        "l_PL_uc": l_PL,
+        "buffer_pl": buffer_pl,
+        "l_def_uc": l_def,
+        "total_uc": length,
+        "total_atoms": N_uc * length,
+        "fixed_atoms_per_side": n_fix * l_PL * N_uc,
+        "lead_atoms": lead_atoms,
+        "composition": composition,
+        "composition_atoms": composition_atoms,
+    }

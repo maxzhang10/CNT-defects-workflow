@@ -1,0 +1,29 @@
+{
+  "template": {
+    "r_max": 6.5,
+    "md_steps": 50000,
+    "save_self_energy": false,
+    "self_energy_cache": {
+      "use_saved": true,
+      "save_path": "./self_energy/"
+    },
+    "md_sampling": {
+      "n_samples": 1
+    }
+  },
+  "temperatures": [500],
+  "lammps_mode": "opt",
+  "base_structure_seed": 20260705,
+  "base_lammps_seed": 23456789,
+  "data_root": ".",
+  "configs": [
+    {
+      "chirality": [5, 5],
+      "l_def": 8,
+      "N_defects": 2,
+      "structures": ["5775"],
+      "conductance_mode": "band_edge_bias",
+      "replicas": 2
+    }
+  ]
+}

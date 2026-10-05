@@ -1,4 +1,21 @@
 #!/usr/bin/env python3
+"""
+批量运行 CNT 缺陷 LAMMPS + DPNEGF 工作流。
+
+职责收敛为一句话：batch.json → 每个物理配置展开 N 个 replica 的
+workflow_config.json + 并发调度 run_multi.py。
+
+配置只来自 --config 指定的 batch.json（默认 ./batch.json），
+格式与校验规则见 stage/batch_config.py 的模块 docstring。
+CLI 只保留纯运行时开关（scheduler / max-parallel / skip-conductance），
+物理参数（replica 数、seed、温度等）一律写在 JSON 中，避免双重真相。
+
+确定性约定：seed = base_seed + config 内的 replica 序号（按
+config × temperature 块独立计数，不跨 config 全局递增）。因此：
+- 同一物理目录的 seed 永远只由 replica 序号决定；
+- 调大任意 config 的 replicas 只追加新 replica，不影响其他任何
+  已有 replica 的 seed 与结果（P0-4 校验通过）。
+"""
 
 import argparse
 import copy
@@ -12,45 +29,15 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
+_REPO_ROOT = Path(__file__).resolve().parent
+_STAGE_DIR = _REPO_ROOT / "stage"
+for _p in (_REPO_ROOT, _STAGE_DIR):
+    if str(_p) not in sys.path:
+        sys.path.insert(0, str(_p))
 
-CHIRAL_CONFIGS = [
-    {
-        "m": 5,
-        "n": 5,
-        "l_def": 8,
-        "N_defects": 2,
-        "structures": ["5775"],
-        # 电导模式决定写入 input.json 的 conductance_options.mu 标签：
-        #   fermi           -> ["Ef"]      （以费米能级为化学势）
-        #   band_edge_bias  -> ["Ev", "Ec"]（以带边为化学势）
-        # Ec/Ev/Ef 的实际能量值不再由外部提供，而是由 DPNEGF 内部计算
-        # 并随 negf.out.pth 的 conductance 列表输出，由收集器按标签读取。
-        "conductance_mode": "band_edge_bias",
-        # 能量网格（energy_grid: clenshaw_curtis/num_points/half_width）完全
-        # 沿用 input.json 模板默认值，不再由工作流外置。
-    }
-]
-
-
-TEMPERATURES = [500]
-
-
-# 每个物理配置独立运行的 LAMMPS 轨迹数。
-# 可由命令行 --lammps-repeats 覆盖。
-DEFAULT_LAMMPS_REPEATS = 2
-
-# 两类随机种子分开管理：
-# seed 控制缺陷结构；同一物理配置的多个 replica 共用同一个 seed。
-# lammps_seed 控制热运动轨迹；每个 replica 使用不同的 seed。
-BASE_STRUCTURE_SEED = 20260705
-BASE_LAMMPS_SEED = 23456789
-
-# LAMMPS 模式，全局作用于整个批次：
-#   "md"  —— NVT 热退火，从 config 读取温度/md_steps/lammps_seed；
-#   "opt" —— 只做几何优化，LAMMPS 输入改用 input_files/lammps/opt.lammps
-#            （拷贝到工作目录时命名为 in.lammps），只改写固定原子数 nfix，
-#            不消费温度/步数/种子。
-LAMMPS_MODE = "opt"
+import batch_config as bc
+import cnt_geometry
+import negf_provenance
 
 
 class ProgressRecorder:
@@ -86,62 +73,8 @@ class ProgressRecorder:
             with self._log_path.open("a", encoding="utf-8") as f:
                 f.write(line)
 
-TEMPLATE = {
-    "temperature": 300,
-    "chirality": [5, 5],
-    "r_max": 6.50,
-    "data_root": (
-        "./"
-        
-    ),
-    "structures": ["5775"],
-    "N_defects": 3,
-    "l_def": 5,
-    "md_steps": 50000,
-    # 每条独立 LAMMPS 轨迹只取最后一帧做 DPNEGF。
-    "md_sampling": {
-        "n_samples": 1,
-    },
-    # 能量网格（energy_grid: clenshaw_curtis/num_points/half_width）完全沿用
-    # input.json 模板默认值，不再由工作流外置 espacing/negf_energy_window。
-    # False 保持既有行为：DPNEGF 成功后清理 output/self_energy。
-    "save_self_energy": False,
-    # 覆盖 DPNEGF input.json 的 self_energy_options.cache 配置。
-    "self_energy_cache": {
-        "use_saved": True,
-        "save_path": "./self_energy/",
-    },
-}
 
-
-def load_cnt_geometry(workflow_dir):
-    """
-    从 workflow/stage 目录导入 cnt_geometry。
-
-    batch 脚本可以放在 workflow 根目录，
-    不要求当前工作目录正好是 stage。
-    """
-    stage_dir = workflow_dir / "stage"
-    module_path = stage_dir / "cnt_geometry.py"
-
-    if not module_path.is_file():
-        raise FileNotFoundError(
-            f"找不到 cnt_geometry.py: {module_path}"
-        )
-
-    stage_dir_text = str(stage_dir)
-
-    if stage_dir_text not in sys.path:
-        sys.path.insert(0, stage_dir_text)
-
-    return importlib.import_module("cnt_geometry")
-
-
-def make_folder_name(
-    structures,
-    l_def,
-    density,
-):
+def make_folder_name(structures, l_def, density):
     """
     生成与 ele_multi_defects_ele.py 完全一致的目录名。
 
@@ -163,50 +96,47 @@ def make_folder_name(
     )
 
 
-def build_tasks(
-    base_root,
-    cnt_geometry,
-    lammps_repeats,
-):
+def build_tasks(batch, base_root):
     """
-    将每个物理配置展开为 lammps_repeats 条独立 LAMMPS 轨迹。
+    将每个物理配置展开为各自 replicas 条独立 LAMMPS 轨迹。
 
     同一物理配置的 replica：
     - 使用独立的缺陷结构 seed（每个 replica 缺陷位置不同）；
     - 使用独立的 lammps_seed（每个 replica 热运动轨迹不同）；
     - 写入同一配置目录下相互独立的 replica_XXX 子目录。
+
+    每个 config 必须显式声明自己的 replicas（batch_config 校验保证），
+    实现"不同长度配不同 replica 数"，且不存在全局默认值的歧义。
     """
+    template = batch["template"]
     tasks = []
     used_roots = {}
-    physical_index = 0
-    task_index = 0
 
-    for cfg in CHIRAL_CONFIGS:
-        conductance_mode = cfg.get("conductance_mode", "fermi")
-        if conductance_mode not in {"fermi", "band_edge_bias"}:
-            raise ValueError("conductance_mode must be 'fermi' or 'band_edge_bias'")
-        save_self_energy = cfg.get(
-            "save_self_energy", TEMPLATE["save_self_energy"]
-        )
-        if not isinstance(save_self_energy, bool):
-            raise ValueError("save_self_energy must be a boolean")
+    # seed 索引按 (config, temperature) 块内独立计数，不全局递增。
+    # 这样调大列表靠前 config 的 replicas，不会平移靠后 config 的 seed；
+    # 同一物理目录的 seed 永远只由 replica 序号决定。
+    # 副作用：不同 config 之间 seed 数值会重复（如都是 base+1..base+N），
+    # 但 seed 只驱动各自几何上的缺陷采样，不构成全局身份，无影响。
+    block_index = 0
+    prev_block_key = None
+
+    for cfg in batch["configs"]:
         # 能量网格（energy_grid）完全沿用 input.json 模板默认值，
-        # 不再从 cfg/TEMPLATE 读取 espacing/negf_energy_window。
-        for temperature in TEMPERATURES:
-            physical_index += 1
-
-            m = int(cfg["m"])
-            n = int(cfg["n"])
-            l_def = int(cfg["l_def"])
-            n_defects = int(cfg["N_defects"])
-            structures = list(cfg["structures"])
+        # 不再从配置读取 espacing/negf_energy_window。
+        for temperature in batch["temperatures"]:
+            m = cfg["m"]
+            n = cfg["n"]
+            l_def = cfg["l_def"]
+            n_defects = cfg["N_defects"]
+            structures = cfg["structures"]
+            replicas = cfg["replicas"]
 
             # 必须使用与结构生成脚本相同的 geo_info，
             # 确保这里算出的密度和目录名完全一致。
             T, N_uc, l_PL, length = cnt_geometry.geo_info(
                 m,
                 n,
-                float(TEMPLATE["r_max"]),
+                float(template["r_max"]),
                 l_def,
             )
 
@@ -220,12 +150,16 @@ def build_tasks(
 
             # 每个 replica 使用独立的缺陷结构 seed，
             # 实现缺陷位置的随机采样。
-            for replica in range(1, lammps_repeats + 1):
-                task_index += 1
+            block_key = (id(cfg), temperature)
+            if block_key != prev_block_key:
+                block_index = 0
+                prev_block_key = block_key
+            for replica in range(1, replicas + 1):
+                block_index += 1
                 # structure_seed: 控制缺陷位置和类型，每个 replica 独立
-                structure_seed = BASE_STRUCTURE_SEED + task_index
+                structure_seed = batch["base_structure_seed"] + block_index
                 # lammps_seed: 控制 LAMMPS 热运动轨迹，每个 replica 独立
-                lammps_seed = BASE_LAMMPS_SEED + task_index
+                lammps_seed = batch["base_lammps_seed"] + block_index
 
                 # 目录层级：
                 # data_root/温度/手性/缺陷配置/replica_XXX
@@ -283,7 +217,7 @@ def build_tasks(
                     "density": density,
                     "folder_name": folder_name,
                     "replica": replica,
-                    "lammps_repeats": lammps_repeats,
+                    "replicas": replicas,
                     "data_root": base_root,
                     "configuration_root": configuration_root,
                     "run_root": run_root,
@@ -293,33 +227,27 @@ def build_tasks(
                     "length": int(length),
                     "seed": structure_seed,
                     "lammps_seed": lammps_seed,
-                    "save_self_energy": save_self_energy,
-                    "conductance_mode": conductance_mode,
+                    "save_self_energy": cfg.get(
+                        "save_self_energy", template["save_self_energy"]
+                    ),
+                    "conductance_mode": cfg["conductance_mode"],
                 })
 
     return tasks
 
 
-def make_task_config(task):
+def make_task_config(task, batch):
     """
     创建当前 replica 的独立配置。
 
     data_root 保留整个批次的数据根目录；
     structure_root 和 run_multi.py 的 --root 都指向具体 replica 目录。
     """
-    config = copy.deepcopy(TEMPLATE)
-
-    # LAMMPS 模式全局唯一：模块级 LAMMPS_MODE（缺省 "md"）对整个批次生效，
-    # 写入每个 replica 的 config，不在 CHIRAL_CONFIGS 单独覆盖。
-    lammps_mode = LAMMPS_MODE
-    if lammps_mode not in ("md", "opt"):
-        raise ValueError(
-            f"lammps_mode 必须为 'md' 或 'opt'，当前值: {lammps_mode}"
-        )
+    config = copy.deepcopy(batch["template"])
 
     # conductance_options.mu 只写入字符串标签（非数值）：
-    #   fermi          -> ["Ef"]
-    #   band_edge_bias -> ["Ev", "Ec"]
+    #   fermi          -> ["Ef"]      （以费米能级为化学势）
+    #   band_edge_bias -> ["Ev", "Ec"]（以带边为化学势）
     # Ec/Ev/Ef 的实际能量值由 DPNEGF 计算后随 negf.out.pth 输出，
     # 由收集器按标签从结果文件读取，不再由外部提供。
     mu_labels = (
@@ -329,7 +257,7 @@ def make_task_config(task):
     )
 
     config.update({
-        "lammps_mode": lammps_mode,
+        "lammps_mode": batch["lammps_mode"],
         "temperature": task["temperature"],
         "chirality": [
             task["m"],
@@ -343,7 +271,7 @@ def make_task_config(task):
         "seed": task["seed"],
         "lammps_seed": task["lammps_seed"],
         "lammps_replica": task["replica"],
-        "lammps_repeats": task["lammps_repeats"],
+        "lammps_repeats": task["replicas"],
         "density_A_inv": task["density"],
         "configuration_root": str(task["configuration_root"]),
         "md_sampling": {"n_samples": 1},
@@ -357,61 +285,65 @@ def make_task_config(task):
     return config
 
 
+def check_provenance(run_root, new_hash):
+    """
+    P0-4：在覆盖 workflow_config.json 之前，先校验目录中已有完成结果
+    的 provenance。只有旧结果的 provenance hash 与当前 config hash 完全
+    一致才允许复用；不一致或无法确认时 fail-safe 报错，禁止覆盖旧配置
+    并禁止复用旧结果。
+    """
+    if not run_root.is_dir():
+        return
+
+    mismatches = []
+    checked = 0
+    for done_flag in sorted(run_root.rglob("dpnegf_done.flag")):
+        leaf = done_flag.parent
+        checked += 1
+        result = negf_provenance.result_file_path(leaf)
+        saved_hash = negf_provenance.read_hash_file(
+            negf_provenance.provenance_hash_path(leaf)
+        )
+        if not result.is_file() or result.stat().st_size == 0:
+            mismatches.append(
+                f"{leaf}: done flag 存在但结果文件缺失或为空 ({result})"
+            )
+        elif saved_hash is None:
+            mismatches.append(
+                f"{leaf}: 旧结果缺少 provenance hash，无法确认配置一致性"
+            )
+        elif saved_hash != new_hash:
+            mismatches.append(
+                f"{leaf}: 配置已变更 (provenance={saved_hash[:12]}... "
+                f"!= 当前={new_hash[:12]}...)"
+            )
+    if mismatches:
+        details = "\n".join(f"  - {m}" for m in mismatches)
+        raise RuntimeError(
+            f"检测到 {checked} 个已完成 DPNEGF 结果与新配置不一致，"
+            f"禁止覆盖旧配置或复用旧结果 (P0-4):\n{details}\n"
+            "请使用新目录运行，或删除对应 dpnegf_done.flag 与 output/ "
+            "后显式重新计算。"
+        )
+
+
 def run_single_task(
     task,
+    batch,
     scheduler,
     workflow_dir,
 ):
     task_id = task["task_id"]
     run_root = task["run_root"]
 
-    config = make_task_config(task)
+    config = make_task_config(task, batch)
 
     config_path = None
     start = time.time()
 
     try:
-        # P0-4：在覆盖 workflow_config.json 之前，先校验目录中已有完成结果
-        # 的 provenance。只有旧结果的 provenance hash 与当前 config hash 完全
-        # 一致才允许复用；不一致或无法确认时 fail-safe 报错，禁止覆盖旧配置
-        # 并禁止复用旧结果。
-        stage_dir = workflow_dir / "stage"
-        if str(stage_dir) not in sys.path:
-            sys.path.insert(0, str(stage_dir))
-        negf_provenance = importlib.import_module("negf_provenance")
         new_hash = negf_provenance.compute_negf_config_hash(config)
-
-        if run_root.is_dir():
-            mismatches = []
-            checked = 0
-            for done_flag in sorted(run_root.rglob("dpnegf_done.flag")):
-                leaf = done_flag.parent
-                checked += 1
-                result = negf_provenance.result_file_path(leaf)
-                saved_hash = negf_provenance.read_hash_file(
-                    negf_provenance.provenance_hash_path(leaf)
-                )
-                if not result.is_file() or result.stat().st_size == 0:
-                    mismatches.append(
-                        f"{leaf}: done flag 存在但结果文件缺失或为空 ({result})"
-                    )
-                elif saved_hash is None:
-                    mismatches.append(
-                        f"{leaf}: 旧结果缺少 provenance hash，无法确认配置一致性"
-                    )
-                elif saved_hash != new_hash:
-                    mismatches.append(
-                        f"{leaf}: 配置已变更 (provenance={saved_hash[:12]}... "
-                        f"!= 当前={new_hash[:12]}...)"
-                    )
-            if mismatches:
-                details = "\n".join(f"  - {m}" for m in mismatches)
-                raise RuntimeError(
-                    f"检测到 {checked} 个已完成 DPNEGF 结果与新配置不一致，"
-                    f"禁止覆盖旧配置或复用旧结果 (P0-4):\n{details}\n"
-                    "请使用新目录运行，或删除对应 dpnegf_done.flag 与 output/ "
-                    "后显式重新计算。"
-                )
+        check_provenance(run_root, new_hash)
 
         # 提前创建独立根目录。
         # 之后 ele_multi_defects_ele.py 会在其中生成 lammps/。
@@ -472,7 +404,7 @@ def run_single_task(
         print(
             f"[START] {task_id}  "
             f"density={task['density']:.4f}A^-1  "
-            f"replica={task['replica']}/{task['lammps_repeats']}",
+            f"replica={task['replica']}/{task['replicas']}",
             flush=True,
         )
 
@@ -552,12 +484,21 @@ def run_single_task(
             )
 
 
-def main():
+def parse_args():
     parser = argparse.ArgumentParser(
         description=(
             "并行运行不同长度的 "
             "LAMMPS + DPNEGF 工作流"
         )
+    )
+
+    parser.add_argument(
+        "--config",
+        default="batch.json",
+        help=(
+            "批配置 JSON 路径，默认 ./batch.json。"
+            "格式见 stage/batch_config.py 的模块 docstring。"
+        ),
     )
 
     parser.add_argument(
@@ -573,36 +514,17 @@ def main():
         "--max-parallel",
         type=int,
         default=50,
-        help=(
-            "同时启动的独立 workflow 数。默认不限制，"
-            "即一次启动全部展开任务；例如 3 个配置 × 5 次重复 = 15。"
-            "需要限制提交并发时再显式指定该参数。"
-        ),
-    )
-
-    parser.add_argument(
-        "--lammps-repeats",
-        type=int,
-        default=DEFAULT_LAMMPS_REPEATS,
-        help=(
-            "每个温度/手性/缺陷配置独立运行的 LAMMPS 次数。"
-            "每次使用不同 lammps_seed，并且只取最后一帧做 DPNEGF。"
-        ),
+        help="同时运行的独立 workflow 数上限。",
     )
 
     parser.add_argument(
         "--workflow-dir",
-        default=str(Path(__file__).resolve().parent),
+        default=str(_REPO_ROOT),
         help=(
             "工作流代码目录，默认使用 batch_generate.py 所在目录。"
             "这样从 workflow_2 运行时会自动使用 workflow_2/run_multi.py "
             "及 workflow_2/stage，而不会误调用其他工作流副本。"
         ),
-    )
-
-    parser.add_argument(
-        "--data-root",
-        default=TEMPLATE["data_root"],
     )
 
     parser.add_argument(
@@ -613,23 +535,21 @@ def main():
 
     args = parser.parse_args()
 
-    if args.max_parallel is not None and args.max_parallel < 1:
-        raise ValueError(
-            "--max-parallel 必须大于 0"
-        )
+    if args.max_parallel < 1:
+        raise ValueError("--max-parallel 必须大于 0")
 
-    if args.lammps_repeats < 1:
-        raise ValueError(
-            "--lammps-repeats 必须大于 0"
-        )
+    return args
+
+
+def main():
+    args = parse_args()
 
     workflow_dir = Path(
         args.workflow_dir
     ).resolve()
 
-    base_root = Path(
-        args.data_root
-    ).resolve()
+    batch = bc.load_batch_config(args.config)
+    base_root = batch["data_root"]
 
     run_multi_path = (
         workflow_dir
@@ -652,34 +572,22 @@ def main():
             f"找不到跨 replica 电导收集脚本: {collect_script}"
         )
 
-    cnt_geometry = load_cnt_geometry(
-        workflow_dir
-    )
-
-    # 导入 NEGF provenance 工具（与 stage 共享同一 config hash 定义）。
-    negf_provenance = importlib.import_module("negf_provenance")
-
     tasks = build_tasks(
+        batch=batch,
         base_root=base_root,
-        cnt_geometry=cnt_geometry,
-        lammps_repeats=args.lammps_repeats,
     )
 
     if not tasks:
         print("[INFO] 没有需要运行的任务")
         return 0
 
-    if args.max_parallel is None:
-        max_workers = len(tasks)
-    else:
-        max_workers = min(
-            args.max_parallel,
-            len(tasks),
-        )
+    max_workers = min(
+        args.max_parallel,
+        len(tasks),
+    )
 
     print("=" * 70)
     print(f"[INFO] 总任务数: {len(tasks)}  "
-          f"每配置 replica 数: {args.lammps_repeats}  "
           f"并发: {max_workers}  scheduler: {args.scheduler}")
     print(f"[INFO] data_root: {base_root}")
     print("=" * 70)
@@ -715,6 +623,7 @@ def main():
             executor.submit(
                 run_single_task,
                 task,
+                batch,
                 args.scheduler,
                 workflow_dir,
             ): task
@@ -816,8 +725,9 @@ def main():
             str(collect_script),
             "--root",
             str(base_root),
-            "--expected-replicas",
-            str(args.lammps_repeats),
+            # 每个 config 可有自己的 replica 数，不再传全局
+            # --expected-replicas；由各 configuration 目录内的
+            # workflow_config.json 自报 lammps_repeats。
         ]
 
         # 只汇总本次 batch 展开的物理配置，避免把 data_root 下

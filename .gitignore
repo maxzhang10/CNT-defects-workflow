@@ -75,7 +75,8 @@ slurm-*.err
 *.pdf
 
 #claude会生成一些md
-*.md
+CNT-defect-workflow-check.md
+CNT-defects-workflow-review-2026-09-09.md
 
 #存放数据的文件夹
 5_5
