@@ -61,6 +61,7 @@ def generate_defect_coords(
     edge_margin=1.42,
     seed=None,
     max_trials=20000,
+    buffer_pl=None,
 ):
     """
     在缺陷区内随机生成 N 个缺陷坐标。
@@ -82,7 +83,7 @@ def generate_defect_coords(
     # 名义 defects 区域：
     # 金属管 2PL-2PL-defects-2PL-2PL（左侧 4PL 后开始）；
     # 半导体管 2PL-4PL-defects-4PL-2PL（左侧 6PL 后开始）。
-    n_fix_pl = cnt_geometry.fixed_pl_per_side(m, n, config.get("buffer_pl"))
+    n_fix_pl = cnt_geometry.fixed_pl_per_side(m, n, buffer_pl)
     z_def_low = n_fix_pl * l_PL * T
     z_def_high = (n_fix_pl * l_PL + l_def) * T
 
@@ -244,6 +245,7 @@ def main():
         min_sep=min_defect_sep,
         edge_margin=edge_margin,
         seed=seed,
+        buffer_pl=buffer_pl,
     )
 
     density = len(defects_coord_ind) / (l_def * T)

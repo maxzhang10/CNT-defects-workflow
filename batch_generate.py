@@ -127,7 +127,11 @@ def build_tasks(batch, base_root):
             m = cfg["m"]
             n = cfg["n"]
             l_def = cfg["l_def"]
-            buffer_pl = cfg.get("buffer_pl")
+            buffer_pl = (
+                cfg["buffer_pl"]
+                if cfg.get("buffer_pl") is not None
+                else template.get("buffer_pl")
+            )
             n_defects = cfg["N_defects"]
             structures = cfg["structures"]
             replicas = cfg["replicas"]
@@ -531,7 +535,7 @@ def parse_args():
     parser.add_argument(
         "--max-parallel",
         type=int,
-        default=50,
+        default=16,
         help="同时运行的独立 workflow 数上限。",
     )
 

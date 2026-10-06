@@ -13,6 +13,7 @@ data_root = "."                # 相对路径按本文件所在目录解析
 template = {
     "r_max": 6.5,
     "md_steps": 15000,
+    "buffer_pl": 4,
     "save_self_energy": False,
     # 自能缓存路径，可用占位符按手性区分（电极自能只依赖手性，
     # 同手性的所有长度 / replica 可共享一份缓存）：

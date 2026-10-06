@@ -108,6 +108,7 @@ from pathlib import Path
 DEFAULT_TEMPLATE = {
     "r_max": 6.5,
     "md_steps": 50000,
+    "buffer_pl": None,
     "save_self_energy": False,
     "self_energy_cache": {
         "use_saved": True,

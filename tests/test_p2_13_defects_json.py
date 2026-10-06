@@ -56,3 +56,31 @@ def test_defect_log_matches_actual_choices():
     types1 = [d["type"] for d in log1]
     types2 = [d["type"] for d in log2]
     assert types1 == types2
+
+
+def test_generate_defect_coords_accepts_buffer_pl():
+    """The configured buffer thickness reaches defect-region sampling."""
+    m, n = 6, 6
+    r_max = 6.5
+    l_def = 3
+    buffer_pl = 4
+    T, N_uc, l_pl, total_length = cnt_geometry.geo_info(
+        m, n, r_max, l_def, buffer_pl
+    )
+    tube = cnt_geometry.build_unit_cnt(m, n) * (1, 1, total_length)
+    cnt_geometry.set_reference_cyl(tube)
+
+    coords, indices = ele.generate_defect_coords(
+        tube=tube,
+        N=1,
+        T=T,
+        l_PL=l_pl,
+        l_def=l_def,
+        m=m,
+        n=n,
+        seed=42,
+        buffer_pl=buffer_pl,
+    )
+
+    assert len(coords) == 1
+    assert len(indices) == 1
