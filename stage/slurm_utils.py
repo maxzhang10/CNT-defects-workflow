@@ -169,6 +169,32 @@ class SlurmQueryError(RuntimeError):
     """squeue 查询本身失败（非"作业不存在"），不能当作完成。"""
 
 
+def get_stage_state(workdir: Path, kind: str) -> str:
+    """返回一个阶段当前的统一状态。
+
+    状态优先级为 failed、done、running、submitted、not_started；
+    提交标记不完整时返回 inconsistent，避免把孤立记录当成活跃作业。
+    """
+    workdir = Path(workdir)
+    failed = workdir / f"{kind}_failed.flag"
+    done = workdir / f"{kind}_done.flag"
+    started = workdir / f"{kind}_started.flag"
+    submitted = workdir / f"{kind}_submitted.flag"
+    job_id = workdir / "job_id.txt"
+
+    if failed.exists():
+        return "failed"
+    if done.exists():
+        return "done"
+    if started.exists():
+        return "running"
+    if submitted.exists() and job_id.exists():
+        return "submitted"
+    if submitted.exists() or job_id.exists():
+        return "inconsistent"
+    return "not_started"
+
+
 def _running_job_ids(job_ids: Iterable[str]):
     """
     查询给定 job_id 中仍存在于 squeue 的作业。

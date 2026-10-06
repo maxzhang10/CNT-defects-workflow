@@ -12,7 +12,7 @@ _STAGE_DIR = Path(__file__).resolve().parent / "stage"
 if str(_STAGE_DIR) not in sys.path:
     sys.path.insert(0, str(_STAGE_DIR))
 import logkit as L
-from slurm_utils import wait_for_jobs, check_flags
+from slurm_utils import wait_for_jobs, check_flags, get_stage_state
 from negf_provenance import result_is_readable
 import cnt_geometry
 
@@ -23,18 +23,29 @@ def run_cmd(cmd, dry_run=False, env=None, cwd=None):
     subprocess.run(cmd, check=True, env=env, cwd=cwd)
 
 
-def collect_job_ids(workdirs):
+def collect_job_ids(workdirs, kind):
     """
-    从每个 workdir 读取 sub_*.py 写下的 job_id.txt，收集 SLURM job_id。
-    没有 job_id.txt 的（如已 done 而跳过、或 dry-run）自动忽略。
+    收集仍处于提交状态的 SLURM job_id。
+
+    已完成或已失败的阶段即使残留旧 job_id.txt，也不能再次加入 squeue
+    查询；否则已完成作业的旧 job ID 会触发 Invalid job id specified。
     """
     ids = []
     for w in workdirs:
-        f = Path(w) / "job_id.txt"
-        if f.exists():
-            jid = f.read_text().strip()
-            if jid and jid != "local":
-                ids.append(jid)
+        workdir = Path(w)
+        state = get_stage_state(workdir, kind)
+        if state in {"done", "failed", "inconsistent", "not_started"}:
+            continue
+
+        job_id_file = workdir / "job_id.txt"
+        if state not in {"submitted", "running"}:
+            continue
+        if not job_id_file.exists():
+            continue
+
+        jid = job_id_file.read_text().strip()
+        if jid and jid != "local":
+            ids.append(jid)
     return ids
 
 
@@ -47,7 +58,7 @@ def barrier_and_check(workdirs, kind, poll_interval, dry_run):
         L.info(f"[dry-run] 跳过 {kind} SLURM 屏障等待")
         return
 
-    job_ids = collect_job_ids(workdirs)
+    job_ids = collect_job_ids(workdirs, kind)
     wait_for_jobs(job_ids, poll_interval=poll_interval, label=kind.upper())
 
     done_dirs, failed_dirs, missing_dirs = check_flags(workdirs, kind)

@@ -308,6 +308,9 @@ def main() -> int:
     job_id_file = workdir / "job_id.txt"
 
     if done_flag.exists():
+        # DONE 是阶段终态，清理旧提交记录，避免屏障再次查询已结束 job。
+        submitted_flag.unlink(missing_ok=True)
+        job_id_file.unlink(missing_ok=True)
         L.skip(f"LAMMPS 已完成，跳过: {workdir}")
         return 0
 

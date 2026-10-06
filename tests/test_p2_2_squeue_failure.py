@@ -9,6 +9,7 @@ for _p in (_REPO_ROOT, _STAGE_DIR):
         sys.path.insert(0, str(_p))
 
 import slurm_utils as su  # noqa: E402
+import run_multi  # noqa: E402
 
 
 def test_slurm_query_error_defined():
@@ -70,3 +71,48 @@ def test_wait_for_jobs_retries_then_raises_on_query_failure(monkeypatch):
 
 def test_wait_for_jobs_empty_job_ids_returns_immediately():
     su.wait_for_jobs([], poll_interval=1, label="TEST")
+
+
+def test_collect_job_ids_ignores_completed_or_failed_stage(tmp_path):
+    done = tmp_path / "done"
+    done.mkdir()
+    (done / "lammps_done.flag").write_text("done\n")
+    (done / "lammps_submitted.flag").write_text("slurm\n")
+    (done / "job_id.txt").write_text("1666204\n")
+
+    failed = tmp_path / "failed"
+    failed.mkdir()
+    (failed / "lammps_failed.flag").write_text("failed\n")
+    (failed / "lammps_submitted.flag").write_text("slurm\n")
+    (failed / "job_id.txt").write_text("1666205\n")
+
+    active = tmp_path / "active"
+    active.mkdir()
+    (active / "lammps_submitted.flag").write_text("slurm\n")
+    (active / "job_id.txt").write_text("1666206\n")
+
+    assert run_multi.collect_job_ids(
+        [done, failed, active], "lammps"
+    ) == ["1666206"]
+
+
+def test_get_stage_state_prioritizes_terminal_and_detects_inconsistent_records(tmp_path):
+    workdir = tmp_path / "stage"
+    workdir.mkdir()
+
+    assert su.get_stage_state(workdir, "lammps") == "not_started"
+
+    (workdir / "lammps_submitted.flag").write_text("slurm\n")
+    assert su.get_stage_state(workdir, "lammps") == "inconsistent"
+
+    (workdir / "job_id.txt").write_text("123\n")
+    assert su.get_stage_state(workdir, "lammps") == "submitted"
+
+    (workdir / "lammps_started.flag").write_text("started\n")
+    assert su.get_stage_state(workdir, "lammps") == "running"
+
+    (workdir / "lammps_done.flag").write_text("done\n")
+    assert su.get_stage_state(workdir, "lammps") == "done"
+
+    (workdir / "lammps_failed.flag").write_text("failed\n")
+    assert su.get_stage_state(workdir, "lammps") == "failed"

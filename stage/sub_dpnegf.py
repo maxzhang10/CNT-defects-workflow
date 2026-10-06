@@ -361,6 +361,9 @@ def main() -> int:
                 f"  {detail}\n"
                 f"请使用新目录，或删除 {done_flag.name} 与 output/ 后显式重新计算。"
             )
+        # DONE 是阶段终态，清理旧提交记录，避免屏障再次查询已结束 job。
+        submitted_flag.unlink(missing_ok=True)
+        job_id_file.unlink(missing_ok=True)
         L.skip(f"DPNEGF 已完成且 provenance 一致，跳过: {workdir}")
         return 0
 
