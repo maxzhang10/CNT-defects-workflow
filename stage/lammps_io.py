@@ -43,6 +43,7 @@ def prepare_lammps_inputs(
     lammps_seed=None,
     model_file=None,
     lammps_mode="md",
+    buffer_pl=None,
 ):
     """
     为不同结构生成 LAMMPS 计算目录，并修改 in.lammps。
@@ -132,7 +133,7 @@ def prepare_lammps_inputs(
     m, n = chirality
     # 每侧固定 PL 数与结构生成保持一致：
     # 金属管 2PL电极+2PL缓冲=4，半导体管 2PL电极+4PL加厚=6。
-    n_fix = cnt_geometry.fixed_pl_per_side(m, n) * l_PL * N_uc
+    n_fix = cnt_geometry.fixed_pl_per_side(m, n, buffer_pl) * l_PL * N_uc
 
     for folder, atoms in structures.items():
         if structure_root is None:

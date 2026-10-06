@@ -4,15 +4,15 @@
 # 命名空间为白名单（无 import / open），只写数据生成逻辑。
 # 校验规则与 batch.json 完全一致，见 stage/batch_config.py docstring。
 
-temperatures = [500]
-lammps_mode = "opt"            # "md" NVT 退火 / "opt" 几何优化
+temperatures = [100]
+lammps_mode = "md"             # "md" NVT 退火 / "opt" 几何优化
 base_structure_seed = 20260705
 base_lammps_seed = 23456789
 data_root = "."                # 相对路径按本文件所在目录解析
 
 template = {
     "r_max": 6.5,
-    "md_steps": 50000,
+    "md_steps": 15000,
     "save_self_energy": False,
     # 自能缓存路径，可用占位符按手性区分（电极自能只依赖手性，
     # 同手性的所有长度 / replica 可共享一份缓存）：
@@ -37,6 +37,7 @@ CHIRAL_CONFIGS = [
         {
             "m": 13,
             "n": 1,
+            "buffer_pl": 4,
             "l_def": l_def,
             "N_defects": N_defects,
             "structures": ["MVH"],
@@ -66,6 +67,7 @@ CHIRAL_CONFIGS = [
         {
             "m": 12,
             "n": 3,
+            "buffer_pl": 4,
             "l_def": l_def,
             "N_defects": N_defects,
             "structures": ["MVH"],
@@ -95,6 +97,7 @@ CHIRAL_CONFIGS = [
         {
             "m": 11,
             "n": 5,
+            "buffer_pl": 4,
             "l_def": l_def,
             "N_defects": N_defects,
             "structures": ["MVH"],
@@ -124,6 +127,7 @@ CHIRAL_CONFIGS = [
         {
             "m": 10,
             "n": 7,
+            "buffer_pl": 4,
             "l_def": l_def,
             "N_defects": N_defects,
             "structures": ["MVH"],
@@ -153,6 +157,7 @@ CHIRAL_CONFIGS = [
         {
             "m": 9,
             "n": 9,
+            "buffer_pl": 4,
             "l_def": l_def,
             "N_defects": N_defects,
             "structures": ["MVH"],
@@ -178,3 +183,9 @@ CHIRAL_CONFIGS = [
         ]
     ],
 ]
+
+# 提交顺序：优先运行 9_9、12_3、13_1；其余手性保持上面的原顺序。
+_priority = {(9, 9): 0, (12, 3): 1, (13, 1): 2}
+CHIRAL_CONFIGS.sort(
+    key=lambda config: _priority.get((config["m"], config["n"]), 3)
+)

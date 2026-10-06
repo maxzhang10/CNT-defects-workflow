@@ -127,6 +127,7 @@ def update_input_json_for_leaf(
     r_max=6.5,
     n_lead_pl=2,
     l_def=5,
+    buffer_pl=None,
 ):
     leaf_dir = Path(leaf_dir).resolve()
 
@@ -141,7 +142,9 @@ def update_input_json_for_leaf(
 
     m, n = chirality
 
-    T, N_uc, l_PL, length = cnt_geometry.geo_info(m, n, r_max, l_def)
+    T, N_uc, l_PL, length = cnt_geometry.geo_info(
+        m, n, r_max, l_def, buffer_pl
+    )
 
     n_atoms_per_pl = N_uc * l_PL
     n_elec = n_lead_pl * n_atoms_per_pl
@@ -358,6 +361,7 @@ def copy_inputs_to_leaf_dirs(
                 r_max=r_max,
                 n_lead_pl=n_lead_pl,
                 l_def=l_def,
+                buffer_pl=buffer_pl,
             )
 
             n_success += 1
@@ -454,6 +458,7 @@ def main():
     args = parser.parse_args()
     config = load_config(args.config)
     l_def = int(config.get("l_def", 5))
+    buffer_pl = config.get("buffer_pl")
     chirality = get_chirality_from_config(config)
 
     # r_max 从 config 读取，保证与 fdf2xyz 对同一体系用相同的 PL 划分。
@@ -511,6 +516,7 @@ def main():
         n_lead_pl=args.n_lead_pl,
         overwrite=(not args.no_overwrite),
         l_def=l_def,
+        buffer_pl=buffer_pl,
         self_energy_cache=self_energy_cache,
         conductance_mu=conductance_mu,
         negf_config_hash=compute_negf_config_hash(config),

@@ -127,6 +127,7 @@ def build_tasks(batch, base_root):
             m = cfg["m"]
             n = cfg["n"]
             l_def = cfg["l_def"]
+            buffer_pl = cfg.get("buffer_pl")
             n_defects = cfg["N_defects"]
             structures = cfg["structures"]
             replicas = cfg["replicas"]
@@ -138,6 +139,7 @@ def build_tasks(batch, base_root):
                 n,
                 float(template["r_max"]),
                 l_def,
+                buffer_pl,
             )
 
             density = n_defects / (l_def * T)
@@ -212,6 +214,7 @@ def build_tasks(batch, base_root):
                     "m": m,
                     "n": n,
                     "l_def": l_def,
+                    "buffer_pl": buffer_pl,
                     "N_defects": n_defects,
                     "structures": structures,
                     "density": density,
@@ -275,6 +278,7 @@ def make_task_config(task, batch):
             task["n"],
         ],
         "l_def": task["l_def"],
+        "buffer_pl": task["buffer_pl"],
         "N_defects": task["N_defects"],
         "structures": task["structures"],
         "data_root": str(task["data_root"]),

@@ -80,6 +80,7 @@ python batch_generate.py --config batch.json --scheduler slurm --max-parallel 2 
 说明：
 
 - `chirality`、`l_def`、`N_defects`、`structures`、`replicas` 是每个配置的必需字段；
+- `buffer_pl` 是每侧缓冲层厚度，单位为 PL，可在每个 `configs` 配置中单独指定；省略时沿用按手性选择的默认值（金属管 2 PL，半导体管 4 PL）；
 - `lammps_mode` 为 `opt`（结构优化）或 `md`（分子动力学）；
 - 电导模式由手性自动判断：`(m - n) % 3 == 0` 的金属管使用 `fermi`，其余半导体管使用 `band_edge_bias`；
 - 每个配置单独设置 `replicas`，不同长度可以使用不同 replica 数；

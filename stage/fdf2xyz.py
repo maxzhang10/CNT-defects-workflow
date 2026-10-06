@@ -352,7 +352,8 @@ def FDF_to_xyz(
     r_max=6.5,
     swap_left_pl=True,
     chirality=None,
-    l_def=5
+    l_def=5,
+    buffer_pl=None,
 ):
     """
     读取 leaf 文件夹中的 STRUCT.fdf，
@@ -381,7 +382,9 @@ def FDF_to_xyz(
 
     # 3. 根据 m, n 计算一个 PL 中的原子数，并交换左端两个 PL
     if swap_left_pl:
-        T, N_uc, l_PL, length = cnt_geometry.geo_info(m, n, r_max,l_def)
+        T, N_uc, l_PL, length = cnt_geometry.geo_info(
+            m, n, r_max, l_def, buffer_pl
+        )
 
         n_atoms_per_pl = l_PL * N_uc
 
@@ -480,6 +483,7 @@ def main():
     config = load_config(args.config)
     chirality = get_chirality_from_config(config)
     l_def = int(config.get("l_def", 5))
+    buffer_pl = config.get("buffer_pl")
     if args.r_max is None:
         r_max = float(config.get("r_max", 6.5))
     else:
@@ -516,7 +520,8 @@ def main():
                 r_max=r_max,
                 swap_left_pl=(not args.no_swap_left_pl),
                 chirality=chirality,
-                l_def=l_def
+                l_def=l_def,
+                buffer_pl=buffer_pl,
             )
 
             n_success += 1

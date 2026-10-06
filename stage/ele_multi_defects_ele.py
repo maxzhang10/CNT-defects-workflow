@@ -82,7 +82,7 @@ def generate_defect_coords(
     # 名义 defects 区域：
     # 金属管 2PL-2PL-defects-2PL-2PL（左侧 4PL 后开始）；
     # 半导体管 2PL-4PL-defects-4PL-2PL（左侧 6PL 后开始）。
-    n_fix_pl = cnt_geometry.fixed_pl_per_side(m, n)
+    n_fix_pl = cnt_geometry.fixed_pl_per_side(m, n, config.get("buffer_pl"))
     z_def_low = n_fix_pl * l_PL * T
     z_def_high = (n_fix_pl * l_PL + l_def) * T
 
@@ -215,11 +215,13 @@ def main():
                 f"lammps_seed 必须为正整数，当前值: {config.get('lammps_seed')}"
             )
 
+    buffer_pl = config.get("buffer_pl")
     T, N_uc, l_PL, length = cnt_geometry.geo_info(
         m,
         n,
         r_max,
         l_def,
+        buffer_pl,
     )
 
     tube_unit = cnt_geometry.build_unit_cnt(m, n, vacuum=50.0)
@@ -347,7 +349,7 @@ def main():
         # 而少含等量 C，破坏同质碳电极假设。POSCAR 和 data.lmp 用同一份重排后的结构。
         atoms_repositioned = exporters.reposition_hydrogens(
             atoms,
-            cnt_geometry.fixed_pl_per_side(m, n) * l_PL * N_uc,
+            cnt_geometry.fixed_pl_per_side(m, n, buffer_pl) * l_PL * N_uc,
         )
 
         output_dir = structure_root / "lammps"
@@ -374,6 +376,7 @@ def main():
         md_steps=md_steps,
         lammps_seed=lammps_seed,
         lammps_mode=lammps_mode,
+        buffer_pl=buffer_pl,
     )
 
 

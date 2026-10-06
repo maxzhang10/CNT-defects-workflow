@@ -588,6 +588,7 @@ def main():
         m, n,
         float(config["r_max"]),
         int(config["l_def"]),
+        config.get("buffer_pl"),
     )
     L.phase(0, 7, "结构构成摘要")
     L.info(f"  手性/类型       : {info['chirality']}  ({info['kind']})")

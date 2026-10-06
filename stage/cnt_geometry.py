@@ -144,7 +144,7 @@ def is_metallic(m, n):
     return (m - n) % 3 == 0
 
 
-def fixed_pl_per_side(m, n):
+def fixed_pl_per_side(m, n, buffer_pl=None):
     """
     每侧固定原子占据的 PL 数。
 
@@ -152,15 +152,20 @@ def fixed_pl_per_side(m, n):
     半导体管：2PL电极 + 4PL加厚 = 6，总体 2PL-4PL-defects-4PL-2PL，
               加厚的 4PL 同样作为固定原子。
     """
+    if buffer_pl is not None:
+        buffer_pl = int(buffer_pl)
+        if buffer_pl < 0:
+            raise ValueError(f"buffer_pl 必须大于等于 0，当前值: {buffer_pl}")
+        return 2 + buffer_pl
     return 4 if is_metallic(m, n) else 6
 
 
-def geo_info(m, n, r_max, l_def):
+def geo_info(m, n, r_max, l_def, buffer_pl=None):
     T = calculate_unit_cell_length(m, n)
     N_uc = calculate_atom_count(m, n, 1)
     l_PL = math.floor(r_max / T) + 1
 
-    n_fix_pl = fixed_pl_per_side(m, n)
+    n_fix_pl = fixed_pl_per_side(m, n, buffer_pl)
     length = l_PL * 2 * n_fix_pl + l_def
 
     if is_metallic(m, n):
@@ -177,7 +182,7 @@ def geo_info(m, n, r_max, l_def):
     return T, N_uc, l_PL, length
 
 
-def describe_structure(m, n, r_max, l_def):
+def describe_structure(m, n, r_max, l_def, buffer_pl=None):
     """
     返回结构构成的可读摘要，用于 workflow.log 开头，便于核对
     DPNEGF 电极 / 输运区划分是否正确。
@@ -199,8 +204,8 @@ def describe_structure(m, n, r_max, l_def):
       "composition_atoms": "336C(电极) + 672C(缓冲固定) + 280C(输运区) + 672C(缓冲固定) + 336C(电极)",
     }
     """
-    T, N_uc, l_PL, length = geo_info(m, n, r_max, l_def)
-    n_fix = fixed_pl_per_side(m, n)
+    T, N_uc, l_PL, length = geo_info(m, n, r_max, l_def, buffer_pl)
+    n_fix = fixed_pl_per_side(m, n, buffer_pl)
     buffer_pl = n_fix - 2          # 加厚缓冲层的 PL 数（不含 2PL 电极）
     kind = "金属管" if is_metallic(m, n) else "半导体管"
 

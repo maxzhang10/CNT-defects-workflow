@@ -43,6 +43,7 @@ NEGF_CONFIG_KEYS = (
     "seed",
     "lammps_seed",
     "r_max",
+    "buffer_pl",
     "md_steps",
     "md_sampling",
     "temperature",

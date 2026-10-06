@@ -25,6 +25,7 @@ batch.json —— 简单配置、工具生成时使用：
   "configs": [
     {
       "chirality": [5, 5],
+      "buffer_pl": 2,          # 每侧缓冲层厚度，单位 PL；省略则按手性默认
       "l_def": 8,
       "N_defects": 2,
       "structures": ["5775"],
@@ -222,6 +223,11 @@ def validate_config_entry(entry, index, path):
     m, n = chirality
 
     l_def = _require_int(entry["l_def"], f"configs[{index}].l_def", path)
+    buffer_pl = entry.get("buffer_pl")
+    if buffer_pl is not None:
+        buffer_pl = _require_int(
+            buffer_pl, f"configs[{index}].buffer_pl", path, minimum=0
+        )
     n_defects = _require_int(
         entry["N_defects"], f"configs[{index}].N_defects", path
     )
@@ -256,6 +262,7 @@ def validate_config_entry(entry, index, path):
     out["m"] = m
     out["n"] = n
     out["l_def"] = l_def
+    out["buffer_pl"] = buffer_pl
     out["N_defects"] = n_defects
     out["structures"] = list(structures)
     out["conductance_mode"] = conductance_mode
