@@ -160,19 +160,17 @@ python run.py --root ./data/500K/5_5/5775_L008_0.1016A-1/replica_001
 
 ## 6. 失败任务重提
 
-先检查，不修改任何任务：
+已没有独立的 `resubmit_negf.py`，重提就是对同一根目录重新运行 `run_multi.py`（或由 `batch_generate.py` 重跑对应批次）：
 
 ```bash
-python resubmit_negf.py ./data
+python run_multi.py --root ./data/.../replica_XXX --config <对应 config.json> --scheduler slurm
 ```
 
-确认失败目录后再重置 `output/`、清理旧状态并重新提交：
+`run_multi.py` 会跳过带 `dpnegf_done.flag` 且 provenance 一致的已完成 leaf，只处理未完成的目录。重提前应先查看对应目录的 `workflow.log`、`slurm-*.err` 和 `dpnegf_failed.flag` 确认失败原因，然后：
 
-```bash
-python resubmit_negf.py ./data --submit --max-submit 10 --scheduler slurm
-```
-
-该脚本默认使用 Slurm；本地调试可以指定 `--scheduler local`。重提前应先查看对应目录的 `workflow.log`、`slurm-*.err` 和 `dpnegf_failed.flag`。如果修改了输入配置或模型，旧的 `output/` 和 done flag 不能直接复用。
+- DPNEGF 真正运行失败（存在 `dpnegf_failed.flag`）：先删除该 flag 再重跑，否则 `sub_dpnegf.py` 会拒绝重复提交；
+- 上次 sbatch 提交阶段失败（存在 `dpnegf_submit_failed.flag`，无 `dpnegf_failed.flag`）：直接重跑即可重新提交；
+- 修改了输入配置或模型：provenance hash 校验（P0-4）会阻止复用与新配置不一致的旧结果，需删除对应 `dpnegf_done.flag` 与 `output/` 后显式重算。
 
 ## 7. 常用维护命令
 

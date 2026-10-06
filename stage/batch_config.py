@@ -325,6 +325,10 @@ def _validate_batch(raw, path):
         _fail(path, f"template 必须为对象，当前值: {template_raw!r}")
     template = {**DEFAULT_TEMPLATE, **template_raw}
     _require_bool(template["save_self_energy"], "template.save_self_energy", path)
+    if template["buffer_pl"] is not None:
+        template["buffer_pl"] = _require_int(
+            template["buffer_pl"], "template.buffer_pl", path, minimum=0
+        )
     template["self_energy_cache"] = _validate_self_energy_cache(
         template["self_energy_cache"], "template.self_energy_cache", path
     )

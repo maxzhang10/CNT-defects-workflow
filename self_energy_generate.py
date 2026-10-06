@@ -158,6 +158,11 @@ def build_tasks(
             m = int(cfg["m"])
             n = int(cfg["n"])
             l_def = int(cfg["l_def"])
+            buffer_pl = cfg.get("buffer_pl", TEMPLATE.get("buffer_pl"))
+            if buffer_pl is not None:
+                buffer_pl = bc._require_int(
+                    buffer_pl, "buffer_pl", "CHIRAL_CONFIGS", minimum=0
+                )
             n_defects = int(cfg["N_defects"])
             structures = list(cfg["structures"])
             se_cache = bc.resolve_self_energy_cache(
@@ -171,6 +176,7 @@ def build_tasks(
                 n,
                 float(TEMPLATE["r_max"]),
                 l_def,
+                buffer_pl,
             )
 
             density = n_defects / (l_def * T)
@@ -233,6 +239,7 @@ def build_tasks(
                     "m": m,
                     "n": n,
                     "l_def": l_def,
+                    "buffer_pl": buffer_pl,
                     "N_defects": n_defects,
                     "structures": structures,
                     "density": density,
@@ -283,6 +290,7 @@ def make_task_config(task):
             task["n"],
         ],
         "l_def": task["l_def"],
+        "buffer_pl": task["buffer_pl"],
         "N_defects": task["N_defects"],
         "structures": task["structures"],
         "data_root": str(task["data_root"]),

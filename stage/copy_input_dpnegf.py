@@ -292,6 +292,7 @@ def copy_inputs_to_leaf_dirs(
     r_max=6.5,
     n_lead_pl=2,
     l_def=5,
+    buffer_pl=None,
     self_energy_cache=None,
     conductance_mu=None,
     overwrite=True,
