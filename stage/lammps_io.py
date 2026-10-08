@@ -131,9 +131,10 @@ def prepare_lammps_inputs(
     model_filename = model_src.name
 
     m, n = chirality
-    # 每侧固定 PL 数与结构生成保持一致：
-    # 金属管 2PL电极+2PL缓冲=4，半导体管 2PL电极+4PL加厚=6。
-    n_fix = cnt_geometry.fixed_pl_per_side(m, n, buffer_pl) * l_PL * N_uc
+    # 每侧固定原子数与结构生成保持一致（2PL电极+buffer_pl缓冲），
+    # 但最靠中间的 1 个 uc 放开不固定（左右共 2 个 uc），
+    # 见 cnt_geometry.fixed_atoms_per_side / RELEASE_UC_PER_SIDE。
+    n_fix = cnt_geometry.fixed_atoms_per_side(m, n, l_PL, N_uc, buffer_pl)
 
     for folder, atoms in structures.items():
         if structure_root is None:

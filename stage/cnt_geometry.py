@@ -160,6 +160,30 @@ def fixed_pl_per_side(m, n, buffer_pl=None):
     return 4 if is_metallic(m, n) else 6
 
 
+# 最靠中间的 uc 不固定：每侧放开 1 个 uc（左右共 2 个），
+# 让固定区/散射区边界附近的一小段原子在 LAMMPS 弛豫与 MD 中可以自由放松。
+RELEASE_UC_PER_SIDE = 1
+
+
+def fixed_atoms_per_side(m, n, l_PL, N_uc, buffer_pl=None, release_uc=RELEASE_UC_PER_SIDE):
+    """
+    每侧实际固定（写入 LAMMPS nfix）的原子数。
+
+    在 fixed_pl_per_side 的基础上，最靠中间的 release_uc 个 uc 放开不固定：
+        n_fix = (fixed_pl_per_side * l_PL - release_uc) * N_uc
+    放开的 uc 位于固定区内侧边缘（原子 ID 紧随固定区），
+    因此 LAMMPS 里只需把 nfix 减小，mobile 组自然多含这一段。
+    """
+    n_fix_uc = fixed_pl_per_side(m, n, buffer_pl) * l_PL - int(release_uc)
+    if n_fix_uc <= 0:
+        raise ValueError(
+            f"放开 {release_uc} 个 uc 后每侧固定区为空："
+            f"fixed_pl={fixed_pl_per_side(m, n, buffer_pl)}, l_PL={l_PL}。"
+            f"请减小 release_uc 或增大 buffer_pl/r_max。"
+        )
+    return n_fix_uc * N_uc
+
+
 def geo_info(m, n, r_max, l_def, buffer_pl=None):
     T = calculate_unit_cell_length(m, n)
     N_uc = calculate_atom_count(m, n, 1)
@@ -198,10 +222,12 @@ def describe_structure(m, n, r_max, l_def, buffer_pl=None):
       "l_def_uc": 5,
       "total_uc": 33,
       "total_atoms": 1848,
-      "fixed_atoms_per_side": 336,
+      "fixed_atoms_per_side": 280,   # 336 - 1 个放开的 uc（56 原子）
+      "released_uc_per_side": 1,
+      "released_atoms_per_side": 56,
       "lead_atoms": 168,
       "composition": "2PL-4PL-5uc-4PL-2PL",
-      "composition_atoms": "336C(电极) + 672C(缓冲固定) + 280C(输运区) + 672C(缓冲固定) + 336C(电极)",
+      "composition_atoms": "336C(左电极) + 616C(左缓冲固定) + 56C(左缓冲放开) + 280C(输运区,含5uc缺陷带) + 56C(右缓冲放开) + 616C(右缓冲固定) + 336C(右电极)",
     }
     """
     T, N_uc, l_PL, length = geo_info(m, n, r_max, l_def, buffer_pl)
@@ -212,12 +238,17 @@ def describe_structure(m, n, r_max, l_def, buffer_pl=None):
     lead_atoms = 2 * l_PL * N_uc
     buffer_atoms = buffer_pl * l_PL * N_uc
     defect_atoms = l_def * N_uc
+    # 缓冲层最靠中间的 release 段不固定，从"缓冲固定"里拆出来
+    released_atoms = RELEASE_UC_PER_SIDE * N_uc
+    buffer_fixed = buffer_atoms - released_atoms
 
     composition = f"2PL-{buffer_pl}PL-{l_def}uc-{buffer_pl}PL-2PL"
     composition_atoms = (
-        f"{lead_atoms}C(左电极) + {buffer_atoms}C(左缓冲固定) + "
+        f"{lead_atoms}C(左电极) + {buffer_fixed}C(左缓冲固定) "
+        f"+ {released_atoms}C(左缓冲放开) + "
         f"{defect_atoms}C(输运区,含{l_def}uc缺陷带) + "
-        f"{buffer_atoms}C(右缓冲固定) + {lead_atoms}C(右电极)"
+        f"{released_atoms}C(右缓冲放开) + {buffer_fixed}C(右缓冲固定) + "
+        f"{lead_atoms}C(右电极)"
     )
 
     return {
@@ -230,7 +261,10 @@ def describe_structure(m, n, r_max, l_def, buffer_pl=None):
         "l_def_uc": l_def,
         "total_uc": length,
         "total_atoms": N_uc * length,
-        "fixed_atoms_per_side": n_fix * l_PL * N_uc,
+        "fixed_atoms_per_side": fixed_atoms_per_side(m, n, l_PL, N_uc, buffer_pl),
+        # 固定区内侧（缓冲层靠散射区一边）放开不固定的部分
+        "released_uc_per_side": RELEASE_UC_PER_SIDE,
+        "released_atoms_per_side": RELEASE_UC_PER_SIDE * N_uc,
         "lead_atoms": lead_atoms,
         "composition": composition,
         "composition_atoms": composition_atoms,

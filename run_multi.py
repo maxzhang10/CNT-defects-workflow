@@ -600,7 +600,9 @@ def main():
     L.info(f"  每侧缓冲层      : {info['buffer_pl']} PL  "
            f"({'4PL加厚' if info['buffer_pl'] == 4 else '2PL'})")
     L.info(f"  每侧固定原子    : {info['fixed_atoms_per_side']}  "
-           f"(2PL电极 + {info['buffer_pl']}PL缓冲)")
+           f"(2PL电极 + {info['buffer_pl']}PL缓冲，"
+           f"其中靠中间 {info['released_uc_per_side']}uc / "
+           f"{info['released_atoms_per_side']} 原子放开不固定)")
     L.info(f"  总 uc 数        : {info['total_uc']}")
     L.info(f"  总原子数        : {info['total_atoms']}")
 
