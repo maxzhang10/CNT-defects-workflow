@@ -392,10 +392,14 @@ def run_single_task(
 
         # 每个任务使用唯一临时配置文件，
         # 避免多个 run_multi.py 并发读取同一个 config。
+        # 临时文件必须写到 run_root（JuiceFS 数据分区）而非默认 /tmp：
+        # /tmp 在登录节点根分区上，大批量并发时会把根分区写满
+        # （Errno 28 No space left on device）。
         with tempfile.NamedTemporaryFile(
             mode="w",
             suffix=".json",
             prefix=f"cnt_{task_id}_",
+            dir=run_root,
             delete=False,
             encoding="utf-8",
         ) as file:
