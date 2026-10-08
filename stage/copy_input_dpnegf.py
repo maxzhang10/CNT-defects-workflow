@@ -17,6 +17,16 @@ from negf_provenance import (
 )
 
 
+# Target approximately 60 Angstrom with the lead's axial k-point mesh:
+# k_z * (one unit-cell length T) ~= 60 Angstrom.
+# NOTE: DPNEGF interprets kmesh_lead_Ef on the reciprocal cell of the whole
+# lead id range (length n_lead_pl * l_PL * T, see
+# dpnegf.negf.negf_hamiltonian_init.get_lead_structure, R_vec = 2 * PL
+# displacement), so the effective k-point density along the axis is another
+# factor of n_lead_pl * l_PL finer than the 60 A target suggests.
+K_MESH_LEAD_EF_TARGET_LENGTH = 60.0
+
+
 def clean_line(line):
     return line.split("#", 1)[0].strip()
 
@@ -146,6 +156,11 @@ def update_input_json_for_leaf(
         m, n, r_max, l_def, buffer_pl
     )
 
+    # Keep the lead sampling density roughly constant across chiralities:
+    # k_z * T ~= K_MESH_LEAD_EF_TARGET_LENGTH.
+    # Round to the nearest integer and clamp to one valid k point.
+    n_kz_lead = max(1, int(round(K_MESH_LEAD_EF_TARGET_LENGTH / T)))
+
     n_atoms_per_pl = N_uc * l_PL
     n_elec = n_lead_pl * n_atoms_per_pl
     n_total = count_atoms_from_struct_fdf(fdf_path)
@@ -198,6 +213,8 @@ def update_input_json_for_leaf(
     stru_options["lead_L"]["id"] = lead_L_id
     stru_options["device"]["id"] = device_id
     stru_options["lead_R"]["id"] = lead_R_id
+    stru_options["lead_L"]["kmesh_lead_Ef"] = [1, 1, n_kz_lead]
+    stru_options["lead_R"]["kmesh_lead_Ef"] = [1, 1, n_kz_lead]
 
     with open(input_json_path, "w", encoding="utf-8") as f:
         json.dump(input_data, f, indent=4)
@@ -220,6 +237,8 @@ def update_input_json_for_leaf(
         f"\n  conductance_options.mu = {conductance_mu}"
         f"\n  self-energy cache = {self_energy_cache}"
         f"\n  AtomicData_options.r_max = {r_max}"
+        f"\n  lead kmesh_lead_Ef = [1, 1, {n_kz_lead}] (T={T:.6f} A, "
+        f"k_z*T={n_kz_lead * T:.1f} A)"
     )
 
 def copy_or_link_file(src: Path, dst: Path, overwrite: bool = True):

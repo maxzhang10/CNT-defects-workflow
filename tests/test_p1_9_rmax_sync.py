@@ -133,3 +133,35 @@ def test_r_max_atomic_data_options_created_if_absent(tmp_path):
 
     out = json.loads((tmp_path / "input.json").read_text(encoding="utf-8"))
     assert out["AtomicData_options"]["r_max"] == r_max
+
+
+def test_lead_kmesh_targets_constant_axial_length(tmp_path):
+    import cnt_geometry
+
+    chirality = (5, 5)
+    r_max = 6.5
+    n_lead_pl = 2
+    T, N_uc, l_PL, length = cnt_geometry.geo_info(*chirality, r_max, 5)
+    n_total = N_uc * length
+
+    _make_struct_fdf(tmp_path / "STRUCT.fdf", n_total)
+    _make_input_json(tmp_path / "input.json")
+    _make_run_py(tmp_path / "run.py")
+
+    ci.update_input_json_for_leaf(
+        leaf_dir=tmp_path,
+        model_filename="nnenv.pth",
+        chirality=chirality,
+        self_energy_cache=None,
+        conductance_mu=["Ef"],
+        r_max=r_max,
+        n_lead_pl=n_lead_pl,
+        l_def=5,
+    )
+
+    out = json.loads((tmp_path / "input.json").read_text(encoding="utf-8"))
+    # Target: k_z * (unit-cell length T) ~= K_MESH_LEAD_EF_TARGET_LENGTH.
+    expected_kz = max(1, int(round(ci.K_MESH_LEAD_EF_TARGET_LENGTH / T)))
+    stru = out["task_options"]["stru_options"]
+    assert stru["lead_L"]["kmesh_lead_Ef"] == [1, 1, expected_kz]
+    assert stru["lead_R"]["kmesh_lead_Ef"] == [1, 1, expected_kz]
