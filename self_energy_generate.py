@@ -18,8 +18,7 @@ CHIRAL_CONFIGS = [
         "n": 0,
         "l_def": 3,
         "N_defects": 0,
-        "structures": ["5775"],
-        "conductance_mode": "band_edge_bias"
+        "structures": ["5775"]
     }
 
 ]

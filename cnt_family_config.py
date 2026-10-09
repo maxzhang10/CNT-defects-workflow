@@ -77,7 +77,6 @@ def main():
         print('            "N_defects": N_defects,')
         print('            "structures": ["MVH"],')
         print('            "replicas": replicas,')
-        print('            "conductance_mode": "band_edge_bias",')
         print('        }')
         print('        for l_def, N_defects, replicas in [')
         print('            # UC数, 缺陷数, replicas    散射区长度')
