@@ -212,6 +212,8 @@ def clean_dpnegf_output_cache(root):
     2. output/HS_device.h5
     3. output/HS_lead_L.h5
     4. output/HS_lead_R.h5
+    5. output/profile_report_ham_init.html
+    6. output/profile_report_negf.html
 
     只清理形如 */output/... 的内容，避免误删其他同名文件。
     """
@@ -228,6 +230,9 @@ def clean_dpnegf_output_cache(root):
         "HS_device.h5",
         "HS_lead_L.h5",
         "HS_lead_R.h5",
+        # DPNEGF 性能分析报告，与 HS 矩阵文件一样计算完成后即可删除。
+        "profile_report_ham_init.html",
+        "profile_report_negf.html",
     ]
 
     for output_dir in sorted(root.rglob("output")):

@@ -299,6 +299,8 @@ def clean_dpnegf_output_cache(root, save_self_energy=False, self_energy_save_pat
     2. output/HS_device.h5
     3. output/HS_lead_L.h5
     4. output/HS_lead_R.h5
+    5. output/profile_report_ham_init.html
+    6. output/profile_report_negf.html
 
     P2-6：若配置中 self_energy_cache.save_path 指向 leaf 下的独立目录
     （如 ./self_energy/，而非 output/self_energy），也一并清理，否则
@@ -319,6 +321,10 @@ def clean_dpnegf_output_cache(root, save_self_energy=False, self_energy_save_pat
         "HS_device.h5",
         "HS_lead_L.h5",
         "HS_lead_R.h5",
+        # DPNEGF 性能分析报告，体积大且只在排查性能时有用，
+        # 与 HS 矩阵文件一样计算完成后即可删除。
+        "profile_report_ham_init.html",
+        "profile_report_negf.html",
     ]
 
     # 解析配置中的自能缓存路径名（可能是 "self_energy"、"./self_energy/" 等）。
