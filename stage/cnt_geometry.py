@@ -206,7 +206,8 @@ def geo_info(m, n, r_max, l_def, buffer_pl=None):
     return T, N_uc, l_PL, length
 
 
-def describe_structure(m, n, r_max, l_def, buffer_pl=None):
+def describe_structure(m, n, r_max, l_def, buffer_pl=None,
+                       release_uc=RELEASE_UC_PER_SIDE):
     """
     返回结构构成的可读摘要，用于 workflow.log 开头，便于核对
     DPNEGF 电极 / 输运区划分是否正确。
@@ -239,7 +240,7 @@ def describe_structure(m, n, r_max, l_def, buffer_pl=None):
     buffer_atoms = buffer_pl * l_PL * N_uc
     defect_atoms = l_def * N_uc
     # 缓冲层最靠中间的 release 段不固定，从"缓冲固定"里拆出来
-    released_atoms = RELEASE_UC_PER_SIDE * N_uc
+    released_atoms = int(release_uc) * N_uc
     buffer_fixed = buffer_atoms - released_atoms
 
     composition = f"2PL-{buffer_pl}PL-{l_def}uc-{buffer_pl}PL-2PL"
@@ -261,10 +262,12 @@ def describe_structure(m, n, r_max, l_def, buffer_pl=None):
         "l_def_uc": l_def,
         "total_uc": length,
         "total_atoms": N_uc * length,
-        "fixed_atoms_per_side": fixed_atoms_per_side(m, n, l_PL, N_uc, buffer_pl),
+        "fixed_atoms_per_side": fixed_atoms_per_side(
+            m, n, l_PL, N_uc, buffer_pl, release_uc=release_uc
+        ),
         # 固定区内侧（缓冲层靠散射区一边）放开不固定的部分
-        "released_uc_per_side": RELEASE_UC_PER_SIDE,
-        "released_atoms_per_side": RELEASE_UC_PER_SIDE * N_uc,
+        "released_uc_per_side": int(release_uc),
+        "released_atoms_per_side": int(release_uc) * N_uc,
         "lead_atoms": lead_atoms,
         "composition": composition,
         "composition_atoms": composition_atoms,

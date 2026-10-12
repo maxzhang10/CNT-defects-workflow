@@ -589,6 +589,9 @@ def main():
         float(config["r_max"]),
         int(config["l_def"]),
         config.get("buffer_pl"),
+        release_uc=config.get(
+            "release_uc", cnt_geometry.RELEASE_UC_PER_SIDE
+        ),
     )
     L.phase(0, 7, "结构构成摘要")
     L.info(f"  手性/类型       : {info['chirality']}  ({info['kind']})")
@@ -605,6 +608,10 @@ def main():
            f"{info['released_atoms_per_side']} 原子放开不固定)")
     L.info(f"  总 uc 数        : {info['total_uc']}")
     L.info(f"  总原子数        : {info['total_atoms']}")
+    # DPNEGF 电极电子温度：未设置时沿用 input.json 模板值，不覆写
+    ele_T = config.get("ele_T")
+    L.info(f"  DPNEGF ele_T    : "
+           f"{f'{ele_T} K' if ele_T is not None else '未设置（沿用 input.json 模板值）'}")
 
     # ============================================================
     # 0. 先运行 eledefects.py

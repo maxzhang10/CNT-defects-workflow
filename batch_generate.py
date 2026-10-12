@@ -132,6 +132,17 @@ def build_tasks(batch, base_root):
                 if cfg.get("buffer_pl") is not None
                 else template.get("buffer_pl")
             )
+            release_uc = (
+                cfg["release_uc"]
+                if cfg.get("release_uc") is not None
+                else template.get("release_uc")
+            )
+            # ele_T 可选：None 表示沿用 DPNEGF input.json 模板值
+            ele_T = (
+                cfg["ele_T"]
+                if cfg.get("ele_T") is not None
+                else template.get("ele_T")
+            )
             n_defects = cfg["N_defects"]
             structures = cfg["structures"]
             replicas = cfg["replicas"]
@@ -219,6 +230,8 @@ def build_tasks(batch, base_root):
                     "n": n,
                     "l_def": l_def,
                     "buffer_pl": buffer_pl,
+                    "release_uc": release_uc,
+                    "ele_T": ele_T,
                     "N_defects": n_defects,
                     "structures": structures,
                     "density": density,
@@ -283,6 +296,7 @@ def make_task_config(task, batch):
         ],
         "l_def": task["l_def"],
         "buffer_pl": task["buffer_pl"],
+        "release_uc": task["release_uc"],
         "N_defects": task["N_defects"],
         "structures": task["structures"],
         "data_root": str(task["data_root"]),
@@ -302,6 +316,11 @@ def make_task_config(task, batch):
             "mu": mu_labels,
         },
     })
+
+    # ele_T 仅在显式设置时写入 config：None 表示沿用 DPNEGF input.json
+    # 模板值；不写入键可保证未设置时 provenance hash 与旧版一致。
+    if task["ele_T"] is not None:
+        config["ele_T"] = float(task["ele_T"])
 
     return config
 

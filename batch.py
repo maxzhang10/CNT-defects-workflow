@@ -14,6 +14,15 @@ template = {
     "r_max": 6.5,
     "md_steps": 15000,
     "buffer_pl": 4,
+    # 固定区（2PL电极+buffer_pl缓冲）最靠中间放开不固定的 uc 数（每侧），
+    # 让固定区/散射区边界附近的原子在弛豫与 MD 中自由放松。
+    # 0 = 全部固定；可在任一 config 内加同名键单独覆盖。
+    "release_uc": 1,
+    # DPNEGF 电极电子温度 ele_T（K）。不设置（缺省/None）时沿用
+    # input_files/dpnegf/input.json 模板值，不覆写；
+    # 显式设置则写入每个 leaf 的 input.json 并纳入 provenance hash。
+    # 可在任一 config 内加同名键单独覆盖。
+    "ele_T": 100,
     "save_self_energy": False,
     # 自能缓存路径，可用占位符按手性区分（电极自能只依赖手性，
     # 同手性的所有长度 / replica 可共享一份缓存）：

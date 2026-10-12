@@ -56,6 +56,11 @@ TEMPLATE = {
     },
     # 能量网格（energy_grid: clenshaw_curtis/num_points/half_width）完全沿用
     # input.json 模板默认值，不再由工作流外置 espacing/negf_energy_window。
+    # DPNEGF 电极电子温度 ele_T（K）。不设置（缺省/None）时沿用
+    # input_files/dpnegf/input.json 模板值，不覆写；
+    # 显式设置则写入每个 leaf 的 input.json 并纳入 provenance hash。
+    # 可在 CHIRAL_CONFIGS 任一 config 内加同名键单独覆盖。
+    "ele_T": 100,
     # False 保持既有行为：DPNEGF 成功后清理 output/self_energy。
     "save_self_energy": True,
     # 覆盖 DPNEGF input.json 的 self_energy_options.cache 配置。
@@ -164,6 +169,13 @@ def build_tasks(
                 )
             n_defects = int(cfg["N_defects"])
             structures = list(cfg["structures"])
+            # ele_T 可选：显式设置时覆写 DPNEGF input.json 的电极温度，
+            # None 表示沿用模板值（与 batch_generate 语义一致）。
+            ele_T = cfg.get("ele_T", TEMPLATE.get("ele_T"))
+            if ele_T is not None:
+                ele_T = bc._require_ele_T(
+                    ele_T, "ele_T", "CHIRAL_CONFIGS"
+                )
             se_cache = bc.resolve_self_energy_cache(
                 se_cache_raw, m=m, n=n, data_root=base_root
             )
@@ -257,6 +269,7 @@ def build_tasks(
                     "save_self_energy": save_self_energy,
                     "self_energy_cache": se_cache,
                     "conductance_mode": conductance_mode,
+                    "ele_T": ele_T,
                 })
 
     return tasks
@@ -308,6 +321,11 @@ def make_task_config(task):
             "mu": mu_labels,
         },
     })
+
+    # ele_T 仅在显式设置时写入 config：None 表示沿用 DPNEGF input.json
+    # 模板值；不写入键可保证未设置时 provenance hash 与旧版一致。
+    if task["ele_T"] is not None:
+        config["ele_T"] = float(task["ele_T"])
 
     return config
 

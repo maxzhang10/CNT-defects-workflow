@@ -217,6 +217,8 @@ def main():
             )
 
     buffer_pl = config.get("buffer_pl")
+    # 固定区内侧放开不固定的 uc 数；缺省用 cnt_geometry.RELEASE_UC_PER_SIDE
+    release_uc = config.get("release_uc")
     T, N_uc, l_PL, length = cnt_geometry.geo_info(
         m,
         n,
@@ -379,6 +381,7 @@ def main():
         lammps_seed=lammps_seed,
         lammps_mode=lammps_mode,
         buffer_pl=buffer_pl,
+        release_uc=release_uc,
     )
 
 

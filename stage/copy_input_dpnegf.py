@@ -138,6 +138,7 @@ def update_input_json_for_leaf(
     n_lead_pl=2,
     l_def=5,
     buffer_pl=None,
+    ele_T=None,
 ):
     leaf_dir = Path(leaf_dir).resolve()
 
@@ -187,6 +188,9 @@ def update_input_json_for_leaf(
 
     # 保留模板 input.json 中的 ele_T。工作流的 temperature 用于结构/MD，
     # 不应再隐式覆盖 DPNEGF 电极温度。
+    # 仅当 config 显式设置 ele_T 时才覆写（None = 沿用模板值）。
+    if ele_T is not None:
+        task_options["ele_T"] = float(ele_T)
     # 能量网格（energy_grid: clenshaw_curtis/num_points/half_width）完全沿用
     # 模板默认值，不再由工作流注入 espacing/emin/emax（新版 DPNEGF 已弃用）。
     task_options["self_energy_options"]["cache"] = copy.deepcopy(self_energy_cache)
@@ -234,6 +238,7 @@ def update_input_json_for_leaf(
         f"  lead_L.id = {lead_L_id}\n"
         f"  device.id = {device_id}\n"
         f"  lead_R.id = {lead_R_id}"
+        f"\n  ele_T = {ele_T if ele_T is not None else '模板值(未覆写)'}"
         f"\n  conductance_options.mu = {conductance_mu}"
         f"\n  self-energy cache = {self_energy_cache}"
         f"\n  AtomicData_options.r_max = {r_max}"
@@ -316,6 +321,7 @@ def copy_inputs_to_leaf_dirs(
     conductance_mu=None,
     overwrite=True,
     negf_config_hash=None,
+    ele_T=None,
 ):
     input_dir = Path(input_dir).resolve()
     root_dir = Path(root_dir).resolve()
@@ -382,6 +388,7 @@ def copy_inputs_to_leaf_dirs(
                 n_lead_pl=n_lead_pl,
                 l_def=l_def,
                 buffer_pl=buffer_pl,
+                ele_T=ele_T,
             )
 
             n_success += 1
@@ -506,6 +513,21 @@ def main():
     self_energy_cache = {"use_saved": use_saved, "save_path": save_path}
     L.info(f"self_energy_cache = {self_energy_cache}")
 
+    # ele_T 可选：显式设置时覆写 leaf input.json 的 task_options.ele_T；
+    # 缺省/None 表示沿用模板值（见 update_input_json_for_leaf 注释）。
+    ele_T = config.get("ele_T")
+    if ele_T is not None:
+        if (
+            isinstance(ele_T, bool)
+            or not isinstance(ele_T, (int, float))
+            or ele_T < 0
+        ):
+            raise ValueError(
+                f"ele_T 必须为非负数（K），当前值: {ele_T!r}"
+            )
+        ele_T = float(ele_T)
+    L.info(f"ele_T = {ele_T if ele_T is not None else '(模板值，不覆写)'}")
+
     # conductance_options.mu 标签决定 DPNEGF 在哪些化学势处计算电导：
     #   费米模式 -> ["Ef"]；带边模式 -> ["Ev","Ec"]。
     # 必须从 workflow config 同步到每个 leaf 的 input.json，覆盖模板默认值，
@@ -540,6 +562,7 @@ def main():
         self_energy_cache=self_energy_cache,
         conductance_mu=conductance_mu,
         negf_config_hash=compute_negf_config_hash(config),
+        ele_T=ele_T,
     )
 
     if n_failed > 0:

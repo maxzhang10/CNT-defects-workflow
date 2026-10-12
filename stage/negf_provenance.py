@@ -49,6 +49,9 @@ NEGF_CONFIG_KEYS = (
     "temperature",
     "self_energy_cache",
     "conductance_options",
+    # DPNEGF 电极温度（K）。仅在 config 显式设置时存在于 config 中
+    # （缺省 = 沿用 input.json 模板值），因此未设置时 hash 与旧版一致。
+    "ele_T",
 )
 
 # leaf 工作目录内期望 hash 文件名（copy_input 写入，作为本次运行的期望值）。

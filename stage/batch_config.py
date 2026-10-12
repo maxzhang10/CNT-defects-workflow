@@ -100,6 +100,7 @@ replica，不影响已有 replica 的 seed 与目录。
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 
 
@@ -109,6 +110,8 @@ DEFAULT_TEMPLATE = {
     "r_max": 6.5,
     "md_steps": 50000,
     "buffer_pl": None,
+    # 固定区（电极+缓冲）最靠中间放开不固定的 uc 数（每侧）。
+    "release_uc": 1,
     "save_self_energy": False,
     "self_energy_cache": {
         "use_saved": True,
@@ -141,6 +144,18 @@ def _require_int(value, name, path, minimum=1):
     if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
         _fail(path, f"{name} 必须为不小于 {minimum} 的整数，当前值: {value!r}")
     return value
+
+
+def _require_ele_T(value, name, path):
+    """ele_T 为可选的有限非负温度（K），允许 int/float。"""
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(value)
+        or value < 0
+    ):
+        _fail(path, f"{name} 必须为有限非负数（K），当前值: {value!r}")
+    return float(value)
 
 
 def _require_bool(value, name, path):
@@ -229,6 +244,15 @@ def validate_config_entry(entry, index, path):
         buffer_pl = _require_int(
             buffer_pl, f"configs[{index}].buffer_pl", path, minimum=0
         )
+    release_uc = entry.get("release_uc")
+    if release_uc is not None:
+        release_uc = _require_int(
+            release_uc, f"configs[{index}].release_uc", path, minimum=0
+        )
+    # ele_T 可选：per-config 覆盖 template；None 表示沿用 input.json 模板值。
+    ele_T = entry.get("ele_T")
+    if ele_T is not None:
+        ele_T = _require_ele_T(ele_T, f"configs[{index}].ele_T", path)
     n_defects = _require_int(
         entry["N_defects"], f"configs[{index}].N_defects", path
     )
@@ -264,6 +288,8 @@ def validate_config_entry(entry, index, path):
     out["n"] = n
     out["l_def"] = l_def
     out["buffer_pl"] = buffer_pl
+    out["release_uc"] = release_uc
+    out["ele_T"] = ele_T
     out["N_defects"] = n_defects
     out["structures"] = list(structures)
     out["conductance_mode"] = conductance_mode
@@ -329,6 +355,15 @@ def _validate_batch(raw, path):
         template["buffer_pl"] = _require_int(
             template["buffer_pl"], "template.buffer_pl", path, minimum=0
         )
+    if template["release_uc"] is not None:
+        template["release_uc"] = _require_int(
+            template["release_uc"], "template.release_uc", path, minimum=0
+        )
+    # ele_T 可选：缺省/None 表示沿用 input.json 模板中的 ele_T，
+    # 不由工作流覆写 DPNEGF 电极温度。
+    ele_T = template.get("ele_T")
+    if ele_T is not None:
+        template["ele_T"] = _require_ele_T(ele_T, "template.ele_T", path)
     template["self_energy_cache"] = _validate_self_energy_cache(
         template["self_energy_cache"], "template.self_energy_cache", path
     )
