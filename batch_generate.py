@@ -9,6 +9,9 @@ workflow_config.json + 并发调度 run_multi.py。
 格式与校验规则见 stage/batch_config.py 的模块 docstring。
 CLI 只保留纯运行时开关（scheduler / max-parallel / skip-conductance），
 物理参数（replica 数、seed、温度等）一律写在 JSON 中，避免双重真相。
+并发上限 max_parallel 随批次经常调整，也可写在批配置顶层作为默认
+（CLI --max-parallel 显式指定时优先）；它是运行时参数，不进
+template / configs，不参与 provenance hash。
 
 确定性约定：seed = base_seed + config 内的 replica 序号（按
 config × temperature 块独立计数，不跨 config 全局递增）。因此：
@@ -558,8 +561,11 @@ def parse_args():
     parser.add_argument(
         "--max-parallel",
         type=int,
-        default=16,
-        help="同时运行的独立 workflow 数上限。",
+        default=None,
+        help=(
+            "同时运行的独立 workflow 数上限。"
+            "缺省用批配置里的 max_parallel（未配置则为 16）。"
+        ),
     )
 
     parser.add_argument(
@@ -580,7 +586,7 @@ def parse_args():
 
     args = parser.parse_args()
 
-    if args.max_parallel < 1:
+    if args.max_parallel is not None and args.max_parallel < 1:
         raise ValueError("--max-parallel 必须大于 0")
 
     return args
@@ -607,6 +613,14 @@ def main():
 
     batch = bc.load(config_arg)
     base_root = batch["data_root"]
+
+    # 并发上限：CLI 显式指定优先，其次批配置 max_parallel，默认 16。
+    # 是运行时参数，不影响任何 replica 的 seed / provenance。
+    max_parallel = (
+        args.max_parallel
+        if args.max_parallel is not None
+        else (batch["max_parallel"] or 16)
+    )
 
     run_multi_path = (
         workflow_dir
@@ -639,13 +653,14 @@ def main():
         return 0
 
     max_workers = min(
-        args.max_parallel,
+        max_parallel,
         len(tasks),
     )
 
     print("=" * 70)
     print(f"[INFO] 总任务数: {len(tasks)}  "
-          f"并发: {max_workers}  scheduler: {args.scheduler}")
+          f"并发: {max_workers} (上限 {max_parallel})  "
+          f"scheduler: {args.scheduler}")
     print(f"[INFO] data_root: {base_root}")
     print("=" * 70)
 

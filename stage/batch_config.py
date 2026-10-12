@@ -22,6 +22,8 @@ batch.json —— 简单配置、工具生成时使用：
   "base_structure_seed": 20260705,
   "base_lammps_seed": 23456789,
   "data_root": ".",              # 相对路径按配置文件所在目录解析
+  "max_parallel": 16,            # 同时运行的独立 workflow 数上限（可选，
+                                # 缺省 16；CLI --max-parallel 可临时覆盖）
   "configs": [
     {
       "chirality": [5, 5],
@@ -76,6 +78,7 @@ batch.py —— 配置项多、需要循环/变量/条件时使用（同名变�
     base_structure_seed = 20260705
     base_lammps_seed = 23456789
     data_root = "."
+    max_parallel = 16       # 可选：并发上限，CLI --max-parallel 可覆盖
     template = {
         "r_max": 6.5,
         # 按手性区分自能缓存（同手性的所有任务共享一份）：
@@ -321,6 +324,7 @@ _BATCH_PY_KEYS = (
     "base_structure_seed",
     "base_lammps_seed",
     "data_root",
+    "max_parallel",
     "CHIRAL_CONFIGS",
     "configs",
 )
@@ -337,6 +341,7 @@ def _validate_batch(raw, path):
           "base_structure_seed": int,
           "base_lammps_seed": int,
           "data_root": Path,          # 已解析为绝对路径
+          "max_parallel": int | None, # 并发上限；None = 未配置，用 CLI/默认值
           "configs": [ {...}, ... ],  # 每项已校验并补齐 m/n 等字段
         }
 
@@ -404,6 +409,12 @@ def _validate_batch(raw, path):
     if not data_root.is_absolute():
         data_root = (path.parent / data_root).resolve()
 
+    # 并发上限是运行时参数，不进入 template / configs，不参与
+    # provenance hash：改并行度不影响已有结果的确定性约定。
+    max_parallel = raw.get("max_parallel")
+    if max_parallel is not None:
+        max_parallel = _require_int(max_parallel, "max_parallel", path)
+
     configs_raw = raw.get("configs")
     if not isinstance(configs_raw, list) or not configs_raw:
         _fail(path, "configs 必须为非空列表")
@@ -420,6 +431,7 @@ def _validate_batch(raw, path):
         "base_structure_seed": base_structure_seed,
         "base_lammps_seed": base_lammps_seed,
         "data_root": data_root,
+        "max_parallel": max_parallel,
         "configs": configs,
     }
 

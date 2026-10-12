@@ -9,6 +9,8 @@ lammps_mode = "md"             # "md" NVT 退火 / "opt" 几何优化
 base_structure_seed = 20260705
 base_lammps_seed = 23456789
 data_root = "."                # 相对路径按本文件所在目录解析
+max_parallel = 16              # 同时运行的独立 workflow 数上限（运行时参数，
+                               # 不进 provenance；CLI --max-parallel 可临时覆盖）
 
 template = {
     "r_max": 6.5,
