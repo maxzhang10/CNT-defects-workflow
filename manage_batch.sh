@@ -1,17 +1,34 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# SCRIPT_DIR = 软件目录（batch_generate.py 所在处，按脚本自身位置定位）。
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-PID_FILE="$SCRIPT_DIR/batch_generate.pid"
-STATUS_FILE="$SCRIPT_DIR/batch_generate.status"
+# DATA_DIR = 数据目录（batch.py、日志、pid/status 所在处）。
+# 缺省 = SCRIPT_DIR，即仓库内自用时行为与以前完全一致；
+# 数据文件夹通过 wrapper（manage.sh）设置 BATCH_DATA_DIR 指向自己，
+# 实现"数据参数在一起、软件分开"。
+DATA_DIR="${BATCH_DATA_DIR:-$SCRIPT_DIR}"
+# 统一成绝对路径：手动 export 相对路径时，start/status/stop 从不同
+# cwd 调用也能找到同一套 pid/log 文件（目录不存在则留给 start 守卫报错）
+if [[ -d "$DATA_DIR" ]]; then
+    DATA_DIR="$(cd "$DATA_DIR" && pwd)"
+fi
+
+# 提示语中显示的命令名：经 wrapper 调用时显示 wrapper 路径（如
+# ./manage.sh status），避免误导用户直接运行仓库里的本脚本
+# （那样会缺 BATCH_DATA_DIR，把仓库当成数据目录）。
+CMD="${BATCH_MANAGER_CMD:-$0}"
+
+PID_FILE="$DATA_DIR/batch_generate.pid"
+STATUS_FILE="$DATA_DIR/batch_generate.status"
 
 # 当前轮和上一轮 batch_generate.py 日志
-LOG_FILE="$SCRIPT_DIR/batch_generate.log"
-PREV_LOG_FILE="$SCRIPT_DIR/batch_generate.log.prev"
+LOG_FILE="$DATA_DIR/batch_generate.log"
+PREV_LOG_FILE="$DATA_DIR/batch_generate.log.prev"
 
 # manage 调度器自身日志
-MANAGER_LOG="$SCRIPT_DIR/manage_batch.log"
+MANAGER_LOG="$DATA_DIR/manage_batch.log"
 
 
 is_running() {
@@ -28,24 +45,39 @@ is_running() {
 start_job() {
     if is_running; then
         echo "任务已经运行，PID=$(cat "$PID_FILE")"
-        echo "查看状态：$0 status"
+        echo "查看状态：$CMD status"
         return 0
     fi
 
-    # 清理失效的旧PID文件
-    rm -f "$PID_FILE"
+    # 数据目录必须存在且含批配置，否则启动后立刻失败
+    if [[ ! -d "$DATA_DIR" ]]; then
+        echo "数据目录不存在：$DATA_DIR"
+        return 1
+    fi
+    if [[ ! -f "$DATA_DIR/batch.py" && ! -f "$DATA_DIR/batch.json" ]]; then
+        echo "数据目录下找不到 batch.py / batch.json：$DATA_DIR"
+        return 1
+    fi
+
+    # 清理失效的旧PID文件和上一轮状态文件
+    # （状态文件必须清掉：下面靠"本轮是否写了新状态"区分
+    # 快速完成与启动失败，残留的旧状态会造成误判）
+    rm -f "$PID_FILE" "$STATUS_FILE"
 
     # 每次重新启动manage时，清空旧的manage日志
     : > "$MANAGER_LOG"
 
     nohup setsid bash -c '
-        script_dir="$1"
-        log_file="$2"
-        prev_log_file="$3"
-        status_file="$4"
-        pid_file="$5"
+        workflow_dir="$1"
+        data_dir="$2"
+        log_file="$3"
+        prev_log_file="$4"
+        status_file="$5"
+        pid_file="$6"
 
-        cd "$script_dir" || exit 1
+        # 在数据目录运行：batch_generate.py 缺省探测 ./batch.py，
+        # data_root 相对路径也按数据目录解析
+        cd "$data_dir" || exit 1
 
         cleanup() {
             echo "[$(date "+%F %T")] 调度器停止，PID=$$"
@@ -60,7 +92,8 @@ start_job() {
         trap cleanup TERM INT
 
         echo "[$(date "+%F %T")] 调度器启动，PID=$$"
-        echo "[$(date "+%F %T")] 工作目录：$script_dir"
+        echo "[$(date "+%F %T")] 工作目录：$data_dir"
+        echo "[$(date "+%F %T")] 软件目录：$workflow_dir"
 
         round=1
         start_time="$(date "+%F %T")"
@@ -84,7 +117,8 @@ start_job() {
         echo "[$(date "+%F %T")] 当前轮日志：$log_file"
 
         # manage不控制并行参数，完全交给batch_generate.py自身配置
-        if python batch_generate.py >"$log_file" 2>&1; then
+        # （并行度写在批配置顶层 max_parallel，可用 --max-parallel 覆盖）
+        if python "$workflow_dir/batch_generate.py" >"$log_file" 2>&1; then
             rc=0
         else
             rc=$?
@@ -116,6 +150,7 @@ start_job() {
         exit "$rc"
     ' bash \
         "$SCRIPT_DIR" \
+        "$DATA_DIR" \
         "$LOG_FILE" \
         "$PREV_LOG_FILE" \
         "$STATUS_FILE" \
@@ -128,6 +163,22 @@ start_job() {
     sleep 1
 
     if ! kill -0 "$pid" 2>/dev/null; then
+        # 进程已退出。区分两种情况：
+        # 1) 本轮写了 completed 状态 = batch_generate.py 已完整跑完一轮
+        #    （成功：如无新任务秒退；失败：如配置错误秒挂），如实报告；
+        # 2) 没有新状态 = 调度器自身没能启动（如 python 不存在）。
+        if [[ -f "$STATUS_FILE" ]] && grep -q "completed" "$STATUS_FILE"; then
+            echo "本轮已在 1 秒内结束，结果："
+            cat "$STATUS_FILE"
+            echo
+            echo "当前日志     : $CMD log"
+            echo "调度器日志   : $CMD manager-log"
+            if grep -q "result=success" "$STATUS_FILE"; then
+                return 0
+            fi
+            return 1
+        fi
+
         echo "启动失败，请查看：$MANAGER_LOG"
         rm -f "$PID_FILE"
         return 1
@@ -135,12 +186,14 @@ start_job() {
 
     echo "批处理管理器已启动"
     echo "PID          : $pid"
+    echo "数据目录     : $DATA_DIR"
+    echo "软件目录     : $SCRIPT_DIR"
     echo
-    echo "状态         : $0 status"
-    echo "当前日志     : $0 log"
+    echo "状态         : $CMD status"
+    echo "当前日志     : $CMD log"
     echo "上一轮日志   : $PREV_LOG_FILE"
-    echo "调度器日志   : $0 manager-log"
-    echo "停止         : $0 stop"
+    echo "调度器日志   : $CMD manager-log"
+    echo "停止         : $CMD stop"
 }
 
 
@@ -279,7 +332,7 @@ case "${1:-start}" in
         ;;
 
     *)
-        echo "用法：$0 {start|status|stop|restart|log|previous-log|manager-log}"
+        echo "用法：$CMD {start|status|stop|restart|log|previous-log|manager-log}"
         echo
         echo "  start        启动一次 batch_generate.py；成功或失败后自动退出"
         echo "  status       查看运行状态"
@@ -288,6 +341,9 @@ case "${1:-start}" in
         echo "  log          实时查看当前轮日志"
         echo "  previous-log 查看上一轮日志"
         echo "  manager-log  实时查看调度器日志"
+        echo
+        echo "数据目录：$DATA_DIR（设 BATCH_DATA_DIR 可指向其他数据文件夹，"
+        echo "或直接用数据文件夹里的 manage.sh wrapper）"
         exit 2
         ;;
 esac
