@@ -122,18 +122,17 @@ def is_leaf_structure_dir(p: Path) -> bool:
     判断是否是结构目录，例如:
         data/300K/5_5/DV_DV
 
-    支持两种情况：
+    支持三种情况：
     1. dump 直接在结构目录下
     2. dump 在结构目录/lammps 下
+    3. dump 已在 DPNEGF 全部成功后被 remove_lammps_dump_files 清理，
+       但 dpnegf/ 输入目录仍在（已完成 replica 重跑时靠此识别，
+       后续由 sub_dpnegf 的 done+provenance 校验跳过）
     """
     if not p.is_dir():
         return False
 
     if p.name in {"dpnegf", "lammps"}:
-        return False
-
-    # 排除 dpnegf 工作目录（只检查直接目录名，避免误伤包含 dpnegf 的父路径）
-    if p.name == "dpnegf":
         return False
 
     # 情况 1：dump 直接在结构目录下
@@ -143,6 +142,10 @@ def is_leaf_structure_dir(p: Path) -> bool:
     # 情况 2：dump 在结构目录/lammps 下
     lammps_dir = p / "lammps"
     if has_dump_files(lammps_dir):
+        return True
+
+    # 情况 3：dump 已清理，DPNEGF 输入目录仍在
+    if (p / "dpnegf").is_dir():
         return True
 
     return False
@@ -706,6 +709,13 @@ def main():
             dump_root = lammps_dir
         else:
             dump_root = struct_dir
+
+        # 已完成 replica 重跑：dump 已被 remove_lammps_dump_files 清理，
+        # 结构目录是凭 dpnegf/ 目录识别出来的（is_leaf_structure_dir 情况 3），
+        # 其 DPNEGF 输入已就绪，跳过 dump -> fdf。
+        if not has_dump_files(dump_root):
+            L.skip(f"无 dump 文件（DPNEGF 输入已存在），跳过 dump->fdf: {struct_dir}")
+            continue
 
         if lammps_mode == "opt":
             # 几何优化产物是 optimization.dump / optimized.dump，
