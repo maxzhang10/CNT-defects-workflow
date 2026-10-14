@@ -47,6 +47,46 @@ def _write_batch(tmp_path, configs):
 def test_uc_length_matches_known_value():
     assert bc.uc_length(13, 1) == pytest.approx(UC_13_1, abs=1e-6)
     assert bc.uc_length(9, 9) == pytest.approx(2.459512, abs=1e-6)
+    # 锯齿管 (9,0)：T = 3*1.42*9/9 = 4.26 Å
+    assert bc.uc_length(9, 0) == pytest.approx(4.26, abs=1e-6)
+
+
+def test_zigzag_chirality_n_zero_allowed(tmp_path):
+    """锯齿管 (m, 0) 合法：n 允许为 0，只有 m 必须为正。"""
+    path = _write_batch(
+        tmp_path,
+        [
+            {
+                "chirality": [9, 0],
+                "length_angstrom": 51.12,
+                "N_defects": 2,
+                "structures": ["MVH"],
+                "replicas": 2,
+            }
+        ],
+    )
+    cfg = bc.load(path)["configs"][0]
+    assert cfg["m"] == 9 and cfg["n"] == 0
+    # 51.12 / 4.26 = 12 -> l_def=12
+    assert cfg["l_def"] == 12
+    assert cfg["N_defects"] == 2
+
+    # 非法值仍然报错：m=0 / n 为负
+    for bad_chirality in ([0, 0], [9, -1]):
+        path2 = _write_batch(
+            tmp_path,
+            [
+                {
+                    "chirality": bad_chirality,
+                    "l_def": 12,
+                    "N_defects": 2,
+                    "structures": ["MVH"],
+                    "replicas": 2,
+                }
+            ],
+        )
+        with pytest.raises(bc.BatchConfigError, match="chirality"):
+            bc.load(path2)
 
 
 def test_plan_b_length_only(tmp_path):

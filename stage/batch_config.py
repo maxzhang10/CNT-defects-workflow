@@ -283,16 +283,19 @@ def validate_config_entry(entry, index, path):
         _fail(path, f"configs[{index}] 缺少必需字段: {', '.join(missing)}")
 
     chirality = entry["chirality"]
+    # 手性约定 m>=n>=0（锯齿管 n=0 合法），只有 m 必须为正整数。
     if (
         not isinstance(chirality, list)
         or len(chirality) != 2
-        or not all(isinstance(x, int) and not isinstance(x, bool) and x > 0
+        or not all(isinstance(x, int) and not isinstance(x, bool)
                    for x in chirality)
+        or chirality[0] < 1
+        or chirality[1] < 0
     ):
         _fail(
             path,
-            f"configs[{index}].chirality 必须为两个正整数，如 [5, 5]，"
-            f"当前值: {chirality!r}",
+            f"configs[{index}].chirality 必须为 [正整数, 非负整数]，"
+            f"如 [5, 5] 或 [9, 0]，当前值: {chirality!r}",
         )
     m, n = chirality
 
