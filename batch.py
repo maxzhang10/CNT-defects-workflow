@@ -43,6 +43,19 @@ template = {
 # 每个物理配置显式声明自己的 replicas（必填）。
 # 示例：三个散射区长度，短管 20 个 replica，长管 40 个。
 # F = 2*m + n = 27; l_def = scattering-region UC count
+#
+# Plan B：不写 l_def/N_defects，改给目标长度(Å)与缺陷密度(Å^-1)，
+# 加载时按手性 UC 长度 round 到最近整数（两维度可各自混搭）：
+#     {
+#         "m": 13, "n": 1,
+#         "buffer_pl": 4,
+#         "length_angstrom": 230.0,      # -> l_def=12 (实际 230.5 Å, +0.2%)
+#         "defect_density": 4/230.5128,  # -> N_defects=4
+#         "structures": ["MVH"],
+#         "replicas": 60,
+#     }
+# 启动时打印解析表（目标值/解析结果/取整误差），并写入 record.log
+# 批次启动段；解析结果与手写完全等价（同目录、同 seed、同 provenance）。
 CHIRAL_CONFIGS = [
     # (13, 1): UC = 19.209404 Å, 244 C/UC
     *[

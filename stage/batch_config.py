@@ -41,6 +41,28 @@ batch.json —— 简单配置、工具生成时使用：
   ]
 }
 
+Plan B：长度 + 缺陷密度（替代手写 l_def / N_defects）
+------------------------------------------------------
+每个 config 的两个维度可以分别二选一（同维度两个都写或都不写即报错）：
+
+    长度维度：l_def（UC 数）        或 length_angstrom（目标散射区长度/Å）
+    缺陷维度：N_defects（缺陷数）   或 defect_density（目标缺陷密度/Å⁻¹）
+
+校验时按手性的 UC 长度 T 把目标值确定性 round 到最近整数：
+
+    l_def     = max(1, round(length_angstrom / T))     实际长度  L = l_def·T
+    N_defects = max(1, round(defect_density · L))      实际密度  ρ = N_defects/L
+
+round 用 int(x + 0.5)（正数四舍五入，无 banker's rounding 歧义）。
+两个维度可混搭，例如 "l_def": 12, "defect_density": 0.017 表示定长
+12 UC、由密度反推缺陷数。解析结果与手写 l_def/N_defects 完全等价：
+length_angstrom / defect_density 不进入下游 workflow config 与
+provenance hash，等价手写配置复用同一目录与 seed。
+
+解析表由 format_resolution_table(configs) 生成，batch_generate 在
+加载配置后打印到 stdout（随 manage_batch.sh 重定向进
+batch_generate.log），并写入 record.log 每个批次启动段。
+
 按手性自能缓存（self_energy_cache）
 ----------------------------------
 电极自能只依赖手性，与缺陷类型 / 散射区长度 / replica 无关，
@@ -126,13 +148,46 @@ DEFAULT_TEMPLATE = {
 
 LAMMPS_MODES = ("md", "opt")
 
+# l_def / N_defects 不再无条件必填：Plan B 允许分别用
+# length_angstrom / defect_density 替代（见 validate_config_entry）。
 _REQUIRED_CONFIG_KEYS = (
     "chirality",
-    "l_def",
-    "N_defects",
     "structures",
     "replicas",
 )
+
+
+def uc_length(m, n, bond_angstrom=1.42):
+    """
+    最小 UC 轴向长度/Å：3·bond·√(m²+mn+n²) / gcd(2m+n, 2n+m)。
+
+    与 stage/cnt_geometry.calculate_unit_cell_length 同公式
+    （根号3 倍键长的石墨烯晶格常数），这里用纯 math 重写，
+    batch_config 保持只依赖 json/math/pathlib。
+    """
+    return (
+        3.0
+        * float(bond_angstrom)
+        * math.sqrt(m * m + m * n + n * n)
+        / math.gcd(2 * m + n, 2 * n + m)
+    )
+
+
+def _round_positive(x):
+    """正数四舍五入到整数（不用 round()，避免 banker's rounding 歧义）。"""
+    return int(x + 0.5)
+
+
+def _require_positive_finite(value, name, path):
+    """Plan B 目标值（length_angstrom / defect_density）为有限正数。"""
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(value)
+        or value <= 0
+    ):
+        _fail(path, f"{name} 必须为有限正数，当前值: {value!r}")
+    return float(value)
 
 
 class BatchConfigError(ValueError):
@@ -241,7 +296,49 @@ def validate_config_entry(entry, index, path):
         )
     m, n = chirality
 
-    l_def = _require_int(entry["l_def"], f"configs[{index}].l_def", path)
+    # Plan B：长度维度 l_def / length_angstrom 二选一，
+    # 缺陷维度 N_defects / defect_density 二选一，可跨维度混搭。
+    # 目标值确定性 round 到最近整数，解析结果与手写完全等价。
+    has_l_def = "l_def" in entry
+    has_length = "length_angstrom" in entry
+    if has_l_def == has_length:
+        _fail(
+            path,
+            f"configs[{index}] 长度维度必须且只能提供 "
+            f"l_def / length_angstrom 之一",
+        )
+    has_n_defects = "N_defects" in entry
+    has_density = "defect_density" in entry
+    if has_n_defects == has_density:
+        _fail(
+            path,
+            f"configs[{index}] 缺陷维度必须且只能提供 "
+            f"N_defects / defect_density 之一",
+        )
+
+    resolution = {}  # 记录目标值，供 format_resolution_table 打印
+    uc = uc_length(m, n)
+
+    if has_length:
+        target_length = _require_positive_finite(
+            entry["length_angstrom"], f"configs[{index}].length_angstrom", path
+        )
+        l_def = max(1, _round_positive(target_length / uc))
+        resolution["length_angstrom"] = target_length
+    else:
+        l_def = _require_int(entry["l_def"], f"configs[{index}].l_def", path)
+
+    actual_length = l_def * uc
+    if has_density:
+        target_density = _require_positive_finite(
+            entry["defect_density"], f"configs[{index}].defect_density", path
+        )
+        n_defects = max(1, _round_positive(target_density * actual_length))
+        resolution["defect_density"] = target_density
+    else:
+        n_defects = _require_int(
+            entry["N_defects"], f"configs[{index}].N_defects", path
+        )
     buffer_pl = entry.get("buffer_pl")
     if buffer_pl is not None:
         buffer_pl = _require_int(
@@ -256,9 +353,6 @@ def validate_config_entry(entry, index, path):
     ele_T = entry.get("ele_T")
     if ele_T is not None:
         ele_T = _require_ele_T(ele_T, f"configs[{index}].ele_T", path)
-    n_defects = _require_int(
-        entry["N_defects"], f"configs[{index}].N_defects", path
-    )
 
     structures = entry["structures"]
     if (
@@ -289,6 +383,11 @@ def validate_config_entry(entry, index, path):
     out = dict(entry)
     out["m"] = m
     out["n"] = n
+    # Plan B 目标值不进下游 workflow config / provenance hash：
+    # 解析后的 l_def / N_defects 与手写完全等价。
+    out.pop("length_angstrom", None)
+    out.pop("defect_density", None)
+    out["_resolution"] = resolution
     out["l_def"] = l_def
     out["buffer_pl"] = buffer_pl
     out["release_uc"] = release_uc
@@ -488,6 +587,46 @@ def load_batch_py(path):
     if "configs" not in raw and "CHIRAL_CONFIGS" in raw:
         raw["configs"] = raw.pop("CHIRAL_CONFIGS")
     return _validate_batch(raw, path)
+
+
+def format_resolution_table(configs):
+    """
+    把 Plan B 解析结果格式化成对照表（多行字符串）。
+
+    只列出用了 length_angstrom / defect_density 的 config；纯手写
+    l_def/N_defects 的批次返回 None（调用方跳过打印）。
+    """
+    rows = []
+    for cfg in configs:
+        resolution = cfg.get("_resolution") or {}
+        if not resolution:
+            continue
+        uc = uc_length(cfg["m"], cfg["n"])
+        actual_length = cfg["l_def"] * uc
+        actual_density = cfg["N_defects"] / actual_length
+        target_length = resolution.get("length_angstrom")
+        target_density = resolution.get("defect_density")
+        rows.append(
+            f"  ({cfg['m']},{cfg['n']}) UC={uc:.4f} Å: "
+            + (
+                f"长度 {target_length:.1f} Å -> l_def={cfg['l_def']}, "
+                f"实际 {actual_length:.1f} Å "
+                f"({(actual_length / target_length - 1) * 100:+.1f}%); "
+                if target_length is not None
+                else f"l_def={cfg['l_def']}（手写，{actual_length:.1f} Å）; "
+            )
+            + (
+                f"密度 {target_density:.6f} Å^-1 -> N_defects={cfg['N_defects']}, "
+                f"实际 {actual_density:.6f} Å^-1 "
+                f"({(actual_density / target_density - 1) * 100:+.1f}%)"
+                if target_density is not None
+                else f"N_defects={cfg['N_defects']}（手写，{actual_density:.6f} Å^-1）"
+            )
+        )
+    if not rows:
+        return None
+    header = "[INFO] Plan B 解析表（长度/密度 -> l_def/N_defects，round 到最近整数）:"
+    return "\n".join([header, *rows])
 
 
 def load(path):

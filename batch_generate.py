@@ -614,6 +614,11 @@ def main():
     batch = bc.load(config_arg)
     base_root = batch["data_root"]
 
+    # Plan B 解析表：纯手写 l_def/N_defects 的批次为 None，不打印。
+    resolution_table = bc.format_resolution_table(batch["configs"])
+    if resolution_table:
+        print(resolution_table)
+
     # 并发上限：CLI 显式指定优先，其次批配置 max_parallel，默认 16。
     # 是运行时参数，不影响任何 replica 的 seed / provenance。
     max_parallel = (
@@ -682,6 +687,9 @@ def main():
             f"({len(tasks)} tasks, "
             f"{len(total_by_config)} configurations) =====\n"
         )
+        # Plan B 解析表随批次启动段存档，事后可追溯当时的取整结果
+        if resolution_table:
+            f.write(resolution_table + "\n")
 
     print(f"[INFO] record.log: {record_log}")
 
