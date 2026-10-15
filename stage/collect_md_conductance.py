@@ -1549,6 +1549,7 @@ def main() -> int:
         )
         consistency_keys = (
             "chirality",
+            "uc_sha256",
             "l_def",
             "structures",
             "temperature",

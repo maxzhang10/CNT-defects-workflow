@@ -1,10 +1,12 @@
 from ase.build import nanotube
 import numpy as np
 from ase.build import sort
+from ase.io import read as ase_read
 import math
 from math import gcd
 
 import logkit as L
+from uc_source import read_poscar_metadata
 
 def clean_cnt_by_shift_wrap_anchor(tube, z_shift=0.1, anchor_index=0):
     """
@@ -51,7 +53,20 @@ def clean_cnt_by_shift_wrap_anchor(tube, z_shift=0.1, anchor_index=0):
     return tube
 
 #构建 CNT 的函数，输入参数为 m、n、单元格数量和真空层厚度，输出为构建好的 C NT 结构。
-def build_unit_cnt(m, n,vacuum=10.0):
+def build_unit_cnt(m, n,vacuum=10.0, uc_file=None, uc_sha256=None):
+    if uc_file is not None:
+        meta = read_poscar_metadata(uc_file)
+        if uc_sha256 is not None and meta["sha256"] != uc_sha256:
+            raise ValueError(f"UC 文件内容在批配置加载后发生变化: {uc_file}")
+        expected_atoms = calculate_atom_count(m, n, 1)
+        tube = ase_read(uc_file, format="vasp")
+        if len(tube) != expected_atoms or set(tube.get_chemical_symbols()) != {"C"}:
+            raise ValueError(
+                f"外部 ({m},{n}) UC 必须有 {expected_atoms} 个 C 原子: {uc_file}"
+            )
+        if not np.isclose(tube.cell[2, 2], meta["length_angstrom"], atol=1e-6):
+            raise ValueError(f"外部 UC 的轴向晶格常数不一致: {uc_file}")
+        return tube
     tube = nanotube(m, n, 1)
     tube.center(vacuum=vacuum, axis=(0, 1))
 
@@ -184,8 +199,17 @@ def fixed_atoms_per_side(m, n, l_PL, N_uc, buffer_pl=None, release_uc=RELEASE_UC
     return n_fix_uc * N_uc
 
 
-def geo_info(m, n, r_max, l_def, buffer_pl=None):
-    T = calculate_unit_cell_length(m, n)
+def geo_info(m, n, r_max, l_def, buffer_pl=None, uc_file=None, uc_sha256=None):
+    if uc_file is not None:
+        meta = read_poscar_metadata(uc_file)
+        if uc_sha256 is not None and meta["sha256"] != uc_sha256:
+            raise ValueError(f"UC 文件内容在批配置加载后发生变化: {uc_file}")
+        T = meta["length_angstrom"]
+        expected_atoms = calculate_atom_count(m, n, 1)
+        if meta["atom_count"] != expected_atoms:
+            raise ValueError(f"外部 UC 原子数应为 {expected_atoms}: {uc_file}")
+    else:
+        T = calculate_unit_cell_length(m, n)
     N_uc = calculate_atom_count(m, n, 1)
     l_PL = math.floor(r_max / T) + 1
 
@@ -207,7 +231,8 @@ def geo_info(m, n, r_max, l_def, buffer_pl=None):
 
 
 def describe_structure(m, n, r_max, l_def, buffer_pl=None,
-                       release_uc=RELEASE_UC_PER_SIDE):
+                       release_uc=RELEASE_UC_PER_SIDE, uc_file=None,
+                       uc_sha256=None):
     """
     返回结构构成的可读摘要，用于 workflow.log 开头，便于核对
     DPNEGF 电极 / 输运区划分是否正确。
@@ -231,7 +256,9 @@ def describe_structure(m, n, r_max, l_def, buffer_pl=None,
       "composition_atoms": "336C(左电极) + 616C(左缓冲固定) + 56C(左缓冲放开) + 280C(输运区,含5uc缺陷带) + 56C(右缓冲放开) + 616C(右缓冲固定) + 336C(右电极)",
     }
     """
-    T, N_uc, l_PL, length = geo_info(m, n, r_max, l_def, buffer_pl)
+    T, N_uc, l_PL, length = geo_info(
+        m, n, r_max, l_def, buffer_pl, uc_file, uc_sha256
+    )
     n_fix = fixed_pl_per_side(m, n, buffer_pl)
     buffer_pl = n_fix - 2          # 加厚缓冲层的 PL 数（不含 2PL 电极）
     kind = "金属管" if is_metallic(m, n) else "半导体管"

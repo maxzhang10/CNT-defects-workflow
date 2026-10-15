@@ -37,6 +37,7 @@ from typing import Any, Mapping
 # 参数外置，故 espacing / negf_energy_window 不再纳入 hash。
 NEGF_CONFIG_KEYS = (
     "chirality",
+    "uc_sha256",
     "l_def",
     "N_defects",
     "structures",

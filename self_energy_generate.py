@@ -16,6 +16,8 @@ CHIRAL_CONFIGS = [
     {
         "m": 11,
         "n": 0,
+        # 可选："uc_file": "uc_library/{chirality}/POSCAR"；与批次共用
+        # 同一份已优化 UC，独立于下面的电子温度 ele_T。
         "l_def": 3,
         "N_defects": 0,
         "structures": ["5775"]
@@ -101,6 +103,7 @@ def make_folder_name(
     structures,
     l_def,
     density,
+    uc_sha256=None,
 ):
     """
     生成与 ele_multi_defects_ele.py 完全一致的目录名。
@@ -116,11 +119,12 @@ def make_folder_name(
         for item in structures
     )
 
-    return (
+    name = (
         f"{type_name}"
         f"_L{int(l_def):03d}"
         f"_{float(density):.4f}A-1"
     )
+    return name + (f"_UC{uc_sha256[:12]}" if uc_sha256 else "")
 
 
 def build_tasks(
@@ -164,6 +168,22 @@ def build_tasks(
 
             m = int(cfg["m"])
             n = int(cfg["n"])
+            uc_file = cfg.get("uc_file", TEMPLATE.get("uc_file"))
+            uc_sha256 = None
+            if uc_file is not None:
+                from uc_source import read_poscar_metadata
+                uc_file = uc_file.format(m=m, n=n, chirality=f"{m}_{n}")
+                uc_path = Path(uc_file).expanduser()
+                if not uc_path.is_absolute():
+                    uc_path = Path(__file__).resolve().parent / uc_path
+                uc_meta = read_poscar_metadata(uc_path)
+                expected_atoms = cnt_geometry.calculate_atom_count(m, n, 1)
+                if uc_meta["atom_count"] != expected_atoms:
+                    raise ValueError(
+                        f"外部 ({m},{n}) UC 原子数应为 {expected_atoms}: {uc_path}"
+                    )
+                uc_file = uc_meta["path"]
+                uc_sha256 = uc_meta["sha256"]
 
             has_l_def = "l_def" in cfg
             has_target_length = "length_angstrom" in cfg
@@ -182,7 +202,11 @@ def build_tasks(
                     "length_angstrom",
                     "CHIRAL_CONFIGS",
                 )
-                l_def = max(1, bc._round_positive(target_length / bc.uc_length(m, n)))
+                uc_length = (
+                    uc_meta["length_angstrom"]
+                    if uc_file is not None else bc.uc_length(m, n)
+                )
+                l_def = max(1, bc._round_positive(target_length / uc_length))
 
             has_n_defects = "N_defects" in cfg
             has_target_density = "defect_density" in cfg
@@ -231,7 +255,8 @@ def build_tasks(
                     ele_T, "ele_T", "CHIRAL_CONFIGS"
                 )
             se_cache = bc.resolve_self_energy_cache(
-                se_cache_raw, m=m, n=n, data_root=base_root
+                se_cache_raw, m=m, n=n, data_root=base_root,
+                uc_sha256=uc_sha256, ele_T=ele_T,
             )
 
             # 必须使用与结构生成脚本相同的 geo_info，
@@ -242,6 +267,8 @@ def build_tasks(
                 float(TEMPLATE["r_max"]),
                 l_def,
                 buffer_pl,
+                uc_file,
+                uc_sha256,
             )
 
             actual_length = l_def * T
@@ -273,6 +300,7 @@ def build_tasks(
                 structures=structures,
                 l_def=l_def,
                 density=configuration_density,
+                uc_sha256=uc_sha256,
             )
 
             # 每个 replica 使用独立的缺陷结构 seed，
@@ -336,6 +364,8 @@ def build_tasks(
                     "l_def": l_def,
                     "buffer_pl": buffer_pl,
                     "N_defects": n_defects,
+                    "uc_file": uc_file,
+                    "uc_sha256": uc_sha256,
                     "defect_count_mode": defect_count_mode,
                     "target_defect_density": target_density,
                     "expected_defects_per_replica": expected_defects,
@@ -421,6 +451,9 @@ def make_task_config(task):
         config["target_defect_density_A_inv"] = task[
             "target_defect_density"
         ]
+    if task["uc_file"] is not None:
+        config["uc_file"] = task["uc_file"]
+        config["uc_sha256"] = task["uc_sha256"]
 
     # ele_T 仅在显式设置时写入 config：None 表示沿用 DPNEGF input.json
     # 模板值；不写入键可保证未设置时 provenance hash 与旧版一致。

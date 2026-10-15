@@ -601,12 +601,17 @@ def main():
         release_uc=config.get(
             "release_uc", cnt_geometry.RELEASE_UC_PER_SIDE
         ),
+        uc_file=config.get("uc_file"),
+        uc_sha256=config.get("uc_sha256"),
     )
     L.phase(0, 7, "结构构成摘要")
     L.info(f"  手性/类型       : {info['chirality']}  ({info['kind']})")
     L.info(f"  总构成          : {info['composition']}")
     L.info(f"  原子构成        : {info['composition_atoms']}")
     L.info(f"  单胞长度 T      : {info['T_A']} Å")
+    if config.get("uc_file"):
+        L.info(f"  外部 UC         : {config['uc_file']}")
+        L.info(f"  UC SHA-256      : {config.get('uc_sha256')}")
     L.info(f"  单胞原子数 N_uc : {info['N_uc']}")
     L.info(f"  每个 PL 含 uc   : {info['l_PL_uc']}")
     L.info(f"  每侧缓冲层      : {info['buffer_pl']} PL  "

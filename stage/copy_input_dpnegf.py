@@ -139,6 +139,8 @@ def update_input_json_for_leaf(
     l_def=5,
     buffer_pl=None,
     ele_T=None,
+    uc_file=None,
+    uc_sha256=None,
 ):
     leaf_dir = Path(leaf_dir).resolve()
 
@@ -154,7 +156,7 @@ def update_input_json_for_leaf(
     m, n = chirality
 
     T, N_uc, l_PL, length = cnt_geometry.geo_info(
-        m, n, r_max, l_def, buffer_pl
+        m, n, r_max, l_def, buffer_pl, uc_file, uc_sha256
     )
 
     # Keep the lead sampling density roughly constant across chiralities:
@@ -322,6 +324,8 @@ def copy_inputs_to_leaf_dirs(
     overwrite=True,
     negf_config_hash=None,
     ele_T=None,
+    uc_file=None,
+    uc_sha256=None,
 ):
     input_dir = Path(input_dir).resolve()
     root_dir = Path(root_dir).resolve()
@@ -389,6 +393,8 @@ def copy_inputs_to_leaf_dirs(
                 l_def=l_def,
                 buffer_pl=buffer_pl,
                 ele_T=ele_T,
+                uc_file=uc_file,
+                uc_sha256=uc_sha256,
             )
 
             n_success += 1
@@ -563,6 +569,8 @@ def main():
         conductance_mu=conductance_mu,
         negf_config_hash=compute_negf_config_hash(config),
         ele_T=ele_T,
+        uc_file=config.get("uc_file"),
+        uc_sha256=config.get("uc_sha256"),
     )
 
     if n_failed > 0:

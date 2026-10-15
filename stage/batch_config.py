@@ -14,6 +14,7 @@ batch.json —— 简单配置、工具生成时使用：
     "r_max": 6.5,
     "md_steps": 50000,
     "defect_count_mode": "same_count",
+    "uc_file": null,        # 可选：外部单 UC POSCAR，路径相对批配置
     "save_self_energy": false,
     "self_energy_cache": {"use_saved": true, "save_path": "./self_energy/"},
     "md_sampling": {"n_samples": 1}
@@ -76,8 +77,8 @@ batch_generate.log），并写入 record.log 每个批次启动段。
 
 按手性自能缓存（self_energy_cache）
 ----------------------------------
-电极自能只依赖手性，与缺陷类型 / 散射区长度 / replica 无关，
-因此同一手性的所有任务可以共享一份自能缓存文件。
+同一电极结构在相同电子参数下的自能与散射区缺陷类型 / 长度 /
+replica 无关。若使用外部 UC，共享缓存还必须区分 UC 内容和 ele_T。
 
 template.self_energy_cache 是全局默认；任一 config 可用同名键覆盖。
 save_path 支持以下占位符，在任务展开时解析：
@@ -85,6 +86,8 @@ save_path 支持以下占位符，在任务展开时解析：
     {m} {n}       手性指数
     {chirality}   "m_n" 形式（如 13_1）
     {data_root}   批次数据根目录（已解析为绝对路径）
+    {uc_sha256}   外部 UC 文件哈希；ASE 模式为 "ase"
+    {ele_T}       显式电子温度；未设置时为 "template"
 
 相对路径保持相对语义（DPNEGF 按各 leaf 工作目录解析，即每个 leaf
 一份独立缓存）；要跨 leaf / 跨 replica 共享，用 {data_root} 组成
@@ -139,6 +142,8 @@ import json
 import math
 from pathlib import Path
 
+from uc_source import read_poscar_metadata
+
 
 # template 层的公共物理默认值。旧版硬编码在 batch_generate.py 的
 # TEMPLATE 全局常量中；JSON 的 template 字段可逐项覆盖。
@@ -151,6 +156,7 @@ DEFAULT_TEMPLATE = {
     # defect_density -> N_defects 的 replica 分配方式。same_count 保持
     # 旧行为；balanced_count 在整个 replica ensemble 上逼近目标密度。
     "defect_count_mode": "same_count",
+    "uc_file": None,
     "save_self_energy": False,
     "self_energy_cache": {
         "use_saved": True,
@@ -290,11 +296,13 @@ def _validate_self_energy_cache(cache, name, path):
     return {"use_saved": use_saved, "save_path": save_path}
 
 
-def resolve_self_energy_cache(cache, *, m, n, data_root):
+def resolve_self_energy_cache(cache, *, m, n, data_root,
+                              uc_sha256=None, ele_T=None):
     """
     解析 self_energy_cache.save_path 中的按手性占位符。
 
-    支持的占位符：{m} {n} {chirality}（"m_n" 形式）{data_root}。
+    支持的占位符：{m} {n} {chirality}（"m_n" 形式）{data_root}
+    {uc_sha256} {ele_T}。
     其余字段（use_saved）原样保留。相对路径不改动，保持 DPNEGF
     按 leaf 工作目录解析的语义。
     """
@@ -303,17 +311,31 @@ def resolve_self_energy_cache(cache, *, m, n, data_root):
     resolved = dict(cache)
     save_path = resolved.get("save_path")
     if isinstance(save_path, str):
+        if uc_sha256 is not None:
+            shared = save_path.startswith("{data_root}") or Path(save_path).is_absolute()
+            if shared and ("{uc_sha256}" not in save_path or "{ele_T}" not in save_path):
+                raise BatchConfigError(
+                    "外部 UC 使用共享自能缓存时，save_path 必须包含 "
+                    "{uc_sha256} 和 {ele_T}，避免复用不同结构或电子温度的自能"
+                )
+            if shared and ele_T is None:
+                raise BatchConfigError(
+                    "外部 UC 使用共享自能缓存时请显式设置 ele_T"
+                )
         try:
             resolved["save_path"] = save_path.format(
                 m=int(m),
                 n=int(n),
                 chirality=f"{int(m)}_{int(n)}",
                 data_root=str(data_root),
+                uc_sha256=uc_sha256 or "ase",
+                ele_T=f"{float(ele_T):g}" if ele_T is not None else "template",
             )
         except KeyError as exc:
             raise BatchConfigError(
                 f"self_energy_cache.save_path 含未知占位符 {exc}；"
-                "仅支持 {{m}} {{n}} {{chirality}} {{data_root}}，"
+                "仅支持 {{m}} {{n}} {{chirality}} {{data_root}} "
+                "{{uc_sha256}} {{ele_T}}，"
                 f"当前值: {save_path!r}"
             )
     return resolved
@@ -324,6 +346,7 @@ def validate_config_entry(
     index,
     path,
     default_defect_count_mode="same_count",
+    default_uc_file=None,
 ):
     """校验单个物理配置条目，返回补齐 chirality 后的新 dict。"""
     if not isinstance(entry, dict):
@@ -400,7 +423,31 @@ def validate_config_entry(
         )
 
     resolution = {}  # 记录目标值，供 format_resolution_table 打印
-    uc = uc_length(m, n)
+    uc_file = entry.get("uc_file", default_uc_file)
+    uc_sha256 = None
+    if uc_file is not None:
+        if not isinstance(uc_file, str) or not uc_file:
+            _fail(path, f"configs[{index}].uc_file 必须为非空 POSCAR 路径")
+        try:
+            uc_file = uc_file.format(m=m, n=n, chirality=f"{m}_{n}")
+        except (KeyError, ValueError, AttributeError) as exc:
+            _fail(path, f"configs[{index}].uc_file 占位符无效: {exc}")
+        uc_path = Path(uc_file).expanduser()
+        if not uc_path.is_absolute():
+            uc_path = path.parent / uc_path
+        try:
+            uc_meta = read_poscar_metadata(uc_path)
+        except (OSError, UnicodeError, ValueError) as exc:
+            _fail(path, f"configs[{index}].uc_file 无效: {exc}")
+        expected_atoms = 4 * (m * m + m * n + n * n) // math.gcd(2*m+n, 2*n+m)
+        if uc_meta["atom_count"] != expected_atoms:
+            _fail(path, f"configs[{index}].uc_file 应包含一个 ({m},{n}) UC 的 "
+                 f"{expected_atoms} 个 C 原子，实际 {uc_meta['atom_count']}")
+        uc_file = uc_meta["path"]
+        uc_sha256 = uc_meta["sha256"]
+        uc = uc_meta["length_angstrom"]
+    else:
+        uc = uc_length(m, n)
 
     if has_length:
         target_length = _require_positive_finite(
@@ -483,6 +530,9 @@ def validate_config_entry(
     out["ele_T"] = ele_T
     out["N_defects"] = n_defects
     out["defect_count_mode"] = defect_count_mode
+    out["uc_file"] = uc_file
+    out["uc_sha256"] = uc_sha256
+    out["uc_length_angstrom"] = uc
     out["structures"] = list(structures)
     out["conductance_mode"] = conductance_mode
     # replicas 是每个物理配置的必填显式字段（不接受全局默认），
@@ -617,6 +667,7 @@ def _validate_batch(raw, path):
             i,
             path,
             default_defect_count_mode=template["defect_count_mode"],
+            default_uc_file=template["uc_file"],
         )
         for i, entry in enumerate(configs_raw)
     ]
@@ -699,7 +750,7 @@ def format_resolution_table(configs):
         resolution = cfg.get("_resolution") or {}
         if not resolution:
             continue
-        uc = uc_length(cfg["m"], cfg["n"])
+        uc = cfg.get("uc_length_angstrom") or uc_length(cfg["m"], cfg["n"])
         actual_length = cfg["l_def"] * uc
         target_length = resolution.get("length_angstrom")
         target_density = resolution.get("defect_density")

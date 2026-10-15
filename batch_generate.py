@@ -77,7 +77,7 @@ class ProgressRecorder:
                 f.write(line)
 
 
-def make_folder_name(structures, l_def, density):
+def make_folder_name(structures, l_def, density, uc_sha256=None):
     """
     生成与 ele_multi_defects_ele.py 完全一致的目录名。
 
@@ -92,11 +92,12 @@ def make_folder_name(structures, l_def, density):
         for item in structures
     )
 
-    return (
+    name = (
         f"{type_name}"
         f"_L{int(l_def):03d}"
         f"_{float(density):.4f}A-1"
     )
+    return name + (f"_UC{uc_sha256[:12]}" if uc_sha256 else "")
 
 
 def build_tasks(batch, base_root):
@@ -158,6 +159,8 @@ def build_tasks(batch, base_root):
                 float(template["r_max"]),
                 l_def,
                 buffer_pl,
+                cfg.get("uc_file"),
+                cfg.get("uc_sha256"),
             )
 
             actual_length = l_def * T
@@ -190,6 +193,7 @@ def build_tasks(batch, base_root):
                 structures=structures,
                 l_def=l_def,
                 density=configuration_density,
+                uc_sha256=cfg.get("uc_sha256"),
             )
 
             # 每个 replica 使用独立的缺陷结构 seed，
@@ -267,6 +271,8 @@ def build_tasks(batch, base_root):
                     "release_uc": release_uc,
                     "ele_T": ele_T,
                     "N_defects": n_defects,
+                    "uc_file": cfg.get("uc_file"),
+                    "uc_sha256": cfg.get("uc_sha256"),
                     "defect_count_mode": defect_count_mode,
                     "target_defect_density": target_density,
                     "expected_defects_per_replica": expected_defects,
@@ -300,6 +306,8 @@ def build_tasks(batch, base_root):
                         m=m,
                         n=n,
                         data_root=base_root,
+                        uc_sha256=cfg.get("uc_sha256"),
+                        ele_T=ele_T,
                     ),
                     "conductance_mode": bc.conductance_mode_for_chirality(m, n),
                 })
@@ -361,6 +369,10 @@ def make_task_config(task, batch):
             "mu": mu_labels,
         },
     })
+
+    if task["uc_file"] is not None:
+        config["uc_file"] = task["uc_file"]
+        config["uc_sha256"] = task["uc_sha256"]
 
     if (
         task["defect_count_mode"] == "balanced_count"

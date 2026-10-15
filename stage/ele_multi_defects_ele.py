@@ -231,9 +231,15 @@ def main():
         r_max,
         l_def,
         buffer_pl,
+        config.get("uc_file"),
+        config.get("uc_sha256"),
     )
 
-    tube_unit = cnt_geometry.build_unit_cnt(m, n, vacuum=50.0)
+    tube_unit = cnt_geometry.build_unit_cnt(
+        m, n, vacuum=50.0,
+        uc_file=config.get("uc_file"),
+        uc_sha256=config.get("uc_sha256"),
+    )
     tube_clean = cnt_geometry.clean_cnt_by_shift_wrap_anchor(tube_unit)
     tube = tube_clean * (1, 1, length)
     cnt_geometry.set_reference_cyl(tube)
@@ -356,6 +362,7 @@ def main():
         "target_defect_density_A_inv": config.get(
             "target_defect_density_A_inv"
         ),
+        "uc_sha256": config.get("uc_sha256"),
     }
     defects_json_path = structure_root / "defects.json"
     with open(defects_json_path, "w", encoding="utf-8") as f:
