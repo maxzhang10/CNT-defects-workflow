@@ -53,6 +53,7 @@ python batch_generate.py --config batch.json --scheduler slurm --max-parallel 2 
   "template": {
     "r_max": 6.5,
     "md_steps": 50000,
+    "defect_count_mode": "balanced_count",
     "save_self_energy": false,
     "self_energy_cache": {
       "use_saved": true,
@@ -68,10 +69,10 @@ python batch_generate.py --config batch.json --scheduler slurm --max-parallel 2 
   "configs": [
     {
       "chirality": [5, 5],
-      "l_def": 8,
-      "N_defects": 2,
+      "length_angstrom": 10.0,
+      "defect_density": 0.051210,
       "structures": ["5775"],
-      "replicas": 2
+      "replicas": 20
     }
   ]
 }
@@ -79,13 +80,40 @@ python batch_generate.py --config batch.json --scheduler slurm --max-parallel 2 
 
 说明：
 
-- `chirality`、`l_def`、`N_defects`、`structures`、`replicas` 是每个配置的必需字段；
+- `chirality`、`structures`、`replicas` 是每个配置的必需字段；长度维度必须从 `l_def` / `length_angstrom` 中选择一个，缺陷维度必须从 `N_defects` / `defect_density` 中选择一个；
 - `buffer_pl` 是每侧缓冲层厚度，单位为 PL，可在每个 `configs` 配置中单独指定；省略时沿用按手性选择的默认值（金属管 2 PL，半导体管 4 PL）；
 - `lammps_mode` 为 `opt`（结构优化）或 `md`（分子动力学）；
+- 使用 `defect_density` 时，`defect_count_mode` 可设为 `same_count` 或 `balanced_count`。缺省 `same_count` 保持旧行为：所有 replica 使用同一个四舍五入后的缺陷数（至少 1 个）；推荐的 `balanced_count` 在相邻两个整数间分配，使整个 replica ensemble 的平均密度逼近目标密度，并允许短管 replica 为 0 缺陷；
 - 电导模式由手性自动判断：`(m - n) % 3 == 0` 的金属管使用 `fermi`，其余半导体管使用 `band_edge_bias`；
 - 每个配置单独设置 `replicas`，不同长度可以使用不同 replica 数；
 - 两个 base seed 分别控制缺陷结构和 LAMMPS 轨迹。相同配置的 replica 序号会得到稳定的 seed；
 - `self_energy_cache.save_path` 支持 `{m}`、`{n}`、`{chirality}`、`{data_root}` 占位符。若多个 replica 共享自能，建议使用包含 `{data_root}` 的路径。
+
+### 长度、密度与缺陷数换算
+
+手性 `(m,n)` 的轴向 UC 长度及目标长度换算为：
+
+```text
+T = 3 × 1.42 × sqrt(m² + mn + n²) / gcd(2m+n, 2n+m)  Å
+l_def = max(1, floor(length_angstrom / T + 0.5))
+L_actual = l_def × T
+```
+
+取整采用正数 half-up，即 `11.5 → 12`、`12.5 → 13`，不使用 Python 的银行家舍入。`same_count` 使用：
+
+```text
+N_defects = max(1, floor(defect_density × L_actual + 0.5))
+```
+
+`balanced_count` 令 `λ = defect_density × L_actual = q + f`。第 `i` 个 replica（从 1 开始）的缺陷数为：
+
+```text
+N_i = q + floor(i × f + 0.5) - floor((i-1) × f + 0.5)
+```
+
+因此任意前 `R` 个 replica 的缺陷总数都等于 `floor(R × λ + 0.5)`。增加 `replicas` 只追加新任务，不会改变已有 replica 的缺陷数或 seed。每个 `workflow_config.json` 会记录该 replica 的实际 `N_defects`、实际密度、目标密度和 ensemble 密度；`replica_conductance.csv` 也保留每个 replica 的实际缺陷数。
+
+例如 `(5,5)`、目标长度 `10 Å`、目标密度 `0.051210 Å⁻¹` 会解析为 `l_def=4`、实际长度约 `9.838 Å`。20 个 replica 使用 `balanced_count` 时，10 个分配 0 个缺陷、10 个分配 1 个缺陷，ensemble 实际密度约为 `0.050823 Å⁻¹`；`same_count` 会让全部 replica 各有 1 个缺陷。
 
 需要循环、条件或批量生成多个配置时，可使用 `batch.py`。它必须导出与 `batch.json` 相同的配置字段，具体格式和校验规则见 `stage/batch_config.py` 顶部说明。
 

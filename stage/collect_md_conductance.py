@@ -121,6 +121,11 @@ class ReplicaResult:
     ln_Gv_G0: float | None = None
     fermi_difference_threshold: float | None = None
     censored: bool = False
+    defect_count_mode: str = "same_count"
+    target_defect_density_A_inv: float | None = None
+    actual_density_A_inv: float | None = None
+    ensemble_total_defects: int | None = None
+    ensemble_actual_density_A_inv: float | None = None
 
 
 @dataclass(frozen=True)
@@ -165,6 +170,12 @@ class ConfigurationSummary:
     fermi_difference_threshold: float | None = None
     missing_replica_ids: tuple[int, ...] = ()
     unexpected_replica_ids: tuple[int, ...] = ()
+    defect_count_mode: str = "same_count"
+    n_defects_min: int | None = None
+    n_defects_max: int | None = None
+    target_defect_density_A_inv: float | None = None
+    ensemble_total_defects: int | None = None
+    ensemble_actual_density_A_inv: float | None = None
 
 
 def info(message: str) -> None:
@@ -1047,6 +1058,19 @@ def build_replica_result(
         ln_Gv_G0=ln_gv,
         fermi_difference_threshold=threshold,
         censored=censored,
+        defect_count_mode=str(config.get("defect_count_mode", "same_count")),
+        target_defect_density_A_inv=optional_float(
+            config.get("target_defect_density_A_inv")
+        ),
+        actual_density_A_inv=optional_float(
+            config.get("actual_density_A_inv")
+        ),
+        ensemble_total_defects=optional_int(
+            config.get("ensemble_total_defects")
+        ),
+        ensemble_actual_density_A_inv=optional_float(
+            config.get("ensemble_actual_density_A_inv")
+        ),
     )
 
 
@@ -1192,6 +1216,19 @@ def summarize_configuration(
             "fermi_difference_threshold": first.fermi_difference_threshold,
         })
 
+    defect_counts = [
+        result.n_defects
+        for result in results
+        if result.n_defects is not None
+    ]
+    n_defects_min = min(defect_counts) if defect_counts else None
+    n_defects_max = max(defect_counts) if defect_counts else None
+    summary_n_defects = (
+        n_defects_min
+        if n_defects_min is not None and n_defects_min == n_defects_max
+        else None
+    )
+
     return ConfigurationSummary(
         configuration_dir=str(configuration_dir),
         configuration_name=configuration_dir.name,
@@ -1200,7 +1237,7 @@ def summarize_configuration(
         chirality_n=first.chirality_n,
         structures=first.structures,
         l_def=first.l_def,
-        n_defects=first.n_defects,
+        n_defects=summary_n_defects,
         density_A_inv=first.density_A_inv,
         expected_replicas=expected,
         valid_replicas=len(results) - n_censored,
@@ -1216,6 +1253,12 @@ def summarize_configuration(
         mean_ln_G0=mean_log,
         std_ln_G0=std_log,
         geometric_mean_G0=geometric_mean,
+        defect_count_mode=first.defect_count_mode,
+        n_defects_min=n_defects_min,
+        n_defects_max=n_defects_max,
+        target_defect_density_A_inv=first.target_defect_density_A_inv,
+        ensemble_total_defects=first.ensemble_total_defects,
+        ensemble_actual_density_A_inv=first.ensemble_actual_density_A_inv,
         **mode_values,
     )
 
@@ -1238,8 +1281,16 @@ def build_configuration_log(
         f"chirality: ({summary.chirality_m}, {summary.chirality_n})",
         f"structures: {summary.structures}",
         f"l_def: {summary.l_def}",
-        f"N_defects: {summary.n_defects}",
+        (
+            f"N_defects: {summary.n_defects}"
+            if summary.n_defects is not None
+            else f"N_defects: varies {summary.n_defects_min}..{summary.n_defects_max}"
+        ),
+        f"defect_count_mode: {summary.defect_count_mode}",
         f"density_A^-1: {summary.density_A_inv}",
+        f"target_defect_density_A^-1: {summary.target_defect_density_A_inv}",
+        f"ensemble_total_defects: {summary.ensemble_total_defects}",
+        f"ensemble_actual_density_A^-1: {summary.ensemble_actual_density_A_inv}",
         f"expected replicas: {summary.expected_replicas}",
         f"valid replicas: {summary.valid_replicas}",
         f"missing/failed replicas: {summary.missing_or_failed_replicas}",
@@ -1283,6 +1334,7 @@ def build_configuration_log(
             row = (
                 f"replica_{result.replica:03d}  "
                 f"seed={result.lammps_seed}  "
+                f"N_defects={result.n_defects}  "
                 f"Fermi G/G0={result.conductance_G0:.16g}  "
                 f"Fermi ln(G/G0)={result.ln_conductance_G0}  "
                 f"Gc/G0={result.Gc_G0:.16g}  Gv/G0={result.Gv_G0:.16g}  "
@@ -1292,6 +1344,7 @@ def build_configuration_log(
             row = (
                 f"replica_{result.replica:03d}  "
                 f"seed={result.lammps_seed}  "
+                f"N_defects={result.n_defects}  "
                 f"G/G0={result.conductance_G0:.16g}  "
                 f"ln={result.ln_conductance_G0}  "
                 f"file={result.result_file}"
@@ -1491,16 +1544,26 @@ def main() -> int:
         # 的结果合并成一组而不报错；此处显式拒绝。
         # Ec/Ev/Ef 不再作为外部参数存在于 workflow_config，而是由 DPNEGF
         # 计算后随结果文件输出，因此不参与一致性比较。
+        first_defect_count_mode = first_config.get(
+            "defect_count_mode", "same_count"
+        )
         consistency_keys = (
             "chirality",
             "l_def",
-            "N_defects",
             "structures",
             "temperature",
             "conductance_mode",
+            "defect_count_mode",
+            "density_A_inv",
+            "target_defect_density_A_inv",
+            "expected_defects_per_replica",
+            "ensemble_total_defects",
+            "ensemble_actual_density_A_inv",
             "espacing",
             "negf_energy_window",
         )
+        if first_defect_count_mode == "same_count":
+            consistency_keys += ("N_defects",)
         inconsistent_dirs = []
         for replica_dir in replica_dirs[1:]:
             replica_config = read_json(replica_dir / "workflow_config.json")

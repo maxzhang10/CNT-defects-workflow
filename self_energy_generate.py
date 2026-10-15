@@ -49,6 +49,9 @@ TEMPLATE = {
     "structures": ["5775"],
     "N_defects": 3,
     "l_def": 5,
+    # defect_density 接口的 replica 分配方式；显式 N_defects 时固定为
+    # same_count。该脚本当前的内置配置仍使用显式缺陷数。
+    "defect_count_mode": "same_count",
     "md_steps":0,
     # 每条独立 LAMMPS 轨迹只取最后一帧做 DPNEGF。
     "md_sampling": {
@@ -161,13 +164,64 @@ def build_tasks(
 
             m = int(cfg["m"])
             n = int(cfg["n"])
-            l_def = int(cfg["l_def"])
+
+            has_l_def = "l_def" in cfg
+            has_target_length = "length_angstrom" in cfg
+            if has_l_def == has_target_length:
+                raise ValueError(
+                    "CHIRAL_CONFIGS 中必须且只能设置 l_def 或 "
+                    "length_angstrom"
+                )
+            if has_l_def:
+                l_def = bc._require_int(
+                    cfg["l_def"], "l_def", "CHIRAL_CONFIGS"
+                )
+            else:
+                target_length = bc._require_positive_finite(
+                    cfg["length_angstrom"],
+                    "length_angstrom",
+                    "CHIRAL_CONFIGS",
+                )
+                l_def = max(1, bc._round_positive(target_length / bc.uc_length(m, n)))
+
+            has_n_defects = "N_defects" in cfg
+            has_target_density = "defect_density" in cfg
+            if has_n_defects == has_target_density:
+                raise ValueError(
+                    "CHIRAL_CONFIGS 中必须且只能设置 N_defects 或 "
+                    "defect_density"
+                )
+
+            defect_count_mode = bc._require_defect_count_mode(
+                cfg.get(
+                    "defect_count_mode",
+                    TEMPLATE.get("defect_count_mode", "same_count"),
+                ),
+                "defect_count_mode",
+                "CHIRAL_CONFIGS",
+            )
+            target_density = None
+            n_defects_same = None
+            if has_n_defects:
+                # 自能预生成保留 N_defects=0 的既有用法。
+                n_defects_same = bc._require_int(
+                    cfg["N_defects"],
+                    "N_defects",
+                    "CHIRAL_CONFIGS",
+                    minimum=0,
+                )
+                defect_count_mode = "same_count"
+            else:
+                target_density = bc._require_positive_finite(
+                    cfg["defect_density"],
+                    "defect_density",
+                    "CHIRAL_CONFIGS",
+                )
             buffer_pl = cfg.get("buffer_pl", TEMPLATE.get("buffer_pl"))
             if buffer_pl is not None:
                 buffer_pl = bc._require_int(
                     buffer_pl, "buffer_pl", "CHIRAL_CONFIGS", minimum=0
                 )
-            n_defects = int(cfg["N_defects"])
             structures = list(cfg["structures"])
             # ele_T 可选：显式设置时覆写 DPNEGF input.json 的电极温度，
             # None 表示沿用模板值（与 batch_generate 语义一致）。
@@ -190,18 +244,48 @@ def build_tasks(
                 buffer_pl,
             )
 
-            density = n_defects / (l_def * T)
+            actual_length = l_def * T
+            if target_density is not None:
+                expected_defects = target_density * actual_length
+                if defect_count_mode == "balanced_count":
+                    ensemble_total_defects = bc.balanced_total_defects(
+                        expected_defects, lammps_repeats
+                    )
+                    ensemble_actual_density = (
+                        ensemble_total_defects
+                        / (lammps_repeats * actual_length)
+                    )
+                    configuration_density = target_density
+                else:
+                    n_defects_same = max(
+                        1, bc._round_positive(expected_defects)
+                    )
+                    ensemble_total_defects = n_defects_same * lammps_repeats
+                    ensemble_actual_density = n_defects_same / actual_length
+                    configuration_density = ensemble_actual_density
+            else:
+                expected_defects = float(n_defects_same)
+                ensemble_total_defects = n_defects_same * lammps_repeats
+                ensemble_actual_density = n_defects_same / actual_length
+                configuration_density = ensemble_actual_density
 
             folder_name = make_folder_name(
                 structures=structures,
                 l_def=l_def,
-                density=density,
+                density=configuration_density,
             )
 
             # 每个 replica 使用独立的缺陷结构 seed，
             # 实现缺陷位置的随机采样。
             for replica in range(1, lammps_repeats + 1):
                 task_index += 1
+                if defect_count_mode == "balanced_count":
+                    n_defects = bc.balanced_defect_count(
+                        expected_defects, replica
+                    )
+                else:
+                    n_defects = n_defects_same
+                actual_density = n_defects / actual_length
                 # structure_seed: 控制缺陷位置和类型，每个 replica 独立
                 structure_seed = BASE_STRUCTURE_SEED + task_index
                 # lammps_seed: 控制 LAMMPS 热运动轨迹，每个 replica 独立
@@ -252,8 +336,14 @@ def build_tasks(
                     "l_def": l_def,
                     "buffer_pl": buffer_pl,
                     "N_defects": n_defects,
+                    "defect_count_mode": defect_count_mode,
+                    "target_defect_density": target_density,
+                    "expected_defects_per_replica": expected_defects,
+                    "actual_density": actual_density,
+                    "ensemble_total_defects": ensemble_total_defects,
+                    "ensemble_actual_density": ensemble_actual_density,
                     "structures": structures,
-                    "density": density,
+                    "density": configuration_density,
                     "folder_name": folder_name,
                     "replica": replica,
                     "lammps_repeats": lammps_repeats,
@@ -304,6 +394,11 @@ def make_task_config(task):
         "l_def": task["l_def"],
         "buffer_pl": task["buffer_pl"],
         "N_defects": task["N_defects"],
+        "defect_count_mode": task["defect_count_mode"],
+        "expected_defects_per_replica": task["expected_defects_per_replica"],
+        "actual_density_A_inv": task["actual_density"],
+        "ensemble_total_defects": task["ensemble_total_defects"],
+        "ensemble_actual_density_A_inv": task["ensemble_actual_density"],
         "structures": task["structures"],
         "data_root": str(task["data_root"]),
         "structure_root": str(task["run_root"]),
@@ -321,6 +416,11 @@ def make_task_config(task):
             "mu": mu_labels,
         },
     })
+
+    if task["target_defect_density"] is not None:
+        config["target_defect_density_A_inv"] = task[
+            "target_defect_density"
+        ]
 
     # ele_T 仅在显式设置时写入 config：None 表示沿用 DPNEGF input.json
     # 模板值；不写入键可保证未设置时 provenance hash 与旧版一致。

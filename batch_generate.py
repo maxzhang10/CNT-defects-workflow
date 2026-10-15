@@ -146,7 +146,7 @@ def build_tasks(batch, base_root):
                 if cfg.get("ele_T") is not None
                 else template.get("ele_T")
             )
-            n_defects = cfg["N_defects"]
+            defect_count_mode = cfg.get("defect_count_mode", "same_count")
             structures = cfg["structures"]
             replicas = cfg["replicas"]
 
@@ -160,12 +160,36 @@ def build_tasks(batch, base_root):
                 buffer_pl,
             )
 
-            density = n_defects / (l_def * T)
+            actual_length = l_def * T
+            target_density = (cfg.get("_resolution") or {}).get("defect_density")
+
+            if defect_count_mode == "balanced_count":
+                if target_density is None:
+                    raise ValueError(
+                        "balanced_count 必须与 defect_density 一起使用"
+                    )
+                expected_defects = target_density * actual_length
+                ensemble_total_defects = bc.balanced_total_defects(
+                    expected_defects, replicas
+                )
+                ensemble_actual_density = (
+                    ensemble_total_defects / (replicas * actual_length)
+                )
+                # balanced_count 的 configuration 代表目标密度；各 replica
+                # 的实际 N_defects/密度在下方展开时单独记录。
+                configuration_density = target_density
+            else:
+                n_defects_same = cfg["N_defects"]
+                expected_defects = float(n_defects_same)
+                ensemble_total_defects = n_defects_same * replicas
+                ensemble_actual_density = n_defects_same / actual_length
+                # 保持旧目录规则：same_count 使用取整后的实际密度。
+                configuration_density = ensemble_actual_density
 
             folder_name = make_folder_name(
                 structures=structures,
                 l_def=l_def,
-                density=density,
+                density=configuration_density,
             )
 
             # 每个 replica 使用独立的缺陷结构 seed，
@@ -176,6 +200,13 @@ def build_tasks(batch, base_root):
                 prev_block_key = block_key
             for replica in range(1, replicas + 1):
                 block_index += 1
+                if defect_count_mode == "balanced_count":
+                    n_defects = bc.balanced_defect_count(
+                        expected_defects, replica
+                    )
+                else:
+                    n_defects = n_defects_same
+                actual_density = n_defects / actual_length
                 # structure_seed: 控制缺陷位置和类型，每个 replica 独立
                 structure_seed = batch["base_structure_seed"] + block_index
                 # lammps_seed: 控制 LAMMPS 热运动轨迹，每个 replica 独立
@@ -236,8 +267,14 @@ def build_tasks(batch, base_root):
                     "release_uc": release_uc,
                     "ele_T": ele_T,
                     "N_defects": n_defects,
+                    "defect_count_mode": defect_count_mode,
+                    "target_defect_density": target_density,
+                    "expected_defects_per_replica": expected_defects,
+                    "actual_density": actual_density,
+                    "ensemble_total_defects": ensemble_total_defects,
+                    "ensemble_actual_density": ensemble_actual_density,
                     "structures": structures,
-                    "density": density,
+                    "density": configuration_density,
                     "folder_name": folder_name,
                     "replica": replica,
                     "replicas": replicas,
@@ -301,6 +338,11 @@ def make_task_config(task, batch):
         "buffer_pl": task["buffer_pl"],
         "release_uc": task["release_uc"],
         "N_defects": task["N_defects"],
+        "defect_count_mode": task["defect_count_mode"],
+        "expected_defects_per_replica": task["expected_defects_per_replica"],
+        "actual_density_A_inv": task["actual_density"],
+        "ensemble_total_defects": task["ensemble_total_defects"],
+        "ensemble_actual_density_A_inv": task["ensemble_actual_density"],
         "structures": task["structures"],
         "data_root": str(task["data_root"]),
         "structure_root": str(task["run_root"]),
@@ -319,6 +361,14 @@ def make_task_config(task, batch):
             "mu": mu_labels,
         },
     })
+
+    if (
+        task["defect_count_mode"] == "balanced_count"
+        and task["target_defect_density"] is not None
+    ):
+        config["target_defect_density_A_inv"] = float(
+            task["target_defect_density"]
+        )
 
     # ele_T 仅在显式设置时写入 config：None 表示沿用 DPNEGF input.json
     # 模板值；不写入键可保证未设置时 provenance hash 与旧版一致。

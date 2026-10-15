@@ -74,6 +74,12 @@ def generate_defect_coords(
     5. 最终坐标吸附到真实 C 原子上；
     6. 完全由 seed 控制随机性。
     """
+    if N < 0:
+        raise ValueError(f"N 不能小于 0，当前值: {N}")
+    if N == 0:
+        L.info("本 replica 分配为 0 个缺陷，跳过缺陷坐标采样")
+        return [], []
+
     rng = np.random.default_rng(seed)
     cyl = cnt_geometry.tube_to_cyl(tube)
 
@@ -233,6 +239,8 @@ def main():
     cnt_geometry.set_reference_cyl(tube)
 
     N = int(config["N_defects"])
+    if N < 0:
+        raise ValueError(f"N_defects 不能小于 0，当前值: {N}")
     min_defect_sep = 4.26
     edge_margin = 1.42
 
@@ -264,6 +272,8 @@ def main():
         L.info("LAMMPS mode: opt（纯几何优化，不使用 lammps_seed）")
 
     L.info("缺陷坐标：")
+    if not defects_coord_ind:
+        L.info("  （本 replica 分配为 0 个缺陷，生成 pristine 结构）")
     for coord, idx in zip(defects_coord_ind, pristine_indices):
         L.info(
             f"  index={idx:5d}, "
@@ -340,6 +350,12 @@ def main():
         "type_list": type_list,
         "defect_log": defect_log,
         "folder_name": folder_name,
+        "N_defects": N,
+        "actual_density_A_inv": density,
+        "defect_count_mode": config.get("defect_count_mode", "same_count"),
+        "target_defect_density_A_inv": config.get(
+            "target_defect_density_A_inv"
+        ),
     }
     defects_json_path = structure_root / "defects.json"
     with open(defects_json_path, "w", encoding="utf-8") as f:

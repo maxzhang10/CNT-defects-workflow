@@ -1,9 +1,9 @@
 """Plan B（length_angstrom / defect_density -> l_def / N_defects）接口测试。
 
-- batch_config: 长度/缺陷两维度各自二选一校验，目标值确定性 round，
-  解析结果与手写 l_def/N_defects 完全等价（目标键不进下游 config）。
-- batch_generate: build_tasks / make_task_config 产出与手写配置一致，
-  provenance hash 与手写配置一致（等价配置复用同一目录与 seed）。
+- batch_config: 长度/缺陷两维度各自二选一校验，目标值确定性 round；
+  same_count 与手写 l_def/N_defects 等价，balanced_count 按 replica 分配。
+- batch_generate: same_count 继续复用原目录与 seed；balanced_count 把目标
+  密度及每个 replica 的实际缺陷数写入下游配置。
 - 解析表 format_resolution_table：仅 Plan B 批次有输出，内容含目标值、
   解析结果与取整误差。
 """
@@ -175,6 +175,127 @@ def test_plan_b_deterministic_round(tmp_path):
     cfg = bc.load(path)["configs"][0]
     assert cfg["l_def"] == 1
     assert cfg["N_defects"] == 1
+
+
+def test_balanced_count_short_tube_distribution(tmp_path):
+    """短管按 ensemble 平衡分配 0/1 缺陷，而不是每根都强制为 1。"""
+    batch = bc.load(
+        _write_batch(
+            tmp_path,
+            [
+                {
+                    "chirality": [5, 5],
+                    "length_angstrom": 10.0,
+                    "defect_density": 0.051210,
+                    "defect_count_mode": "balanced_count",
+                    "structures": ["MVH"],
+                    "replicas": 20,
+                }
+            ],
+        )
+    )
+    cfg = batch["configs"][0]
+    assert cfg["l_def"] == 4
+    assert cfg["N_defects"] is None
+    assert cfg["defect_count_mode"] == "balanced_count"
+
+    tasks = batch_generate.build_tasks(batch, batch["data_root"])
+    counts = [task["N_defects"] for task in tasks]
+    assert counts.count(0) == 10
+    assert counts.count(1) == 10
+    assert len({task["configuration_root"] for task in tasks}) == 1
+    assert all(task["density"] == pytest.approx(0.051210) for task in tasks)
+    assert sum(counts) == bc.balanced_total_defects(
+        0.051210 * 4 * bc.uc_length(5, 5), 20
+    )
+
+    workflow_configs = [
+        batch_generate.make_task_config(task, batch)
+        for task in tasks
+    ]
+    assert {item["N_defects"] for item in workflow_configs} == {0, 1}
+    assert all(
+        item["target_defect_density_A_inv"] == pytest.approx(0.051210)
+        for item in workflow_configs
+    )
+
+
+def test_balanced_count_prefix_is_stable_when_replicas_grow(tmp_path):
+    """增加 replicas 只追加分配，不改变已有 replica 的缺陷数。"""
+    def load_with_replicas(replicas):
+        return bc.load(
+            _write_batch(
+                tmp_path,
+                [
+                    {
+                        "chirality": [13, 1],
+                        "l_def": 12,
+                        "defect_density": 0.017,
+                        "defect_count_mode": "balanced_count",
+                        "structures": ["MVH"],
+                        "replicas": replicas,
+                    }
+                ],
+            )
+        )
+
+    batch_20 = load_with_replicas(20)
+    tasks_20 = batch_generate.build_tasks(batch_20, batch_20["data_root"])
+    batch_60 = load_with_replicas(60)
+    tasks_60 = batch_generate.build_tasks(batch_60, batch_60["data_root"])
+
+    assert [task["N_defects"] for task in tasks_20] == [
+        task["N_defects"] for task in tasks_60[:20]
+    ]
+    assert [task["seed"] for task in tasks_20] == [
+        task["seed"] for task in tasks_60[:20]
+    ]
+
+
+def test_balanced_count_long_tube_uses_adjacent_counts():
+    counts = [
+        bc.balanced_defect_count(20.3, replica)
+        for replica in range(1, 61)
+    ]
+    assert counts.count(20) == 42
+    assert counts.count(21) == 18
+    assert sum(counts) == bc.balanced_total_defects(20.3, 60) == 1218
+
+
+def test_template_can_select_balanced_count(tmp_path):
+    """template 可统一设置模式；显式 N_defects 仍保持 same_count。"""
+    import json
+
+    path = tmp_path / "batch.json"
+    path.write_text(
+        json.dumps(
+            {
+                "template": {"defect_count_mode": "balanced_count"},
+                "temperatures": [100],
+                "lammps_mode": "md",
+                "configs": [
+                    {
+                        "chirality": [5, 5],
+                        "length_angstrom": 10.0,
+                        "defect_density": 0.051210,
+                        "structures": ["MVH"],
+                        "replicas": 4,
+                    },
+                    {
+                        "chirality": [5, 5],
+                        "l_def": 4,
+                        "N_defects": 1,
+                        "structures": ["MVH"],
+                        "replicas": 4,
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    configs = bc.load(path)["configs"]
+    assert configs[0]["defect_count_mode"] == "balanced_count"
+    assert configs[1]["defect_count_mode"] == "same_count"
 
 
 def test_plan_b_same_dimension_conflict(tmp_path):

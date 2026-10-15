@@ -13,6 +13,7 @@ batch.json —— 简单配置、工具生成时使用：
   "template": {           # 所有物理配置的公共默认值（可选）
     "r_max": 6.5,
     "md_steps": 50000,
+    "defect_count_mode": "same_count",
     "save_self_energy": false,
     "self_energy_cache": {"use_saved": true, "save_path": "./self_energy/"},
     "md_sampling": {"n_samples": 1}
@@ -48,16 +49,26 @@ Plan B：长度 + 缺陷密度（替代手写 l_def / N_defects）
     长度维度：l_def（UC 数）        或 length_angstrom（目标散射区长度/Å）
     缺陷维度：N_defects（缺陷数）   或 defect_density（目标缺陷密度/Å⁻¹）
 
-校验时按手性的 UC 长度 T 把目标值确定性 round 到最近整数：
+校验时按手性的 UC 长度 T 把目标长度确定性 round 到最近整数：
 
     l_def     = max(1, round(length_angstrom / T))     实际长度  L = l_def·T
-    N_defects = max(1, round(defect_density · L))      实际密度  ρ = N_defects/L
+
+密度到缺陷数支持两种模式：
+
+    defect_count_mode = "same_count"（默认）
+        N_defects = max(1, round(defect_density · L))
+        每个 replica 使用相同缺陷数，兼容旧行为。
+
+    defect_count_mode = "balanced_count"
+        在相邻两个整数缺陷数之间做前缀稳定分配，使任意前 R 个
+        replica 的缺陷总数等于 round(R · defect_density · L)。允许
+        N_defects=0；增加 replicas 只追加任务，不改变已有 replica。
 
 round 用 int(x + 0.5)（正数四舍五入，无 banker's rounding 歧义）。
 两个维度可混搭，例如 "l_def": 12, "defect_density": 0.017 表示定长
-12 UC、由密度反推缺陷数。解析结果与手写 l_def/N_defects 完全等价：
-length_angstrom / defect_density 不进入下游 workflow config 与
-provenance hash，等价手写配置复用同一目录与 seed。
+12 UC、由密度反推缺陷数。same_count 的解析结果与手写
+l_def/N_defects 完全等价；balanced_count 会把目标密度和每个 replica
+的实际缺陷数写入 workflow config。
 
 解析表由 format_resolution_table(configs) 生成，batch_generate 在
 加载配置后打印到 stdout（随 manage_batch.sh 重定向进
@@ -137,6 +148,9 @@ DEFAULT_TEMPLATE = {
     "buffer_pl": None,
     # 固定区（电极+缓冲）最靠中间放开不固定的 uc 数（每侧）。
     "release_uc": 1,
+    # defect_density -> N_defects 的 replica 分配方式。same_count 保持
+    # 旧行为；balanced_count 在整个 replica ensemble 上逼近目标密度。
+    "defect_count_mode": "same_count",
     "save_self_energy": False,
     "self_energy_cache": {
         "use_saved": True,
@@ -147,6 +161,7 @@ DEFAULT_TEMPLATE = {
 }
 
 LAMMPS_MODES = ("md", "opt")
+DEFECT_COUNT_MODES = ("same_count", "balanced_count")
 
 # l_def / N_defects 不再无条件必填：Plan B 允许分别用
 # length_angstrom / defect_density 替代（见 validate_config_entry）。
@@ -176,6 +191,33 @@ def uc_length(m, n, bond_angstrom=1.42):
 def _round_positive(x):
     """正数四舍五入到整数（不用 round()，避免 banker's rounding 歧义）。"""
     return int(x + 0.5)
+
+
+def balanced_defect_count(expected_per_replica, replica):
+    """返回 balanced_count 模式下指定 replica（从 1 开始）的缺陷数。
+
+    累计额外缺陷数采用 floor(R*f + 0.5)，其中 f 是期望缺陷数的小数
+    部分。这样任意前缀都执行 half-up 平衡取整，扩大 replicas 时不会
+    改变已有 replica 的分配。
+    """
+    expected = float(expected_per_replica)
+    if not math.isfinite(expected) or expected < 0:
+        raise ValueError("expected_per_replica 必须为有限非负数")
+    if isinstance(replica, bool) or not isinstance(replica, int) or replica < 1:
+        raise ValueError("replica 必须为从 1 开始的正整数")
+
+    base = math.floor(expected)
+    fraction = expected - base
+    extras_before = _round_positive((replica - 1) * fraction)
+    extras_after = _round_positive(replica * fraction)
+    return base + (extras_after - extras_before)
+
+
+def balanced_total_defects(expected_per_replica, replicas):
+    """返回 balanced_count 模式下前 replicas 个任务的缺陷总数。"""
+    if isinstance(replicas, bool) or not isinstance(replicas, int) or replicas < 1:
+        raise ValueError("replicas 必须为正整数")
+    return _round_positive(float(expected_per_replica) * replicas)
 
 
 def _require_positive_finite(value, name, path):
@@ -219,6 +261,15 @@ def _require_ele_T(value, name, path):
 def _require_bool(value, name, path):
     if not isinstance(value, bool):
         _fail(path, f"{name} 必须为 true/false，当前值: {value!r}")
+    return value
+
+
+def _require_defect_count_mode(value, name, path):
+    if value not in DEFECT_COUNT_MODES:
+        _fail(
+            path,
+            f"{name} 必须为 {' / '.join(DEFECT_COUNT_MODES)}，当前值: {value!r}",
+        )
     return value
 
 
@@ -268,7 +319,12 @@ def resolve_self_energy_cache(cache, *, m, n, data_root):
     return resolved
 
 
-def validate_config_entry(entry, index, path):
+def validate_config_entry(
+    entry,
+    index,
+    path,
+    default_defect_count_mode="same_count",
+):
     """校验单个物理配置条目，返回补齐 chirality 后的新 dict。"""
     if not isinstance(entry, dict):
         _fail(path, f"configs[{index}] 必须为对象，当前值: {entry!r}")
@@ -301,7 +357,6 @@ def validate_config_entry(entry, index, path):
 
     # Plan B：长度维度 l_def / length_angstrom 二选一，
     # 缺陷维度 N_defects / defect_density 二选一，可跨维度混搭。
-    # 目标值确定性 round 到最近整数，解析结果与手写完全等价。
     has_l_def = "l_def" in entry
     has_length = "length_angstrom" in entry
     if has_l_def == has_length:
@@ -317,6 +372,31 @@ def validate_config_entry(entry, index, path):
             path,
             f"configs[{index}] 缺陷维度必须且只能提供 "
             f"N_defects / defect_density 之一",
+        )
+
+    # 显式 N_defects 已经给出了每个 replica 的缺陷数，因此固定使用
+    # same_count。defect_density 才允许选择 ensemble 平衡分配。
+    entry_defect_count_mode = None
+    if "defect_count_mode" in entry:
+        entry_defect_count_mode = _require_defect_count_mode(
+            entry["defect_count_mode"],
+            f"configs[{index}].defect_count_mode",
+            path,
+        )
+
+    if has_n_defects:
+        if entry_defect_count_mode == "balanced_count":
+            _fail(
+                path,
+                f"configs[{index}].defect_count_mode=balanced_count 只适用于 "
+                "defect_density；显式 N_defects 请使用 same_count 或省略该字段",
+            )
+        defect_count_mode = "same_count"
+    else:
+        defect_count_mode = (
+            entry_defect_count_mode
+            if entry_defect_count_mode is not None
+            else default_defect_count_mode
         )
 
     resolution = {}  # 记录目标值，供 format_resolution_table 打印
@@ -336,7 +416,13 @@ def validate_config_entry(entry, index, path):
         target_density = _require_positive_finite(
             entry["defect_density"], f"configs[{index}].defect_density", path
         )
-        n_defects = max(1, _round_positive(target_density * actual_length))
+        expected_defects = target_density * actual_length
+        if defect_count_mode == "balanced_count":
+            # balanced_count 的 N_defects 是 replica 级属性，在 build_tasks
+            # 展开时按 replica 序号计算；这里不伪造单一整数值。
+            n_defects = None
+        else:
+            n_defects = max(1, _round_positive(expected_defects))
         resolution["defect_density"] = target_density
     else:
         n_defects = _require_int(
@@ -386,8 +472,8 @@ def validate_config_entry(entry, index, path):
     out = dict(entry)
     out["m"] = m
     out["n"] = n
-    # Plan B 目标值不进下游 workflow config / provenance hash：
-    # 解析后的 l_def / N_defects 与手写完全等价。
+    # 目标值保留在内部 _resolution 供任务展开和解析表使用；
+    # make_task_config 只在 balanced_count 时把目标密度写入下游配置。
     out.pop("length_angstrom", None)
     out.pop("defect_density", None)
     out["_resolution"] = resolution
@@ -396,6 +482,7 @@ def validate_config_entry(entry, index, path):
     out["release_uc"] = release_uc
     out["ele_T"] = ele_T
     out["N_defects"] = n_defects
+    out["defect_count_mode"] = defect_count_mode
     out["structures"] = list(structures)
     out["conductance_mode"] = conductance_mode
     # replicas 是每个物理配置的必填显式字段（不接受全局默认），
@@ -458,6 +545,9 @@ def _validate_batch(raw, path):
         _fail(path, f"template 必须为对象，当前值: {template_raw!r}")
     template = {**DEFAULT_TEMPLATE, **template_raw}
     _require_bool(template["save_self_energy"], "template.save_self_energy", path)
+    template["defect_count_mode"] = _require_defect_count_mode(
+        template["defect_count_mode"], "template.defect_count_mode", path
+    )
     if template["buffer_pl"] is not None:
         template["buffer_pl"] = _require_int(
             template["buffer_pl"], "template.buffer_pl", path, minimum=0
@@ -522,7 +612,12 @@ def _validate_batch(raw, path):
         _fail(path, "configs 必须为非空列表")
 
     configs = [
-        validate_config_entry(entry, i, path)
+        validate_config_entry(
+            entry,
+            i,
+            path,
+            default_defect_count_mode=template["defect_count_mode"],
+        )
         for i, entry in enumerate(configs_raw)
     ]
 
@@ -606,9 +701,36 @@ def format_resolution_table(configs):
             continue
         uc = uc_length(cfg["m"], cfg["n"])
         actual_length = cfg["l_def"] * uc
-        actual_density = cfg["N_defects"] / actual_length
         target_length = resolution.get("length_angstrom")
         target_density = resolution.get("defect_density")
+        defect_count_mode = cfg.get("defect_count_mode", "same_count")
+
+        if target_density is not None and defect_count_mode == "balanced_count":
+            expected = target_density * actual_length
+            total_defects = balanced_total_defects(expected, cfg["replicas"])
+            actual_density = total_defects / (cfg["replicas"] * actual_length)
+            counts = sorted(
+                {
+                    balanced_defect_count(expected, replica)
+                    for replica in range(1, cfg["replicas"] + 1)
+                }
+            )
+            count_text = "/".join(str(value) for value in counts)
+            density_text = (
+                f"密度 {target_density:.6f} Å^-1 -> balanced_count "
+                f"N={count_text}, ensemble 实际 {actual_density:.6f} Å^-1 "
+                f"({(actual_density / target_density - 1) * 100:+.1f}%)"
+            )
+        else:
+            actual_density = cfg["N_defects"] / actual_length
+            density_text = (
+                f"密度 {target_density:.6f} Å^-1 -> "
+                f"same_count N_defects={cfg['N_defects']}, "
+                f"实际 {actual_density:.6f} Å^-1 "
+                f"({(actual_density / target_density - 1) * 100:+.1f}%)"
+                if target_density is not None
+                else f"N_defects={cfg['N_defects']}（手写，{actual_density:.6f} Å^-1）"
+            )
         rows.append(
             f"  ({cfg['m']},{cfg['n']}) UC={uc:.4f} Å: "
             + (
@@ -618,17 +740,11 @@ def format_resolution_table(configs):
                 if target_length is not None
                 else f"l_def={cfg['l_def']}（手写，{actual_length:.1f} Å）; "
             )
-            + (
-                f"密度 {target_density:.6f} Å^-1 -> N_defects={cfg['N_defects']}, "
-                f"实际 {actual_density:.6f} Å^-1 "
-                f"({(actual_density / target_density - 1) * 100:+.1f}%)"
-                if target_density is not None
-                else f"N_defects={cfg['N_defects']}（手写，{actual_density:.6f} Å^-1）"
-            )
+            + density_text
         )
     if not rows:
         return None
-    header = "[INFO] Plan B 解析表（长度/密度 -> l_def/N_defects，round 到最近整数）:"
+    header = "[INFO] Plan B 解析表（长度/密度 -> l_def/N_defects）:"
     return "\n".join([header, *rows])
 
 

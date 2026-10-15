@@ -16,6 +16,9 @@ template = {
     "r_max": 6.5,
     "md_steps": 15000,
     "buffer_pl": 4,
+    # defect_density -> N_defects 的分配方式：balanced_count 在整个
+    # replica ensemble 上平衡相邻整数缺陷数；显式 N_defects 不受影响。
+    "defect_count_mode": "balanced_count",
     # 固定区（2PL电极+buffer_pl缓冲）最靠中间放开不固定的 uc 数（每侧），
     # 让固定区/散射区边界附近的原子在弛豫与 MD 中自由放松。
     # 0 = 全部固定；可在任一 config 内加同名键单独覆盖。
