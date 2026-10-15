@@ -79,6 +79,13 @@ def generate_defect_coords(
         （散射区）模式：整管只有 l_def 个 uc，缺陷区从 z=0 开始，不拼接
         电极 PL 缓冲区；否则为 2PL-2PL-defects-2PL-2PL 电极模式。
     """
+    # 零缺陷（完美管）：无需采样，直接返回空坐标，跳过缺陷区间校验。
+    # 单 uc 完美管等短管场景下，缺陷区间收窄后可能为空，
+    # 但此时本来就不需要造缺陷，不应报错。
+    if N == 0:
+        L.info("N_defects=0（完美管），跳过缺陷坐标生成与区间校验")
+        return [], []
+
     rng = np.random.default_rng(seed)
     cyl = cnt_geometry.tube_to_cyl(tube)
 
