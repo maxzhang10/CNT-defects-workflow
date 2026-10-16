@@ -179,8 +179,56 @@ def load_config(config_path=None):
         return json.load(file)
 
 
+def main_assemble(config):
+    """Generate user-supplied modules into the same LAMMPS/DPNEGF layout."""
+    import assemble
+
+    root = Path(config["structure_root"]).resolve()
+    env_root = os.environ.get("CNT_STRUCTURE_ROOT")
+    if env_root and Path(env_root).resolve() != root:
+        raise ValueError("CNT_STRUCTURE_ROOT differs from config.structure_root")
+    if root.exists():
+        unexpected = [p for p in root.iterdir()
+                      if p.name not in {"workflow_config.json", "workflow.log"}
+                      and not (p.is_file() and p.name.startswith("cnt_") and p.suffix == ".json")]
+        if unexpected:
+            raise FileExistsError(f"assembly output exists; refusing to overwrite: {unexpected[0]}")
+    output_dir = root / "lammps"
+    if output_dir.exists() and any(output_dir.iterdir()):
+        raise FileExistsError(f"assembly structure exists: {output_dir}")
+    seed = int(config["seed"])
+    atoms, meta = assemble.build(config["assembly"], seed)
+    m, n = map(int, config["chirality"])
+    atoms = exporters.reposition_hydrogens(atoms, meta["side_atoms_per_side"])
+    output_dir.mkdir(parents=True, exist_ok=False)
+    exporters.write_poscar(output_dir / "POSCAR", atoms)
+    exporters.write_lammps(output_dir / "data.lmp", atoms)
+    with (root / "assembly.json").open("w", encoding="utf-8") as file:
+        json.dump(meta, file, indent=2, ensure_ascii=False)
+    with (root / "defects.json").open("w", encoding="utf-8") as file:
+        json.dump({"seed": seed, "type_list": list(config["assembly"]["defect_counts"]),
+                   "N_defects": meta["N_defects"], "actual_density_A_inv": meta["actual_density_A_inv"],
+                   "defect_counts": meta["defect_counts"], "module_sequence": meta["module_sequence"]},
+                  file, indent=2, ensure_ascii=False)
+    md_steps = int(config.get("md_steps", 40000))
+    lammps_mode = config.get("lammps_mode", "md")
+    if lammps_mode == "opt" or md_steps > 0:
+        lammps_io.prepare_lammps_inputs(
+            temperature=int(config["temperature"]), chirality=(m, n),
+            structures={"assembled": atoms}, l_PL=1, N_uc=meta["atoms_per_pl"],
+            data_root=Path(config["data_root"]), structure_root=root,
+            md_steps=md_steps, lammps_seed=config.get("lammps_seed"),
+            lammps_mode=lammps_mode,
+            fixed_atoms_per_side=meta["fixed_atoms_per_side"],
+        )
+    L.info(f"assembled {meta['module_sequence']} into {root}; scatter={meta['scatter_length_angstrom']} A")
+
+
 def main():
     config = load_config()
+    if config.get("structure_mode") == "assemble":
+        main_assemble(config)
+        return
 
     # lammps_mode: "md"（缺省，热弛豫 MD）或 "opt"（纯几何优化）。
     # opt 模式不做热运动，lammps_seed 无意义，不再强制。

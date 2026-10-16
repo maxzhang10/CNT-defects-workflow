@@ -593,7 +593,7 @@ def main():
     # 输出到每个 replica 自己的 workflow.log（batch_generate 把
     # run_multi 的 stdout 重定向到 run_root/workflow.log）。
     m, n = int(config["chirality"][0]), int(config["chirality"][1])
-    info = cnt_geometry.describe_structure(
+    info = None if config.get("structure_mode") == "assemble" else cnt_geometry.describe_structure(
         m, n,
         float(config["r_max"]),
         int(config["l_def"]),
@@ -605,23 +605,31 @@ def main():
         uc_sha256=config.get("uc_sha256"),
     )
     L.phase(0, 7, "结构构成摘要")
-    L.info(f"  手性/类型       : {info['chirality']}  ({info['kind']})")
-    L.info(f"  总构成          : {info['composition']}")
-    L.info(f"  原子构成        : {info['composition_atoms']}")
-    L.info(f"  单胞长度 T      : {info['T_A']} Å")
-    if config.get("uc_file"):
-        L.info(f"  外部 UC         : {config['uc_file']}")
-        L.info(f"  UC SHA-256      : {config.get('uc_sha256')}")
-    L.info(f"  单胞原子数 N_uc : {info['N_uc']}")
-    L.info(f"  每个 PL 含 uc   : {info['l_PL_uc']}")
-    L.info(f"  每侧缓冲层      : {info['buffer_pl']} PL  "
-           f"({'4PL加厚' if info['buffer_pl'] == 4 else '2PL'})")
-    L.info(f"  每侧固定原子    : {info['fixed_atoms_per_side']}  "
-           f"(2PL电极 + {info['buffer_pl']}PL缓冲，"
-           f"其中靠中间 {info['released_uc_per_side']}uc / "
-           f"{info['released_atoms_per_side']} 原子放开不固定)")
-    L.info(f"  总 uc 数        : {info['total_uc']}")
-    L.info(f"  总原子数        : {info['total_atoms']}")
+    if info is None:
+        assembly = config["assembly"]
+        L.info(f"  模式             : 搭积木 ({m},{n})")
+        L.info(f"  散射区长度       : {assembly['scatter_uc_count']} UC")
+        L.info(f"  每个 PL         : {assembly['layout']['l_PL_uc']} UC")
+        L.info(f"  每侧构成        : 2 PL 电极 + {assembly['buffer_pl']} PL 缓冲")
+        L.info(f"  缺陷模块数量     : {assembly['defect_counts']}")
+    else:
+        L.info(f"  手性/类型       : {info['chirality']}  ({info['kind']})")
+        L.info(f"  总构成          : {info['composition']}")
+        L.info(f"  原子构成        : {info['composition_atoms']}")
+        L.info(f"  单胞长度 T      : {info['T_A']} Å")
+        if config.get("uc_file"):
+            L.info(f"  外部 UC         : {config['uc_file']}")
+            L.info(f"  UC SHA-256      : {config.get('uc_sha256')}")
+        L.info(f"  单胞原子数 N_uc : {info['N_uc']}")
+        L.info(f"  每个 PL 含 uc   : {info['l_PL_uc']}")
+        L.info(f"  每侧缓冲层      : {info['buffer_pl']} PL  "
+               f"({'4PL加厚' if info['buffer_pl'] == 4 else '2PL'})")
+        L.info(f"  每侧固定原子    : {info['fixed_atoms_per_side']}  "
+               f"(2PL电极 + {info['buffer_pl']}PL缓冲，"
+               f"其中靠中间 {info['released_uc_per_side']}uc / "
+               f"{info['released_atoms_per_side']} 原子放开不固定)")
+        L.info(f"  总 uc 数        : {info['total_uc']}")
+        L.info(f"  总原子数        : {info['total_atoms']}")
     # DPNEGF 电极电子温度：未设置时沿用 input.json 模板值，不覆写
     ele_T = config.get("ele_T")
     L.info(f"  DPNEGF ele_T    : "

@@ -45,6 +45,7 @@ def prepare_lammps_inputs(
     lammps_mode="md",
     buffer_pl=None,
     release_uc=None,
+    fixed_atoms_per_side=None,
 ):
     """
     为不同结构生成 LAMMPS 计算目录，并修改 in.lammps。
@@ -135,14 +136,11 @@ def prepare_lammps_inputs(
     # 每侧固定原子数与结构生成保持一致（2PL电极+buffer_pl缓冲），
     # 但最靠中间的 release_uc 个 uc 放开不固定（左右共 2*release_uc 个），
     # 见 cnt_geometry.fixed_atoms_per_side / RELEASE_UC_PER_SIDE。
-    n_fix = cnt_geometry.fixed_atoms_per_side(
-        m, n, l_PL, N_uc, buffer_pl,
-        release_uc=(
-            cnt_geometry.RELEASE_UC_PER_SIDE
-            if release_uc is None
-            else release_uc
-        ),
-    )
+    n_fix = (int(fixed_atoms_per_side) if fixed_atoms_per_side is not None else
+             cnt_geometry.fixed_atoms_per_side(
+                 m, n, l_PL, N_uc, buffer_pl,
+                 release_uc=(cnt_geometry.RELEASE_UC_PER_SIDE
+                             if release_uc is None else release_uc)))
 
     for folder, atoms in structures.items():
         if structure_root is None:

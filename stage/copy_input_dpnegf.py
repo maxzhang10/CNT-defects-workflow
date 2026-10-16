@@ -141,6 +141,7 @@ def update_input_json_for_leaf(
     ele_T=None,
     uc_file=None,
     uc_sha256=None,
+    assembly=None,
 ):
     leaf_dir = Path(leaf_dir).resolve()
 
@@ -155,16 +156,25 @@ def update_input_json_for_leaf(
 
     m, n = chirality
 
-    T, N_uc, l_PL, length = cnt_geometry.geo_info(
-        m, n, r_max, l_def, buffer_pl, uc_file, uc_sha256
-    )
+    if assembly is None:
+        T, N_uc, l_PL, length = cnt_geometry.geo_info(
+            m, n, r_max, l_def, buffer_pl, uc_file, uc_sha256
+        )
+        n_atoms_per_pl = N_uc * l_PL
+    else:
+        if n_lead_pl != 2:
+            raise ValueError("assembly mode requires exactly two principal layers per lead")
+        layout = assembly["layout"]
+        T = layout["uc_length_angstrom"]
+        N_uc = layout["atoms_per_uc"]
+        l_PL = layout["l_PL_uc"]
+        n_atoms_per_pl = N_uc * l_PL
 
     # Keep the lead sampling density roughly constant across chiralities:
     # k_z * T ~= K_MESH_LEAD_EF_TARGET_LENGTH.
     # Round to the nearest integer and clamp to one valid k point.
     n_kz_lead = max(1, int(round(K_MESH_LEAD_EF_TARGET_LENGTH / T)))
 
-    n_atoms_per_pl = N_uc * l_PL
     n_elec = n_lead_pl * n_atoms_per_pl
     n_total = count_atoms_from_struct_fdf(fdf_path)
 
@@ -326,6 +336,7 @@ def copy_inputs_to_leaf_dirs(
     ele_T=None,
     uc_file=None,
     uc_sha256=None,
+    assembly=None,
 ):
     input_dir = Path(input_dir).resolve()
     root_dir = Path(root_dir).resolve()
@@ -395,6 +406,7 @@ def copy_inputs_to_leaf_dirs(
                 ele_T=ele_T,
                 uc_file=uc_file,
                 uc_sha256=uc_sha256,
+                assembly=assembly,
             )
 
             n_success += 1
@@ -571,6 +583,7 @@ def main():
         ele_T=ele_T,
         uc_file=config.get("uc_file"),
         uc_sha256=config.get("uc_sha256"),
+        assembly=config.get("assembly") if config.get("structure_mode") == "assemble" else None,
     )
 
     if n_failed > 0:

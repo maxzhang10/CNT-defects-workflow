@@ -222,3 +222,13 @@ squeue -u "$USER"
 ```
 
 不要让两个并发批次使用相同的 `data_root`，否则 replica 目录和 `record.log` 会相互覆盖。修改 Slurm 分区、GPU、CPU 或环境加载方式时，应同步修改相应的 `run.sh` 模板。
+
+# POSCAR 模块拼接（搭积木）
+
+独立批配置入口是 [`batch_assemble.py`](batch_assemble.py)。先把其中的完美模块和各缺陷模块路径改为自己准备的 POSCAR，然后在集群环境运行 `python batch_assemble.py --scheduler slurm`；本地预检可运行 `python -m unittest tests.test_assemble`。它调用现有 `batch_generate.py` / `run_multi.py` 调度和下游流程；原 `batch.py`、ASE 缺陷生成和外部单 UC 模式保持原样。配置中的 `md_steps = 0` 表示跳过 LAMMPS，直接从拼接 POSCAR 经 `sgeom` 进入 DPNEGF；设为正数则运行原有 LAMMPS MD 流程。
+
+每个 `configs` 条目填写 `perfect_module`（严格一个 UC）、`defect_modules`（名称到 `(POSCAR 路径, 占用 UC 数)`，例如 `{"MVH": ("./modules/MVH/POSCAR", 2)}`）、`defect_counts`（同名键到非负整数）、`scatter_uc_count`（散射区 UC 总数）、`buffer_pl`、`rotation_angles_deg`、`replicas`，可选 `module_sequence`。每出现一次缺陷模块计为一个缺陷，因此请准备每模块一个缺陷的 POSCAR。手动序列中用 `"perfect"` 表示完美模块，其余名称对应 `defect_modules`；不填时按 `base_structure_seed + replica` 随机排列缺陷模块，再以完美模块填满。缺陷模块的轴向晶胞长度必须等于声明的 UC 数乘完美 UC 的晶胞长度（容差 1e-5 Å）；长度取 POSCAR 晶胞向量，不取原子坐标跨度。缺陷模块占用的 UC 总数超过散射区时直接报错。
+
+完美 POSCAR 必须恰好包含一个对应手性的 UC。沿用原工作流的 `l_PL = floor(r_max / T) + 1`：每侧先取 2 PL 电极，再取 `buffer_pl` 个 PL 缓冲；省略 `buffer_pl` 时金属管为 2、半导体管为 4。LAMMPS 固定端沿用最内侧放开 1 UC 的规则。电极和缓冲均仅由完美 UC 重复构造。`assembly.json` 同时记录散射区 UC 数和由 POSCAR 晶胞长度得到的实际 Å 长度；线密度只以散射区实际 Å 长度计算。
+
+所有模块需为轴沿正 z、横向晶胞相同、接口原子已配准的 C 或 C/H POSCAR；完美电极模块仅含 C。旋转只从 `rotation_angles_deg` 的离散列表抽取；列表必须包含 0，程序先检验完美模块在每个角度的原子配准，再检验缺陷模块在两端的接口原子与完美模块一致。不做优化、缺陷构造、裁剪或自动修复。实际序列、逐模块旋转角、长度、缺陷数和只按散射区计算的线密度写到每个 replica 的 `assembly.json`。已存在内容的 replica 目录会报错，避免覆盖计算结果。配置和 seed 不变时，序列及角度可复现。

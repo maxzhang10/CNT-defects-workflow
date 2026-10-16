@@ -356,6 +356,7 @@ def FDF_to_xyz(
     buffer_pl=None,
     uc_file=None,
     uc_sha256=None,
+    atoms_per_pl=None,
 ):
     """
     读取 leaf 文件夹中的 STRUCT.fdf，
@@ -384,17 +385,19 @@ def FDF_to_xyz(
 
     # 3. 根据 m, n 计算一个 PL 中的原子数，并交换左端两个 PL
     if swap_left_pl:
-        T, N_uc, l_PL, length = cnt_geometry.geo_info(
-            m, n, r_max, l_def, buffer_pl, uc_file, uc_sha256
-        )
-
-        n_atoms_per_pl = l_PL * N_uc
+        if atoms_per_pl is None:
+            T, N_uc, l_PL, length = cnt_geometry.geo_info(
+                m, n, r_max, l_def, buffer_pl, uc_file, uc_sha256
+            )
+            n_atoms_per_pl = l_PL * N_uc
+        else:
+            n_atoms_per_pl = atoms_per_pl
 
         atoms = swap_left_two_pl_order(atoms, n_atoms_per_pl)
 
         L.debug(
             f"Swap left PLs: {fdf_path} | "
-            f"m={m}, n={n}, N_uc={N_uc}, l_PL={l_PL}, "
+            f"m={m}, n={n}, "
             f"atoms_per_PL={n_atoms_per_pl}"
         )
 
@@ -526,6 +529,8 @@ def main():
                 buffer_pl=buffer_pl,
                 uc_file=config.get("uc_file"),
                 uc_sha256=config.get("uc_sha256"),
+                atoms_per_pl=(config["assembly"]["layout"]["atoms_per_pl"]
+                              if config.get("structure_mode") == "assemble" else None),
             )
 
             n_success += 1

@@ -143,6 +143,7 @@ import math
 from pathlib import Path
 
 from uc_source import read_poscar_metadata
+import assemble
 
 
 # template 层的公共物理默认值。旧版硬编码在 batch_generate.py 的
@@ -557,6 +558,7 @@ _PY_BUILTINS_ALLOW = (
 # 配置列表接受 configs 或 CHIRAL_CONFIGS（后者为多手性批次的惯用名，
 # 见仓库 batch.py 模板），二选一。
 _BATCH_PY_KEYS = (
+    "structure_mode",
     "template",
     "temperatures",
     "lammps_mode",
@@ -567,6 +569,99 @@ _BATCH_PY_KEYS = (
     "CHIRAL_CONFIGS",
     "configs",
 )
+
+
+def validate_assemble_entry(entry, index, path, template):
+    """Validate a separate module-assembly configuration without UC rounding."""
+    label = f"configs[{index}]"
+    if not isinstance(entry, dict):
+        _fail(path, f"{label} must be an object")
+    if any(key in entry for key in ("uc_file", "l_def", "N_defects", "structures", "defect_density", "electrode_length_angstrom", "scatter_length_angstrom", "perfect_uc_count")):
+        _fail(path, f"{label}: UC/ASE defect fields cannot be mixed with assembly mode")
+    chirality = entry.get("chirality", [entry.get("m"), entry.get("n")])
+    if (not isinstance(chirality, (list, tuple)) or len(chirality) != 2
+            or any(type(x) is not int for x in chirality)
+            or chirality[0] < 1 or chirality[1] < 0):
+        _fail(path, f"{label}.chirality must be [m, n]")
+    try:
+        perfect_path = Path(entry["perfect_module"])
+        defect_paths = entry["defect_modules"]
+        counts = entry["defect_counts"]
+        scatter_uc = _require_int(entry["scatter_uc_count"], f"{label}.scatter_uc_count", path)
+        angles = entry["rotation_angles_deg"]
+    except (KeyError, TypeError, ValueError) as exc:
+        _fail(path, f"{label}: missing or invalid assembly field: {exc}")
+    if not isinstance(defect_paths, dict) or not isinstance(counts, dict) or set(defect_paths) != set(counts):
+        _fail(path, f"{label}: defect_modules and defect_counts must have identical keys")
+    if ("perfect" in defect_paths or any(not isinstance(k, str) or not k for k in defect_paths)
+            or any(type(v) is not int or v < 0 for v in counts.values())):
+        _fail(path, f"{label}: invalid defect names or counts")
+    if (not isinstance(angles, list) or not angles
+            or any(isinstance(x, bool) or not isinstance(x, (int, float)) or not math.isfinite(x) for x in angles)):
+        _fail(path, f"{label}.rotation_angles_deg must be a finite angle list")
+    if 0 not in angles or len({x % 360 for x in angles}) != len(angles):
+        _fail(path, f"{label}.rotation_angles_deg must include 0 once and have no duplicates modulo 360")
+    def metadata(raw_path):
+        p = Path(raw_path).expanduser()
+        if not p.is_absolute():
+            p = path.parent / p
+        return assemble.module_metadata(p)
+    try:
+        perfect = metadata(perfect_path)
+        if perfect["symbols"] != ["C"]:
+            raise ValueError("perfect module must contain only C")
+        defects = {}
+        for name, value in defect_paths.items():
+            if (not isinstance(value, (list, tuple)) or len(value) != 2
+                    or not isinstance(value[0], str) or not value[0]
+                    or type(value[1]) is not int or value[1] < 1):
+                raise ValueError(f"defect_modules.{name} must be (POSCAR path, positive UC count)")
+            defects[name] = metadata(value[0])
+            defects[name]["uc_count"] = value[1]
+            expected_length = value[1] * perfect["length_angstrom"]
+            if not math.isclose(defects[name]["length_angstrom"], expected_length,
+                                rel_tol=0, abs_tol=1e-5):
+                raise ValueError(
+                    f"defect module {name} cell length {defects[name]['length_angstrom']} Å "
+                    f"does not equal {value[1]} × perfect UC length ({expected_length} Å)"
+                )
+        for name, module in defects.items():
+            if any(abs(a - b) > 1e-5 for va, vb in zip(module["cell"][:2], perfect["cell"][:2])
+                   for a, b in zip(va, vb)):
+                raise ValueError(f"defect module {name} transverse cell differs from perfect module")
+        buffer_pl = entry.get("buffer_pl", template["buffer_pl"])
+        if buffer_pl is None:
+            buffer_pl = 2 if (chirality[0] - chirality[1]) % 3 == 0 else 4
+        release_uc = template["release_uc"]
+        if release_uc is None:
+            release_uc = 1
+        layout = assemble.lead_layout(
+            perfect, chirality[0], chirality[1], template["r_max"],
+            buffer_pl, release_uc,
+        )
+        normalized = {
+            "m": chirality[0], "n": chirality[1],
+            "modules": {"perfect": perfect, "defects": defects},
+            "defect_counts": dict(counts),
+            "scatter_uc_count": scatter_uc,
+            "layout": layout,
+            "buffer_pl": buffer_pl,
+            "rotation_angles_deg": list(angles),
+            "module_sequence": entry.get("module_sequence"),
+            "replicas": _require_int(entry["replicas"], f"{label}.replicas", path),
+            "ele_T": entry.get("ele_T"),
+            "self_energy_cache": entry.get("self_energy_cache"),
+        }
+        if normalized["module_sequence"] is not None and not isinstance(normalized["module_sequence"], list):
+            raise ValueError("module_sequence must be a list")
+        assemble.plan(normalized, 0)
+    except (OSError, ValueError, TypeError, KeyError) as exc:
+        _fail(path, f"{label}: {exc}")
+    if normalized["ele_T"] is not None:
+        normalized["ele_T"] = _require_ele_T(normalized["ele_T"], f"{label}.ele_T", path)
+    if normalized["self_energy_cache"] is not None:
+        normalized["self_energy_cache"] = _validate_self_energy_cache(normalized["self_energy_cache"], f"{label}.self_energy_cache", path)
+    return normalized
 
 
 def _validate_batch(raw, path):
@@ -661,18 +756,24 @@ def _validate_batch(raw, path):
     if not isinstance(configs_raw, list) or not configs_raw:
         _fail(path, "configs 必须为非空列表")
 
-    configs = [
-        validate_config_entry(
-            entry,
-            i,
-            path,
-            default_defect_count_mode=template["defect_count_mode"],
-            default_uc_file=template["uc_file"],
-        )
-        for i, entry in enumerate(configs_raw)
-    ]
+    structure_mode = raw.get("structure_mode", "defects")
+    if structure_mode not in ("defects", "assemble"):
+        _fail(path, "structure_mode must be 'defects' or 'assemble'")
+    if structure_mode == "assemble":
+        if template.get("uc_file") is not None:
+            _fail(path, "assembly mode cannot use template.uc_file")
+        configs = [validate_assemble_entry(entry, i, path, template) for i, entry in enumerate(configs_raw)]
+    else:
+        configs = [
+            validate_config_entry(
+                entry, i, path,
+                default_defect_count_mode=template["defect_count_mode"],
+                default_uc_file=template["uc_file"],
+            ) for i, entry in enumerate(configs_raw)
+        ]
 
     return {
+        "structure_mode": structure_mode,
         "template": template,
         "temperatures": list(temperatures),
         "lammps_mode": lammps_mode,
@@ -712,6 +813,7 @@ def load_batch_py(path):
 
     import builtins
     safe_globals = {
+        "__name__": "_batch_config_",
         "__builtins__": {
             name: getattr(builtins, name)
             for name in _PY_BUILTINS_ALLOW

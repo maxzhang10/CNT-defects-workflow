@@ -24,6 +24,7 @@ import argparse
 import copy
 import importlib
 import json
+import hashlib
 import subprocess
 import sys
 import tempfile
@@ -112,6 +113,8 @@ def build_tasks(batch, base_root):
     每个 config 必须显式声明自己的 replicas（batch_config 校验保证），
     实现"不同长度配不同 replica 数"，且不存在全局默认值的歧义。
     """
+    if batch.get("structure_mode") == "assemble":
+        return build_assemble_tasks(batch, base_root)
     template = batch["template"]
     tasks = []
     used_roots = {}
@@ -315,6 +318,52 @@ def build_tasks(batch, base_root):
     return tasks
 
 
+def build_assemble_tasks(batch, base_root):
+    """Expand assembly configurations through the existing task scheduler."""
+    import assemble
+    tasks = []
+    used_roots = set()
+    template = batch["template"]
+    for cfg in batch["configs"]:
+        physical = {key: cfg[key] for key in (
+            "modules", "defect_counts", "scatter_uc_count",
+            "layout", "rotation_angles_deg", "module_sequence")}
+        fingerprint = hashlib.sha256(json.dumps(physical, sort_keys=True).encode()).hexdigest()[:12]
+        for temperature in batch["temperatures"]:
+            name = f"assemble_UC{cfg['scatter_uc_count']}_D{sum(cfg['defect_counts'].values())}_{fingerprint}"
+            configuration_root = base_root / f"{temperature}K" / f"{cfg['m']}_{cfg['n']}" / name
+            for replica in range(1, cfg["replicas"] + 1):
+                seed = batch["base_structure_seed"] + replica
+                sequence, actual = assemble.plan(cfg, seed)
+                run_root = configuration_root / f"replica_{replica:03d}"
+                if run_root in used_roots:
+                    raise ValueError(f"two assembly tasks target the same directory: {run_root}")
+                used_roots.add(run_root)
+                count = sum(cfg["defect_counts"].values())
+                ele_T = cfg["ele_T"] if cfg["ele_T"] is not None else template.get("ele_T")
+                task = {
+                    "task_id": f"{temperature}K_{cfg['m']}_{cfg['n']}_{name}_rep{replica:03d}",
+                    "config_name": f"{temperature}K/{cfg['m']}_{cfg['n']}/{name}",
+                    "temperature": temperature, "m": cfg["m"], "n": cfg["n"],
+                    "assembly": cfg, "sequence": sequence,
+                    "N_defects": count, "actual_density": count / actual,
+                    "density": count / actual, "folder_name": name,
+                    "replica": replica, "replicas": cfg["replicas"],
+                    "data_root": base_root, "configuration_root": configuration_root,
+                    "run_root": run_root, "seed": seed,
+                    "lammps_seed": batch["base_lammps_seed"] + replica,
+                    "ele_T": ele_T,
+                    "save_self_energy": template["save_self_energy"],
+                    "self_energy_cache": bc.resolve_self_energy_cache(
+                        cfg["self_energy_cache"] if cfg["self_energy_cache"] is not None else template["self_energy_cache"],
+                        m=cfg["m"], n=cfg["n"], data_root=base_root,
+                        uc_sha256=cfg["modules"]["perfect"]["sha256"], ele_T=ele_T),
+                    "conductance_mode": bc.conductance_mode_for_chirality(cfg["m"], cfg["n"]),
+                }
+                tasks.append(task)
+    return tasks
+
+
 def make_task_config(task, batch):
     """
     创建当前 replica 的独立配置。
@@ -322,6 +371,8 @@ def make_task_config(task, batch):
     data_root 保留整个批次的数据根目录；
     structure_root 和 run_multi.py 的 --root 都指向具体 replica 目录。
     """
+    if batch.get("structure_mode") == "assemble":
+        return make_assemble_task_config(task, batch)
     config = copy.deepcopy(batch["template"])
 
     # conductance_options.mu 只写入字符串标签（非数值）：
@@ -390,6 +441,31 @@ def make_task_config(task, batch):
     return config
 
 
+def make_assemble_task_config(task, batch):
+    config = copy.deepcopy(batch["template"])
+    cfg = task["assembly"]
+    mu = ["Ev", "Ec"] if task["conductance_mode"] == "band_edge_bias" else ["Ef"]
+    config.update({
+        "structure_mode": "assemble", "assembly": copy.deepcopy(cfg),
+        "lammps_mode": batch["lammps_mode"], "temperature": task["temperature"],
+        "chirality": [task["m"], task["n"]], "l_def": 1,
+        "buffer_pl": cfg["buffer_pl"],
+        "N_defects": task["N_defects"], "structures": list(cfg["defect_counts"]),
+        "data_root": str(task["data_root"]), "structure_root": str(task["run_root"]),
+        "configuration_root": str(task["configuration_root"]),
+        "seed": task["seed"], "lammps_seed": task["lammps_seed"],
+        "lammps_replica": task["replica"], "lammps_repeats": task["replicas"],
+        "density_A_inv": task["density"], "actual_density_A_inv": task["actual_density"],
+        "save_self_energy": task["save_self_energy"],
+        "self_energy_cache": task["self_energy_cache"],
+        "conductance_mode": task["conductance_mode"],
+        "conductance_options": {"mu": mu}, "md_sampling": {"n_samples": 1},
+    })
+    if task["ele_T"] is not None:
+        config["ele_T"] = float(task["ele_T"])
+    return config
+
+
 def check_provenance(run_root, new_hash):
     """
     P0-4：在覆盖 workflow_config.json 之前，先校验目录中已有完成结果
@@ -447,6 +523,8 @@ def run_single_task(
     start = time.time()
 
     try:
+        if batch.get("structure_mode") == "assemble" and run_root.exists() and any(run_root.iterdir()):
+            raise FileExistsError(f"assembly output already exists; refusing to overwrite: {run_root}")
         new_hash = negf_provenance.compute_negf_config_hash(config)
         check_provenance(run_root, new_hash)
 
@@ -675,6 +753,8 @@ def main():
 
     batch = bc.load(config_arg)
     base_root = batch["data_root"]
+    if batch.get("structure_mode") == "assemble":
+        base_root.mkdir(parents=True, exist_ok=True)
 
     # Plan B 解析表：纯手写 l_def/N_defects 的批次为 None，不打印。
     resolution_table = bc.format_resolution_table(batch["configs"])
