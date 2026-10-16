@@ -176,16 +176,17 @@ def build(config, seed):
                 max(1.5, float(perfect.positions[:, 2].min()) + 0.2,
                     period - float(perfect.positions[:, 2].max()) + 0.2),
             )
+            seam_tolerance = 1e-3
             for angle in angles:
                 rotated = atoms.copy()
                 rotated.rotate(angle, "z", center=(axis[0], axis[1], 0))
                 for side in ("left", "right"):
                     if side == "left":
-                        actual = rotated[rotated.positions[:, 2] < seam_width]
-                        expected = perfect[perfect.positions[:, 2] < seam_width]
+                        actual = rotated[rotated.positions[:, 2] <= seam_width + seam_tolerance]
+                        expected = perfect[perfect.positions[:, 2] <= seam_width + seam_tolerance]
                     else:
-                        actual = rotated[rotated.positions[:, 2] > meta["length_angstrom"] - seam_width]
-                        expected = perfect[perfect.positions[:, 2] > perfect_meta["length_angstrom"] - seam_width].copy()
+                        actual = rotated[rotated.positions[:, 2] >= meta["length_angstrom"] - seam_width - seam_tolerance]
+                        expected = perfect[perfect.positions[:, 2] >= perfect_meta["length_angstrom"] - seam_width - seam_tolerance].copy()
                         expected.positions[:, 2] += meta["length_angstrom"] - perfect_meta["length_angstrom"]
                     if not len(expected):
                         raise ValueError(f"perfect module has no {side} interface atoms to validate")

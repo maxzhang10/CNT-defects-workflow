@@ -100,6 +100,21 @@ class AssemblyTests(unittest.TestCase):
         self.assertEqual(meta["actual_density_A_inv"], 1 / 6)
 
     @unittest.skipUnless(importlib.util.find_spec("ase"), "ASE is unavailable locally")
+    def test_interface_layer_exactly_at_half_uc_is_included(self):
+        perfect_path = self.root / "half_layer_perfect"
+        defect_path = self.root / "half_layer_defect"
+        poscar(perfect_path, 2.0, [0.0, 1.0])
+        poscar(defect_path, 6.0, [0.0, 1.0, 2.5, 3.5, 5.0])
+        perfect = assemble.module_metadata(perfect_path)
+        defect = assemble.module_metadata(defect_path)
+        defect["uc_count"] = 3
+        self.cfg["modules"] = {"perfect": perfect, "defects": {"X": defect}}
+        self.cfg["scatter_uc_count"] = 4
+        atoms, meta = assemble.build(self.cfg, 4)
+        self.assertEqual(len(atoms), 4 + 7 + 4)
+        self.assertEqual(meta["scatter_uc_count"], 4)
+
+    @unittest.skipUnless(importlib.util.find_spec("ase"), "ASE is unavailable locally")
     def test_real_8_2_poscar_generation(self):
         """Use the checked-in perfect UC as a placeholder defect module."""
         import numpy as np
