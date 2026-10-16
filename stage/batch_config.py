@@ -312,17 +312,6 @@ def resolve_self_energy_cache(cache, *, m, n, data_root,
     resolved = dict(cache)
     save_path = resolved.get("save_path")
     if isinstance(save_path, str):
-        if uc_sha256 is not None:
-            shared = save_path.startswith("{data_root}") or Path(save_path).is_absolute()
-            if shared and ("{uc_sha256}" not in save_path or "{ele_T}" not in save_path):
-                raise BatchConfigError(
-                    "外部 UC 使用共享自能缓存时，save_path 必须包含 "
-                    "{uc_sha256} 和 {ele_T}，避免复用不同结构或电子温度的自能"
-                )
-            if shared and ele_T is None:
-                raise BatchConfigError(
-                    "外部 UC 使用共享自能缓存时请显式设置 ele_T"
-                )
         try:
             resolved["save_path"] = save_path.format(
                 m=int(m),

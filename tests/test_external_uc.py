@@ -97,19 +97,13 @@ def test_external_uc_rejects_axial_vacuum(tmp_path):
         read_poscar_metadata(uc_path)
 
 
-def test_shared_cache_requires_uc_and_electronic_temperature(tmp_path):
+def test_shared_cache_path_is_user_controlled(tmp_path):
     cache = {
         "use_saved": True,
-        "save_path": "{data_root}/self_energy/{chirality}/",
+        "save_path": str(tmp_path / "self_energy" / "5_5" / "300K"),
     }
-    with pytest.raises(bc.BatchConfigError, match="uc_sha256"):
-        bc.resolve_self_energy_cache(
-            cache, m=5, n=5, data_root=tmp_path,
-            uc_sha256="a" * 64, ele_T=100,
-        )
-    cache["save_path"] += "{uc_sha256}/eleT_{ele_T}/"
     resolved = bc.resolve_self_energy_cache(
         cache, m=5, n=5, data_root=tmp_path,
         uc_sha256="a" * 64, ele_T=100,
     )
-    assert "/" + "a" * 64 + "/eleT_100/" in resolved["save_path"].replace("\\", "/")
+    assert resolved == cache

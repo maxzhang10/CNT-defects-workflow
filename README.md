@@ -95,7 +95,7 @@ python batch_generate.py --config batch.json --scheduler slurm --max-parallel 2 
 
 仓库当前的 `batch.py` 在 `(8,2)` 的 `CHIRAL_CONFIGS` 项中设置 `"uc_file": "POSCAR"`，只生成这一手性的任务。它沿用原 `(12,3)` 的长度、缺陷数与 replica 网格，共 15 组配置、740 个 replica；运行前可直接修改 `batch.py` 缩小批量。根目录的 `POSCAR` 必须随配置一同保留。
 
-推荐先独立建立和审核按手性组织的 UC 库，再让普通批次与 `self_energy_generate.py` 都引用同一文件。UC 库只描述优化后的结构和晶格常数；自能另按 UC 内容、电子温度 `ele_T`、模型、截断半径、能量网格等计算参数管理缓存。尤其当多个任务共享绝对路径的自能缓存时，应按这些参数分开目录，不应仅以手性命名。外部 UC 使用共享缓存时，工作流要求 `save_path` 含 `{uc_sha256}` 和 `{ele_T}`，并显式设置 `ele_T`，例如 `"{data_root}/self_energy/{chirality}/{uc_sha256}/eleT_{ele_T}/"`。结构的 DFT 优化条件可记录在 UC 库旁的元数据中，不作为运行时的 `ele_T`。
+推荐先独立建立和审核按手性组织的 UC 库，再让普通批次与 `self_energy_generate.py` 都引用同一文件。UC 库只描述优化后的结构和晶格常数；自能可按 UC 内容、电子温度 `ele_T`、模型、截断半径、能量网格等计算参数管理缓存。`save_path` 支持 `{chirality}`、`{uc_sha256}` 和 `{ele_T}` 等占位符，也接受用户指定的固定绝对路径；工作流不再强制路径包含哈希或电子温度，由用户负责确保缓存与当前电极结构和计算参数匹配。结构的 DFT 优化条件可记录在 UC 库旁的元数据中，不作为运行时的 `ele_T`。
 
 ### 长度、密度与缺陷数换算
 

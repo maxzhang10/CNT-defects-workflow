@@ -14,19 +14,20 @@ from pathlib import Path
 
 CHIRAL_CONFIGS = [
     {
-        "m": 11,
-        "n": 0,
-        # 可选："uc_file": "uc_library/{chirality}/POSCAR"；与批次共用
-        # 同一份已优化 UC，独立于下面的电子温度 ele_T。
+        "m": 5,
+        "n": 5,
+        "uc_file": "/public5/home/t6s008517/dpnegf/uc_self_energy_flow/input_files/uc_POSCAR/5_5/POSCAR",
+        "buffer_pl": 2,
         "l_def": 3,
         "N_defects": 0,
-        "structures": ["5775"]
+        "structures": ["MVH"],
+        "replicas": 1,
     }
-
 ]
 
 
-TEMPERATURES = [100]
+
+TEMPERATURES = [300]
 
 
 # 每个物理配置独立运行的 LAMMPS 轨迹数。
@@ -40,41 +41,26 @@ BASE_STRUCTURE_SEED = 20260705
 BASE_LAMMPS_SEED = 23456789
 
 
-TEMPLATE = {
-    "temperature": 300,
-    "chirality": [5, 5],
-    "r_max": 6.50,
-    "data_root": (
-        "/data/run01/scxk180/dpnegf/cc_workflow/self_energy/"
+TEMPLATE  = {
+    "r_max": 6.5,
+    "md_steps": 0,
+    "release_uc": 0,
+    "data_root": ("/public5/home/t6s008517/dpnegf/uc_opt_self_energy_culculate/5_5/"),
         
-    ),
-    "structures": ["5775"],
-    "N_defects": 3,
-    "l_def": 5,
-    # defect_density 接口的 replica 分配方式；显式 N_defects 时固定为
-    # same_count。该脚本当前的内置配置仍使用显式缺陷数。
-    "defect_count_mode": "same_count",
-    "md_steps":0,
-    # 每条独立 LAMMPS 轨迹只取最后一帧做 DPNEGF。
-    "md_sampling": {
-        "n_samples": 1,
-    },
-    # 能量网格（energy_grid: clenshaw_curtis/num_points/half_width）完全沿用
-    # input.json 模板默认值，不再由工作流外置 espacing/negf_energy_window。
-    # DPNEGF 电极电子温度 ele_T（K）。不设置（缺省/None）时沿用
-    # input_files/dpnegf/input.json 模板值，不覆写；
-    # 显式设置则写入每个 leaf 的 input.json 并纳入 provenance hash。
-    # 可在 CHIRAL_CONFIGS 任一 config 内加同名键单独覆盖。
-    "ele_T": 100,
-    # False 保持既有行为：DPNEGF 成功后清理 output/self_energy。
-    "save_self_energy": True,
-    # 覆盖 DPNEGF input.json 的 self_energy_options.cache 配置。
+    # defect_density 接口可选 same_count / balanced_count；下方显式
+    # N_defects 配置始终使用 same_count。
+    "defect_count_mode": "balanced_count",
+    "ele_T": 300,
+    "save_self_energy": False,
+    # 相对路径按每个 DPNEGF leaf 解析，各 replica 使用自己的缓存。
+    # 若改成跨 replica 共享的绝对路径，外部 UC 要加入
+    # {uc_sha256} 和 {ele_T}，并考虑模型、r_max 等电子参数。
     "self_energy_cache": {
         "use_saved": False,
-        "save_path": "./self_energy",
+        "save_path": "./self_energy/",
     },
+    "md_sampling": {"n_samples": 1},
 }
-
 
 def load_cnt_geometry(workflow_dir):
     """
