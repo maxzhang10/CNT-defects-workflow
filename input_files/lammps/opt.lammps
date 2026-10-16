@@ -16,8 +16,9 @@ pair_coeff      * * C
 
 
 
+# --- 0. 固定原子：受力和速度清零 ---
 # 每一端固定的原子数
-variable nfix equal N
+variable nfix equal 240
 
 # 计算右端固定区的起始原子 ID
 variable natoms equal atoms
@@ -31,12 +32,31 @@ group fixed union fixed_left fixed_right
 # 除两端固定原子外，其余原子作为可动散射区
 group mobile subtract all fixed
 
-# 固定原子：受力清零
+# 固定两端电极原子：受力和速度清零
 fix freeze fixed setforce 0.0 0.0 0.0
+velocity fixed set 0.0 0.0 0.0
+# --- 用左电极中心定义参考轴 ---
+compute com_left fixed_left com
+
+variable xc equal c_com_left[1]
+variable yc equal c_com_left[2]
+
+# --- 对 mobile 原子施加以电极中心轴为中心的 xy 弹簧 ---
+variable K equal 0.01
+
+variable dx atom "x-v_xc"
+variable dy atom "y-v_yc"
+
+variable fx atom "-v_K*v_dx"
+variable fy atom "-v_K*v_dy"
+
+variable Espring atom "0.5*v_K*(v_dx*v_dx+v_dy*v_dy)"
+
+fix radial mobile addforce v_fx v_fy 0.0 energy v_Espring
+fix_modify radial energy yes
 
 
-
-
+# --- 1. 能量最小化 ---
 thermo_style custom step pe etotal press fnorm fmax
 thermo       10
 
