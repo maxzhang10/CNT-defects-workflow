@@ -6,6 +6,23 @@ import random
 from pathlib import Path
 
 
+SEED_SCHEME = "assemble-v2"
+
+
+def derive_seeds(base_seed, scatter_uc_count, replica=0):
+    """Stable, domain-separated streams for each length and replica.
+
+    Direct plan/build callers use their supplied seed with replica=0.
+    Batch callers pass the original base seed and explicit replica number.
+    """
+    seeds = {"seed_scheme": SEED_SCHEME}
+    for purpose in ("placement", "rotation"):
+        payload = f"{SEED_SCHEME}:{base_seed}:{scatter_uc_count}:{replica}:{purpose}"
+        seeds[f"{purpose}_seed"] = int.from_bytes(
+            hashlib.sha256(payload.encode("ascii")).digest(), "big")
+    return seeds
+
+
 def module_metadata(path):
     """Read the axial *cell* length, not the extent of atomic coordinates."""
     path = Path(path).expanduser().resolve()
@@ -89,7 +106,7 @@ def lead_layout(perfect, m, n, r_max, buffer_pl, release_uc=1):
     }
 
 
-def plan(config, seed):
+def plan(config, seed, *, placement_seed=None):
     """Return a deterministic sequence; reject impossible lengths/counts."""
     modules = config["modules"]
     perfect = modules["perfect"]
@@ -104,13 +121,15 @@ def plan(config, seed):
         if any(key != "perfect" and key not in defects for key in sequence):
             raise ValueError("module_sequence contains an unknown module")
     else:
-        sequence = [key for key, count in counts.items() for _ in range(count)]
+        sequence = [key for key in sorted(counts) for _ in range(counts[key])]
         occupied_uc = sum(defects[key]["uc_count"] for key in sequence)
         remaining_uc = target_uc - occupied_uc
         if remaining_uc < 0:
             raise ValueError(f"defect modules occupy {occupied_uc} UC, exceeding scatter_uc_count={target_uc}")
         sequence += ["perfect"] * remaining_uc
-        random.Random(seed).shuffle(sequence)
+        if placement_seed is None:
+            placement_seed = derive_seeds(seed, target_uc)["placement_seed"]
+        random.Random(placement_seed).shuffle(sequence)
     actual_uc = sum(1 if key == "perfect" else defects[key]["uc_count"] for key in sequence)
     if actual_uc != target_uc:
         raise ValueError(f"module sequence occupies {actual_uc} UC, expected {target_uc} UC")
@@ -135,13 +154,18 @@ def _same_positions(reference, rotated, tolerance=0.08):
     return True
 
 
-def build(config, seed):
+def build(config, seed, *, placement_seed=None, rotation_seed=None):
     """Build electrode | scatter | electrode, returning ASE Atoms and metadata."""
     import numpy as np
     from ase.io import read
     from ase import Atoms
 
-    sequence, scatter_length = plan(config, seed)
+    seeds = derive_seeds(seed, config["scatter_uc_count"])
+    if placement_seed is not None:
+        seeds["placement_seed"] = placement_seed
+    if rotation_seed is not None:
+        seeds["rotation_seed"] = rotation_seed
+    sequence, scatter_length = plan(config, seed, placement_seed=seeds["placement_seed"])
     modules = config["modules"]
     source = {"perfect": modules["perfect"], **modules["defects"]}
     atoms_by_name = {}
@@ -197,7 +221,7 @@ def build(config, seed):
     pieces = []
     placement = []
     z = 0.0
-    rng = random.Random(seed)
+    rng = random.Random(seeds["rotation_seed"])
     for name in (["perfect"] * repeats + sequence + ["perfect"] * repeats):
         meta = source[name]
         block = atoms_by_name[name].copy()
@@ -218,7 +242,7 @@ def build(config, seed):
     result.cell[2, 2] = z
     n_electrode = layout["electrode_atoms_per_side"]
     defect_total = sum(config["defect_counts"].values())
-    return result, {"seed": seed, "module_sequence": sequence,
+    return result, {"seed": seed, **seeds, "module_sequence": sequence,
                     "placements": placement, "scatter_uc_count": config["scatter_uc_count"],
                     "scatter_length_angstrom": scatter_length,
                     "electrode_length_angstrom": layout["electrode_length_angstrom"],

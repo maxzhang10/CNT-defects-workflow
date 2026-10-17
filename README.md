@@ -227,7 +227,9 @@ squeue -u "$USER"
 
 独立批配置入口是 [`batch_assemble.py`](batch_assemble.py)。先把其中的完美模块和各缺陷模块路径改为自己准备的 POSCAR，然后在集群环境运行 `python batch_assemble.py --scheduler slurm`；本地预检可运行 `python -m unittest tests.test_assemble`。它调用现有 `batch_generate.py` / `run_multi.py` 调度和下游流程；原 `batch.py`、ASE 缺陷生成和外部单 UC 模式保持原样。配置中的 `md_steps = 0` 表示跳过 LAMMPS，直接从拼接 POSCAR 经 `sgeom` 进入 DPNEGF；设为正数则运行原有 LAMMPS MD 流程。
 
-每个 `configs` 条目填写 `perfect_module`（严格一个 UC）、`defect_modules`（名称到 `(POSCAR 路径, 占用 UC 数)`，例如 `{"MVH": ("./modules/MVH/POSCAR", 2)}`）、`defect_counts`（同名键到非负整数）、`scatter_uc_count`（散射区 UC 总数）、`buffer_pl`、`rotation_angles_deg`、`replicas`，可选 `module_sequence`。每出现一次缺陷模块计为一个缺陷，因此请准备每模块一个缺陷的 POSCAR。手动序列中用 `"perfect"` 表示完美模块，其余名称对应 `defect_modules`；不填时按 `base_structure_seed + replica` 随机排列缺陷模块，再以完美模块填满。缺陷模块的轴向晶胞长度必须等于声明的 UC 数乘完美 UC 的晶胞长度（容差 1e-5 Å）；长度取 POSCAR 晶胞向量，不取原子坐标跨度。缺陷模块占用的 UC 总数超过散射区时直接报错。
+每个 `configs` 条目填写 `perfect_module`（严格一个 UC）、`defect_modules`（名称到 `(POSCAR 路径, 占用 UC 数)`，例如 `{"MVH": ("./modules/MVH/POSCAR", 2)}`）、`defect_counts`（同名键到非负整数）、`scatter_uc_count`（散射区 UC 总数）、`buffer_pl`、`rotation_angles_deg`、`replicas`，可选 `module_sequence`。每出现一次缺陷模块计为一个缺陷，因此请准备每模块一个缺陷的 POSCAR。手动序列中用 `"perfect"` 表示完美模块，其余名称对应 `defect_modules`；不填时先以完美模块补足散射区 UC 数，再随机排列所有模块。缺陷模块的轴向晶胞长度必须等于声明的 UC 数乘完美 UC 的晶胞长度（容差 1e-5 Å）；长度取 POSCAR 晶胞向量，不取原子坐标跨度。缺陷模块占用的 UC 总数超过散射区时直接报错。
+
+assemble 的 `assemble-v2` 随机规则通过 SHA-256，从 `base_structure_seed`、`scatter_uc_count`、replica 编号（从 1 开始）及用途标签（`placement` / `rotation`）派生独立的排列和旋转种子。不同长度和不同 replica 使用不同随机流；同参数可复现，缺陷字典的书写顺序不影响排列。手动序列只固定排列，缺陷角度仍随机抽取。`workflow_config.json` 和 `assembly.json` 记录 `seed_scheme`、`placement_seed`、`rotation_seed`，并参与结果 provenance 校验。此规则会改变旧规则生成的结构；不同随机流仍可能偶然产生相同局部结构，不执行去重。LAMMPS 种子保持原规则。直接调用 `assemble.plan/build(config, seed)` 时，默认从给定 seed、散射区长度及 replica=0 派生种子；重建批任务请显式传入其记录的 `placement_seed`，构建时还需传入 `rotation_seed`。
 
 完美 POSCAR 必须恰好包含一个对应手性的 UC。沿用原工作流的 `l_PL = floor(r_max / T) + 1`：每侧先取 2 PL 电极，再取 `buffer_pl` 个 PL 缓冲；省略 `buffer_pl` 时金属管为 2、半导体管为 4。LAMMPS 固定端沿用最内侧放开 1 UC 的规则。电极和缓冲均仅由完美 UC 重复构造。`assembly.json` 同时记录散射区 UC 数和由 POSCAR 晶胞长度得到的实际 Å 长度；线密度只以散射区实际 Å 长度计算。
 

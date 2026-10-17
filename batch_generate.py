@@ -334,7 +334,9 @@ def build_assemble_tasks(batch, base_root):
             configuration_root = base_root / f"{temperature}K" / f"{cfg['m']}_{cfg['n']}" / name
             for replica in range(1, cfg["replicas"] + 1):
                 seed = batch["base_structure_seed"] + replica
-                sequence, actual = assemble.plan(cfg, seed)
+                seeds = assemble.derive_seeds(
+                    batch["base_structure_seed"], cfg["scatter_uc_count"], replica)
+                sequence, actual = assemble.plan(cfg, seed, placement_seed=seeds["placement_seed"])
                 run_root = configuration_root / f"replica_{replica:03d}"
                 if run_root in used_roots:
                     raise ValueError(f"two assembly tasks target the same directory: {run_root}")
@@ -350,7 +352,7 @@ def build_assemble_tasks(batch, base_root):
                     "density": count / actual, "folder_name": name,
                     "replica": replica, "replicas": cfg["replicas"],
                     "data_root": base_root, "configuration_root": configuration_root,
-                    "run_root": run_root, "seed": seed,
+                    "run_root": run_root, "seed": seed, **seeds,
                     "lammps_seed": batch["base_lammps_seed"] + replica,
                     "ele_T": ele_T,
                     "save_self_energy": template["save_self_energy"],
@@ -447,6 +449,8 @@ def make_assemble_task_config(task, batch):
     mu = ["Ev", "Ec"] if task["conductance_mode"] == "band_edge_bias" else ["Ef"]
     config.update({
         "structure_mode": "assemble", "assembly": copy.deepcopy(cfg),
+        "seed_scheme": task["seed_scheme"],
+        "placement_seed": task["placement_seed"], "rotation_seed": task["rotation_seed"],
         "lammps_mode": batch["lammps_mode"], "temperature": task["temperature"],
         "chirality": [task["m"], task["n"]], "l_def": 1,
         "buffer_pl": cfg["buffer_pl"],

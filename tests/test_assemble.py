@@ -2,6 +2,8 @@
 
 import importlib.util
 import json
+import random
+from collections import Counter
 import sys
 import tempfile
 import unittest
@@ -61,6 +63,37 @@ class AssemblyTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "defect counts"):
             assemble.plan(self.cfg, 1)
 
+    def test_seed_streams_depend_on_length_replica_and_purpose(self):
+        first = assemble.derive_seeds(20260705, 6, 1)
+        self.assertEqual(first, assemble.derive_seeds(20260705, 6, 1))
+        variants = [assemble.derive_seeds(20260705, length, replica)
+                    for length in (6, 8) for replica in (1, 2)]
+        values = [item[key] for item in variants
+                  for key in ("placement_seed", "rotation_seed")]
+        self.assertEqual(len(set(values)), 8)
+
+    def test_minimal_joint_sampling_has_no_position_angle_lock(self):
+        self.cfg["modules"]["defects"]["X"]["uc_count"] = 1
+        self.cfg["scatter_uc_count"] = 2
+        joint = Counter()
+        for replica in range(1, 2001):
+            seeds = assemble.derive_seeds(20260705, 2, replica)
+            sequence, _ = assemble.plan(
+                self.cfg, 0, placement_seed=seeds["placement_seed"])
+            angle = random.Random(seeds["rotation_seed"]).choice([0, 180])
+            joint[(sequence.index("X"), angle)] += 1
+        self.assertEqual(len(joint), 4)
+        for count in joint.values():
+            self.assertTrue(350 < count < 650, joint)
+
+    def test_defect_dictionary_order_does_not_change_plan(self):
+        self.cfg["modules"]["defects"]["Y"] = self.cfg["modules"]["defects"]["X"]
+        self.cfg["scatter_uc_count"] = 6
+        self.cfg["defect_counts"] = {"X": 1, "Y": 1}
+        expected = assemble.plan(self.cfg, 42)
+        self.cfg["defect_counts"] = {"Y": 1, "X": 1}
+        self.assertEqual(expected, assemble.plan(self.cfg, 42))
+
     def test_batch_entry_normalization(self):
         source = STAGE.parent / "input_files" / "uc_POSCAR" / "8_2" / "POSCAR"
         period = assemble.module_metadata(source)["length_angstrom"]
@@ -78,6 +111,20 @@ class AssemblyTests(unittest.TestCase):
         self.assertEqual(batch["configs"][0]["layout"]["l_PL_uc"], 1)
         self.assertEqual(batch["configs"][0]["layout"]["side_repeats"], 4)
         self.assertEqual(batch["structure_mode"], "assemble")
+        import batch_generate
+        import negf_provenance
+        tasks = batch_generate.build_tasks(batch, batch["data_root"])
+        config = batch_generate.make_task_config(tasks[0], batch)
+        seeds = assemble.derive_seeds(batch["base_structure_seed"], 3, 1)
+        for key, value in seeds.items():
+            self.assertEqual(config[key], value)
+        self.assertEqual(tasks[0]["sequence"], assemble.plan(
+            config["assembly"], config["seed"],
+            placement_seed=config["placement_seed"])[0])
+        self.assertNotEqual(tasks[0]["rotation_seed"], tasks[1]["rotation_seed"])
+        old_hash = negf_provenance.compute_negf_config_hash(config)
+        config["rotation_seed"] += 1
+        self.assertNotEqual(old_hash, negf_provenance.compute_negf_config_hash(config))
         raw["configs"][0]["defect_modules"]["X"] = [str(source), 2]
         path.write_text(json.dumps(raw), encoding="utf-8")
         with self.assertRaisesRegex(ValueError, "cell length"):
@@ -98,6 +145,23 @@ class AssemblyTests(unittest.TestCase):
         self.assertEqual(meta["electrode_atoms_per_side"], 4)
         self.assertEqual(meta["atoms_per_pl"], 2)
         self.assertEqual(meta["actual_density_A_inv"], 1 / 6)
+
+    @unittest.skipUnless(importlib.util.find_spec("ase"), "ASE is unavailable locally")
+    def test_build_uses_separate_explicit_streams(self):
+        self.cfg["rotation_angles_deg"] = [0, 360]
+        atoms, info = assemble.build(self.cfg, 4, placement_seed=11, rotation_seed=22)
+        again, repeated = assemble.build(self.cfg, 4, placement_seed=11, rotation_seed=22)
+        self.assertEqual(info, repeated)
+        self.assertTrue((atoms.positions == again.positions).all())
+        _, changed_rotation = assemble.build(self.cfg, 4, placement_seed=11, rotation_seed=23)
+        self.assertEqual(info["module_sequence"], changed_rotation["module_sequence"])
+        _, changed_placement = assemble.build(self.cfg, 4, placement_seed=12, rotation_seed=22)
+        defect_angles = lambda meta: [p["rotation_deg"] for p in meta["placements"]
+                                     if p["module"] != "perfect"]
+        self.assertEqual(defect_angles(info), defect_angles(changed_placement))
+        self.assertEqual(defect_angles(info), [random.Random(22).choice([0, 360])])
+        self.assertEqual(info["placement_seed"], 11)
+        self.assertEqual(info["rotation_seed"], 22)
 
     @unittest.skipUnless(importlib.util.find_spec("ase"), "ASE is unavailable locally")
     def test_interface_layer_exactly_at_half_uc_is_included(self):
@@ -147,8 +211,9 @@ class AssemblyTests(unittest.TestCase):
         batch = batch_config.load(batch_file)
         task = batch_generate.build_tasks(batch, batch["data_root"])[0]
         config = batch_generate.make_task_config(task, batch)
-        atoms_a, info_a = assemble.build(config["assembly"], config["seed"])
-        atoms_b, info_b = assemble.build(config["assembly"], config["seed"])
+        streams = {key: config[key] for key in ("placement_seed", "rotation_seed")}
+        atoms_a, info_a = assemble.build(config["assembly"], config["seed"], **streams)
+        atoms_b, info_b = assemble.build(config["assembly"], config["seed"], **streams)
         self.assertEqual(info_a, info_b)
         self.assertTrue(np.array_equal(atoms_a.positions, atoms_b.positions))
         self.assertEqual(len(atoms_a), 11 * 56)
@@ -168,6 +233,7 @@ class AssemblyTests(unittest.TestCase):
         self.assertTrue((result_dir / "lammps" / "data.lmp").is_file())
         self.assertFalse((result_dir / "lammps" / "in.lammps").exists())
         saved = json.loads((result_dir / "assembly.json").read_text(encoding="utf-8"))
+        self.assertEqual(saved, info_a)
         self.assertEqual(saved["N_defects"], 1)
         self.assertEqual(saved["scatter_uc_count"], 3)
         self.assertEqual(len(saved["placements"]), 11)

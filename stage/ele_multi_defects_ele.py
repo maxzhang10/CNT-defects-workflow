@@ -197,7 +197,11 @@ def main_assemble(config):
     if output_dir.exists() and any(output_dir.iterdir()):
         raise FileExistsError(f"assembly structure exists: {output_dir}")
     seed = int(config["seed"])
-    atoms, meta = assemble.build(config["assembly"], seed)
+    atoms, meta = assemble.build(
+        config["assembly"], seed,
+        placement_seed=config.get("placement_seed"),
+        rotation_seed=config.get("rotation_seed"),
+    )
     m, n = map(int, config["chirality"])
     atoms = exporters.reposition_hydrogens(atoms, meta["side_atoms_per_side"])
     output_dir.mkdir(parents=True, exist_ok=False)
