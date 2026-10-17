@@ -20,6 +20,8 @@ def test_cleans_leaf_level_self_energy_dir(tmp_path):
     out = leaf / "output"
     out.mkdir()
     (out / "HS_device.h5").write_bytes(b"data")
+    for name in ("profile_report_negf.html", "profile_report_ham_init.html"):
+        (out / name).write_text("report")
 
     run_multi.clean_dpnegf_output_cache(
         tmp_path, save_self_energy=False, self_energy_save_path="./self_energy/"
@@ -27,6 +29,8 @@ def test_cleans_leaf_level_self_energy_dir(tmp_path):
 
     assert not se_dir.exists()       # configured path cleaned
     assert not (out / "HS_device.h5").exists()
+    assert not (out / "profile_report_negf.html").exists()
+    assert not (out / "profile_report_ham_init.html").exists()
 
 
 def test_preserves_when_save_self_energy_true(tmp_path):
@@ -38,12 +42,16 @@ def test_preserves_when_save_self_energy_true(tmp_path):
     out = leaf / "output"
     out.mkdir()
     (out / "HS_device.h5").write_bytes(b"data")
+    for name in ("profile_report_negf.html", "profile_report_ham_init.html"):
+        (out / name).write_text("report")
 
     run_multi.clean_dpnegf_output_cache(
         tmp_path, save_self_energy=True, self_energy_save_path="./self_energy/"
     )
 
     assert se_dir.exists()              # preserved
+    assert (out / "profile_report_negf.html").is_file()
+    assert (out / "profile_report_ham_init.html").is_file()
     # HS files are cleaned even when self_energy is preserved.
     assert not (out / "HS_device.h5").exists()
 
