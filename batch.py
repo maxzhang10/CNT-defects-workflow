@@ -11,6 +11,7 @@ data_root = "."                # 相对路径按本文件所在目录解析
 max_parallel = 16
 
 template = {
+    "defect_angle_range_deg": [0, 360],  # 缺陷锚点周向范围（度）；例如 [0, 90]
     "r_max": 6.5,
     "md_steps": 15000,
     "buffer_pl": 4,

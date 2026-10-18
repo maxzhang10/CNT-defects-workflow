@@ -11,6 +11,7 @@ import defects
 import exporters
 import lammps_io
 import logkit as L
+from defect_angles import normalize_angle_range
 
 
 def multi_defects_ele(tube, coords, type_list, seed=None):
@@ -62,6 +63,7 @@ def generate_defect_coords(
     seed=None,
     max_trials=20000,
     buffer_pl=None,
+    defect_angle_range_deg=(0, 360),
 ):
     """
     在缺陷区内随机生成 N 个缺陷坐标。
@@ -74,6 +76,8 @@ def generate_defect_coords(
     5. 最终坐标吸附到真实 C 原子上；
     6. 完全由 seed 控制随机性。
     """
+    angle_start, angle_end = normalize_angle_range(defect_angle_range_deg)
+    angle_width = angle_end - angle_start
     if N < 0:
         raise ValueError(f"N 不能小于 0，当前值: {N}")
     if N == 0:
@@ -112,7 +116,9 @@ def generate_defect_coords(
     while len(coords) < N and trial < max_trials:
         trial += 1
 
-        theta_rand = rng.uniform(-np.pi, np.pi)
+        # Keep the legacy random sequence for a full circle.
+        theta_rand = (rng.uniform(-np.pi, np.pi) if angle_width == 360
+                      else np.deg2rad(rng.uniform(angle_start, angle_end)))
         z_rand = rng.uniform(z_low, z_high)
 
         index = cnt_geometry.coord_to_index(
@@ -128,6 +134,8 @@ def generate_defect_coords(
         # 吸附到真实 C 原子位置
         theta_atom = cnt_geometry.wrap_to_pi(cyl["theta"][index - 1])
         z_atom = cyl["z"][index - 1]
+        if angle_width < 360 and (np.rad2deg(theta_atom) - angle_start) % 360 > angle_width:
+            continue
 
         if not (z_low <= z_atom <= z_high):
             continue
@@ -143,7 +151,8 @@ def generate_defect_coords(
     if len(coords) < N:
         raise RuntimeError(
             f"只生成了 {len(coords)} 个缺陷，目标是 {N} 个。"
-            f"可以降低 N、减小 min_sep、减小 edge_margin，或者增大 l_def。"
+            f"角度范围为 [{angle_start}, {angle_end}] 度。"
+            f"可以扩大角度范围、降低 N、减小 min_sep、减小 edge_margin，或者增大 l_def。"
         )
 
     return coords, used_indices
@@ -314,6 +323,7 @@ def main():
         edge_margin=edge_margin,
         seed=seed,
         buffer_pl=buffer_pl,
+        defect_angle_range_deg=config.get("defect_angle_range_deg", [0, 360]),
     )
 
     density = len(defects_coord_ind) / (l_def * T)
@@ -404,6 +414,7 @@ def main():
     # 旧版 defect_log 仅输出到终端，同一配置目录会混合不同实际缺陷组成，
     # 后续统计无法从持久化元数据判断每个 replica 的真实类型和位置。
     defects_meta = {
+        "defect_angle_range_deg": normalize_angle_range(config.get("defect_angle_range_deg", [0, 360])),
         "seed": seed,
         "type_list": type_list,
         "defect_log": defect_log,

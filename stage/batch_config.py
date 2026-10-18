@@ -144,11 +144,13 @@ from pathlib import Path
 
 from uc_source import read_poscar_metadata
 import assemble
+from defect_angles import normalize_angle_range
 
 
 # template 层的公共物理默认值。旧版硬编码在 batch_generate.py 的
 # TEMPLATE 全局常量中；JSON 的 template 字段可逐项覆盖。
 DEFAULT_TEMPLATE = {
+    "defect_angle_range_deg": [0, 360],
     "r_max": 6.5,
     "md_steps": 50000,
     "buffer_pl": None,
@@ -516,6 +518,8 @@ def validate_config_entry(
     out["_resolution"] = resolution
     out["l_def"] = l_def
     out["buffer_pl"] = buffer_pl
+    if "defect_angle_range_deg" in entry:
+        out["defect_angle_range_deg"] = normalize_angle_range(entry["defect_angle_range_deg"])
     out["release_uc"] = release_uc
     out["ele_T"] = ele_T
     out["N_defects"] = n_defects
@@ -678,6 +682,7 @@ def _validate_batch(raw, path):
     if not isinstance(template_raw, dict):
         _fail(path, f"template 必须为对象，当前值: {template_raw!r}")
     template = {**DEFAULT_TEMPLATE, **template_raw}
+    template["defect_angle_range_deg"] = normalize_angle_range(template["defect_angle_range_deg"])
     _require_bool(template["save_self_energy"], "template.save_self_energy", path)
     template["defect_count_mode"] = _require_defect_count_mode(
         template["defect_count_mode"], "template.defect_count_mode", path

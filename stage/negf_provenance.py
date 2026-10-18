@@ -24,6 +24,7 @@ import hashlib
 import json
 from pathlib import Path
 from typing import Any, Mapping
+from defect_angles import normalize_angle_range
 
 
 # 影响 negf.out.pth 的 workflow_config 参数：
@@ -82,6 +83,12 @@ def compute_negf_config_hash(config: Mapping[str, Any]) -> str:
         if key in config:
             subset[key] = config[key]
     payload = _canonicalize(subset)
+    if config.get("structure_mode") != "assemble":
+        angle_range = normalize_angle_range(config.get("defect_angle_range_deg", [0, 360]))
+        # Full-circle defaults must retain hashes produced before this option existed.
+        if angle_range != [0, 360]:
+            subset["defect_angle_range_deg"] = angle_range
+            payload = _canonicalize(subset)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
