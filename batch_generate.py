@@ -329,15 +329,25 @@ def build_assemble_tasks(batch, base_root):
         physical = {key: cfg[key] for key in (
             "modules", "defect_counts", "scatter_uc_count",
             "layout", "rotation_angles_deg", "module_sequence")}
+        if cfg.get("defect_mix_mode") == "balanced_count":
+            physical.update(defect_mix_mode="balanced_count", total_defects=cfg["total_defects"])
         fingerprint = hashlib.sha256(json.dumps(physical, sort_keys=True).encode()).hexdigest()[:12]
         for temperature in batch["temperatures"]:
             name = f"assemble_UC{cfg['scatter_uc_count']}_D{sum(cfg['defect_counts'].values())}_{fingerprint}"
             configuration_root = base_root / f"{temperature}K" / f"{cfg['m']}_{cfg['n']}" / name
             for replica in range(1, cfg["replicas"] + 1):
+                replica_cfg = cfg
+                if cfg.get("defect_mix_mode") == "balanced_count":
+                    replica_cfg = copy.deepcopy(cfg)
+                    names = sorted(cfg["defect_counts"])
+                    first = bc.balanced_defect_count(cfg["total_defects"] / 2, replica)
+                    replica_cfg["defect_counts"] = {
+                        names[0]: first, names[1]: cfg["total_defects"] - first,
+                    }
                 seed = batch["base_structure_seed"] + replica
                 seeds = assemble.derive_seeds(
                     batch["base_structure_seed"], cfg["scatter_uc_count"], replica)
-                sequence, actual = assemble.plan(cfg, seed, placement_seed=seeds["placement_seed"])
+                sequence, actual = assemble.plan(replica_cfg, seed, placement_seed=seeds["placement_seed"])
                 run_root = configuration_root / f"replica_{replica:03d}"
                 if run_root in used_roots:
                     raise ValueError(f"two assembly tasks target the same directory: {run_root}")
@@ -348,7 +358,7 @@ def build_assemble_tasks(batch, base_root):
                     "task_id": f"{temperature}K_{cfg['m']}_{cfg['n']}_{name}_rep{replica:03d}",
                     "config_name": f"{temperature}K/{cfg['m']}_{cfg['n']}/{name}",
                     "temperature": temperature, "m": cfg["m"], "n": cfg["n"],
-                    "assembly": cfg, "sequence": sequence,
+                    "assembly": replica_cfg, "sequence": sequence,
                     "N_defects": count, "actual_density": count / actual,
                     "density": count / actual, "folder_name": name,
                     "replica": replica, "replicas": cfg["replicas"],

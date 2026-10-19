@@ -130,6 +130,76 @@ class AssemblyTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "cell length"):
             batch_config.load(path)
 
+    def test_balanced_mixture_tasks_and_prefix_stability(self):
+        import batch_generate
+        source = STAGE.parent / "input_files" / "uc_POSCAR" / "8_2" / "POSCAR"
+        entry = {"chirality": [8, 2], "perfect_module": str(source),
+                 "defect_modules": {"MVH2": [str(source), 1], "MVH1": [str(source), 1]},
+                 "defect_mix_mode": "balanced_count", "total_defects": 5,
+                 "scatter_uc_count": 6, "rotation_angles_deg": [0], "replicas": 3}
+        raw = {"structure_mode": "assemble", "temperatures": [100],
+               "configs": [entry]}
+        path = self.root / "batch.json"
+
+        def tasks():
+            path.write_text(json.dumps(raw), encoding="utf-8")
+            batch = batch_config.load(path)
+            return batch, batch_generate.build_tasks(batch, self.root)
+
+        batch, first = tasks()
+        expected = [{"MVH1": 3, "MVH2": 2}, {"MVH1": 2, "MVH2": 3},
+                    {"MVH1": 3, "MVH2": 2}]
+        self.assertEqual([t["assembly"]["defect_counts"] for t in first], expected)
+        self.assertEqual(batch["configs"][0]["defect_counts"], expected[0])
+        for task, counts in zip(first, expected):
+            self.assertEqual(task["N_defects"], 5)
+            self.assertEqual(Counter(task["sequence"]), Counter({**counts, "perfect": 1}))
+            config = batch_generate.make_task_config(task, batch)
+            self.assertEqual(config["assembly"]["defect_counts"], counts)
+            _, metadata = assemble.build(
+                config["assembly"], config["seed"],
+                placement_seed=config["placement_seed"], rotation_seed=config["rotation_seed"])
+            self.assertEqual(metadata["defect_counts"], counts)
+            self.assertEqual(metadata["N_defects"], 5)
+        entry["replicas"] = 6
+        entry["defect_modules"] = dict(reversed(list(entry["defect_modules"].items())))
+        _, extended = tasks()
+        for before, after in zip(first, extended):
+            for key in ("sequence", "run_root", "placement_seed", "rotation_seed", "assembly"):
+                if key == "assembly":
+                    self.assertEqual(before[key]["defect_counts"], after[key]["defect_counts"])
+                else:
+                    self.assertEqual(before[key], after[key])
+        self.assertEqual(sum(t["assembly"]["defect_counts"]["MVH1"] for t in extended), 15)
+        for total in (0, 1, 4):
+            entry["total_defects"] = total
+            _, generated = tasks()
+            for task in generated:
+                counts = task["assembly"]["defect_counts"]
+                self.assertEqual(sum(counts.values()), total)
+                self.assertLessEqual(abs(counts["MVH1"] - counts["MVH2"]), 1)
+        entry["total_defects"] = 5
+        entry["defect_counts"] = {"MVH1": 3, "MVH2": 2}
+        with self.assertRaisesRegex(ValueError, "cannot specify defect_counts"):
+            tasks()
+        del entry["defect_counts"]
+        entry["module_sequence"] = []
+        with self.assertRaisesRegex(ValueError, "cannot specify module_sequence"):
+            tasks()
+        del entry["module_sequence"]
+        entry["total_defects"] = 7
+        with self.assertRaisesRegex(ValueError, "exceeding"):
+            tasks()
+        entry["total_defects"] = 5
+        doubled = self.root / "two_uc"
+        poscar(doubled, 2 * assemble.module_metadata(source)["length_angstrom"], [0.2])
+        entry["defect_modules"]["MVH2"] = [str(doubled), 2]
+        with self.assertRaisesRegex(ValueError, "equal module UC counts"):
+            tasks()
+        del entry["defect_modules"]["MVH2"]
+        with self.assertRaisesRegex(ValueError, "exactly two"):
+            tasks()
+
     def test_perfect_module_must_be_one_uc(self):
         source = STAGE.parent / "input_files" / "uc_POSCAR" / "8_2" / "POSCAR"
         perfect = assemble.module_metadata(source)

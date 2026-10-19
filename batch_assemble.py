@@ -22,6 +22,11 @@ configs = [
         "perfect_module": "./input_files/uc_POSCAR/8_2/POSCAR",
         "defect_modules": {"MVH": ("./modules/8_2/MVH_POSCAR", 1)},
         "defect_counts": {"MVH": 2},
+        # 两种等比例混合时，用以下三项替换上面 defect_modules / defect_counts：
+        # "defect_modules": {"MVH1": ("./modules/8_2/MVH1_POSCAR", 1),
+        #                    "MVH2": ("./modules/8_2/MVH2_POSCAR", 1)},
+        # "defect_mix_mode": "balanced_count",
+        # "total_defects": 3,  # replica 依次为 (2,1)、(1,2)，每根总数固定
         "scatter_uc_count": 6,
         "buffer_pl": 2,  # (8,2) 旧规则：每侧 2PL 电极 + 2PL 缓冲
         "rotation_angles_deg": [0, 180],  # 只填经接口原子配准检验可用的离散角度

@@ -579,7 +579,26 @@ def validate_assemble_entry(entry, index, path, template):
     try:
         perfect_path = Path(entry["perfect_module"])
         defect_paths = entry["defect_modules"]
-        counts = entry["defect_counts"]
+        mix_mode = entry.get("defect_mix_mode", "fixed_count")
+        if mix_mode not in ("fixed_count", "balanced_count"):
+            _fail(path, f"{label}.defect_mix_mode must be fixed_count or balanced_count")
+        if mix_mode == "balanced_count":
+            if "defect_counts" in entry:
+                _fail(path, f"{label}: balanced mixture cannot specify defect_counts")
+            total = _require_int(entry["total_defects"], f"{label}.total_defects", path, minimum=0)
+            if not isinstance(defect_paths, dict) or len(defect_paths) != 2:
+                _fail(path, f"{label}: balanced mixture requires exactly two defect modules")
+            if any(not isinstance(k, str) or not k for k in defect_paths):
+                _fail(path, f"{label}: invalid defect names")
+            names = sorted(defect_paths)
+            first = balanced_defect_count(total / 2, 1)
+            counts = {names[0]: first, names[1]: total - first}
+            if entry.get("module_sequence") is not None:
+                _fail(path, f"{label}: balanced mixture cannot specify module_sequence")
+        else:
+            if "total_defects" in entry:
+                _fail(path, f"{label}: total_defects requires defect_mix_mode=balanced_count")
+            counts = entry["defect_counts"]
         scatter_uc = _require_int(entry["scatter_uc_count"], f"{label}.scatter_uc_count", path)
         angles = entry["rotation_angles_deg"]
     except (KeyError, TypeError, ValueError) as exc:
@@ -618,6 +637,8 @@ def validate_assemble_entry(entry, index, path, template):
                     f"defect module {name} cell length {defects[name]['length_angstrom']} Å "
                     f"does not equal {value[1]} × perfect UC length ({expected_length} Å)"
                 )
+        if mix_mode == "balanced_count" and len({m["uc_count"] for m in defects.values()}) != 1:
+            raise ValueError("balanced mixture requires equal module UC counts")
         for name, module in defects.items():
             if any(abs(a - b) > 1e-5 for va, vb in zip(module["cell"][:2], perfect["cell"][:2])
                    for a, b in zip(va, vb)):
@@ -647,6 +668,9 @@ def validate_assemble_entry(entry, index, path, template):
         }
         if normalized["module_sequence"] is not None and not isinstance(normalized["module_sequence"], list):
             raise ValueError("module_sequence must be a list")
+        if mix_mode == "balanced_count":
+            normalized["defect_mix_mode"] = mix_mode
+            normalized["total_defects"] = total
         assemble.plan(normalized, 0)
     except (OSError, ValueError, TypeError, KeyError) as exc:
         _fail(path, f"{label}: {exc}")
