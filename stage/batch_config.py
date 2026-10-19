@@ -564,6 +564,19 @@ _BATCH_PY_KEYS = (
 )
 
 
+def balanced_module_counts(names, total, replica):
+    """Equal mixture with prefix-stable, round-robin remainder allocation."""
+    names = sorted(names)
+    if len(names) < 2:
+        raise ValueError("balanced mixture requires at least two defect modules")
+    base, remainder = divmod(total, len(names))
+    counts = dict.fromkeys(names, base)
+    start = ((replica - 1) * remainder) % len(names)
+    for offset in range(remainder):
+        counts[names[(start + offset) % len(names)]] += 1
+    return counts
+
+
 def validate_assemble_entry(entry, index, path, template):
     """Validate a separate module-assembly configuration without UC rounding."""
     label = f"configs[{index}]"
@@ -586,13 +599,11 @@ def validate_assemble_entry(entry, index, path, template):
             if "defect_counts" in entry:
                 _fail(path, f"{label}: balanced mixture cannot specify defect_counts")
             total = _require_int(entry["total_defects"], f"{label}.total_defects", path, minimum=0)
-            if not isinstance(defect_paths, dict) or len(defect_paths) != 2:
-                _fail(path, f"{label}: balanced mixture requires exactly two defect modules")
+            if not isinstance(defect_paths, dict) or len(defect_paths) < 2:
+                _fail(path, f"{label}: balanced mixture requires at least two defect modules")
             if any(not isinstance(k, str) or not k for k in defect_paths):
                 _fail(path, f"{label}: invalid defect names")
-            names = sorted(defect_paths)
-            first = balanced_defect_count(total / 2, 1)
-            counts = {names[0]: first, names[1]: total - first}
+            counts = balanced_module_counts(defect_paths, total, 1)
             if entry.get("module_sequence") is not None:
                 _fail(path, f"{label}: balanced mixture cannot specify module_sequence")
         else:

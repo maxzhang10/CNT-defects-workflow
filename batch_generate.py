@@ -339,11 +339,9 @@ def build_assemble_tasks(batch, base_root):
                 replica_cfg = cfg
                 if cfg.get("defect_mix_mode") == "balanced_count":
                     replica_cfg = copy.deepcopy(cfg)
-                    names = sorted(cfg["defect_counts"])
-                    first = bc.balanced_defect_count(cfg["total_defects"] / 2, replica)
-                    replica_cfg["defect_counts"] = {
-                        names[0]: first, names[1]: cfg["total_defects"] - first,
-                    }
+                    replica_cfg["defect_counts"] = bc.balanced_module_counts(
+                        cfg["defect_counts"], cfg["total_defects"], replica,
+                    )
                 seed = batch["base_structure_seed"] + replica
                 seeds = assemble.derive_seeds(
                     batch["base_structure_seed"], cfg["scatter_uc_count"], replica)

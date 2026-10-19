@@ -197,8 +197,50 @@ class AssemblyTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "equal module UC counts"):
             tasks()
         del entry["defect_modules"]["MVH2"]
-        with self.assertRaisesRegex(ValueError, "exactly two"):
+        with self.assertRaisesRegex(ValueError, "at least two"):
             tasks()
+
+    def test_multi_module_balanced_mixture(self):
+        import batch_generate
+        source = STAGE.parent / "input_files" / "uc_POSCAR" / "8_2" / "POSCAR"
+        for size in (3, 4, 5):
+            names = [f"MVH{i}" for i in range(size)]
+            for total in (0, 1, size - 1, size, size + 1, 2 * size - 1):
+                entry = {"chirality": [8, 2], "perfect_module": str(source),
+                         "defect_modules": {name: [str(source), 1] for name in names},
+                         "defect_mix_mode": "balanced_count", "total_defects": total,
+                         "scatter_uc_count": 2 * size, "rotation_angles_deg": [0],
+                         "replicas": size + 1}
+                raw = {"structure_mode": "assemble", "temperatures": [100], "configs": [entry]}
+                path = self.root / "batch.json"
+                path.write_text(json.dumps(raw), encoding="utf-8")
+                batch = batch_config.load(path)
+                first = batch_generate.build_tasks(batch, self.root)
+                cumulative = Counter(dict.fromkeys(names, 0))
+                for task in first:
+                    counts = task["assembly"]["defect_counts"]
+                    self.assertEqual(sum(counts.values()), total)
+                    self.assertLessEqual(max(counts.values()) - min(counts.values()), 1)
+                    cumulative.update(counts)
+                    self.assertLessEqual(max(cumulative.values()) - min(cumulative.values()), 1)
+                    self.assertEqual(Counter(task["sequence"]),
+                                     Counter({**counts, "perfect": 2 * size - total}))
+                    config = batch_generate.make_task_config(task, batch)
+                    self.assertEqual(config["assembly"]["defect_counts"], counts)
+                entry["replicas"] += size
+                entry["defect_modules"] = dict(reversed(list(entry["defect_modules"].items())))
+                path.write_text(json.dumps(raw), encoding="utf-8")
+                extended = batch_generate.build_tasks(batch_config.load(path), self.root)
+                for before, after in zip(first, extended):
+                    for key in ("sequence", "run_root", "placement_seed", "rotation_seed"):
+                        self.assertEqual(before[key], after[key])
+                    self.assertEqual(before["assembly"]["defect_counts"], after["assembly"]["defect_counts"])
+                if size == 4 and total == 5:
+                    config = batch_generate.make_task_config(first[0], batch)
+                    _, metadata = assemble.build(config["assembly"], config["seed"],
+                        placement_seed=config["placement_seed"], rotation_seed=config["rotation_seed"])
+                    self.assertEqual(metadata["defect_counts"], dict(zip(names, (2, 1, 1, 1))))
+                    self.assertEqual(metadata["N_defects"], 5)
 
     def test_perfect_module_must_be_one_uc(self):
         source = STAGE.parent / "input_files" / "uc_POSCAR" / "8_2" / "POSCAR"
