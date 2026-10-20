@@ -265,6 +265,14 @@ def prepare_lammps_inputs(
             ):
                 line = "pair_coeff * * C H\n"
 
+            # CPU AIREBO-M 模板的势文件名位于元素列表之前。
+            if lammps_device == "cpu" and has_hydrogen:
+                line = re.sub(
+                    r'^(\s*pair_coeff\s+\*\s+\*\s+"?(?:\./)?CH\.airebo-m"?\s+C)(\s*(?:#.*)?)$',
+                    r"\1 H\2",
+                    line,
+                )
+
             new_lines.append(line)
 
         # 这些字段缺失时直接报错，避免模板没有被真正改到。
