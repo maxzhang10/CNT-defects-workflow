@@ -205,6 +205,7 @@ lammps_io.prepare_lammps_inputs(
     l_PL=l_PL,
     N_uc=N_uc,
     data_root=data_root,
+    lammps_device=config.get("lammps_device", "gpu"),
     md_steps=md_steps
 )
 

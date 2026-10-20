@@ -42,6 +42,7 @@ def prepare_lammps_inputs(
     files=None,
     lammps_seed=None,
     model_file=None,
+    lammps_device="gpu",
     lammps_mode="md",
     buffer_pl=None,
     release_uc=None,
@@ -105,16 +106,19 @@ def prepare_lammps_inputs(
     if not input_dir.is_dir():
         raise FileNotFoundError(f"源文件夹不存在: {input_dir}")
 
-    # 力场文件：input_dir 下任意 *.pth 都视为 DeepMD 机器学习力场。
+    # 力场文件：cpu 查找 CH.airebo-m；gpu 查找 DeepMD *.pth。
     # 体积大，leaf 目录用软连接指向它，不写死文件名。
-    model_files = sorted(input_dir.glob("*.pth"))
+    if lammps_device not in ("cpu", "gpu"):
+        raise ValueError("lammps_device 必须为 cpu / gpu")
+    potential_pattern = "CH.airebo-m" if lammps_device == "cpu" else "*.pth"
+    model_files = sorted(input_dir.glob(potential_pattern))
 
     if len(model_files) == 0:
         raise FileNotFoundError(
-            f"未在 input_dir 中找到 .pth 力场文件: {input_dir}"
+            f"未在 input_dir 中找到 {potential_pattern} 力场文件: {input_dir}"
         )
 
-    if model_file is not None:
+    if model_file is not None and lammps_device == "gpu":
         model_src = input_dir / model_file
         if not model_src.is_file():
             raise FileNotFoundError(
@@ -245,7 +249,7 @@ def prepare_lammps_inputs(
             # （input_dir 里 glob 出的 .pth 文件名不固定）。
             # 模板里的旧路径可能是相对/绝对路径，也可能带英文双引号，
             # 统一改写成指向工作目录内软链接的 ./<filename>（不带引号）。
-            if re.match(r'^\s*pair_style\s+deepmd\s+"?\S+\.pth"?\s*$', line):
+            if lammps_device == "gpu" and re.match(r'^\s*pair_style\s+deepmd\s+"?\S+\.pth"?\s*$', line):
                 line = re.sub(
                     r'(^\s*pair_style\s+deepmd\s+)"?\S+\.pth"?(\s*$)',
                     rf"\g<1>./{model_filename}\g<2>",

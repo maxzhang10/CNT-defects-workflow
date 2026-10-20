@@ -5,6 +5,7 @@
 
 temperatures = [100]
 lammps_mode = "md"             # "md" NVT 退火 / "opt" 几何优化
+lammps_device = "gpu"          # "cpu": CH.airebo-m / "gpu": *.pth
 base_structure_seed = 20260705
 base_lammps_seed = 23456789
 data_root = "."                # 相对路径按本文件所在目录解析

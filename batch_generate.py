@@ -398,6 +398,7 @@ def make_task_config(task, batch):
     )
 
     config.update({
+        "lammps_device": batch.get("lammps_device", "gpu"),
         "lammps_mode": batch["lammps_mode"],
         "temperature": task["temperature"],
         "chirality": [
@@ -461,6 +462,7 @@ def make_assemble_task_config(task, batch):
         "structure_mode": "assemble", "assembly": copy.deepcopy(cfg),
         "seed_scheme": task["seed_scheme"],
         "placement_seed": task["placement_seed"], "rotation_seed": task["rotation_seed"],
+        "lammps_device": batch.get("lammps_device", "gpu"),
         "lammps_mode": batch["lammps_mode"], "temperature": task["temperature"],
         "chirality": [task["m"], task["n"]], "l_def": 1,
         "buffer_pl": cfg["buffer_pl"],

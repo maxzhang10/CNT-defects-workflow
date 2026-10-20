@@ -232,6 +232,7 @@ def main_assemble(config):
             data_root=Path(config["data_root"]), structure_root=root,
             md_steps=md_steps, lammps_seed=config.get("lammps_seed"),
             lammps_mode=lammps_mode,
+            lammps_device=config.get("lammps_device", "gpu"),
             fixed_atoms_per_side=meta["fixed_atoms_per_side"],
         )
     L.info(f"assembled {meta['module_sequence']} into {root}; scatter={meta['scatter_length_angstrom']} A")
@@ -466,6 +467,7 @@ def main():
         md_steps=md_steps,
         lammps_seed=lammps_seed,
         lammps_mode=lammps_mode,
+        lammps_device=config.get("lammps_device", "gpu"),
         buffer_pl=buffer_pl,
         release_uc=release_uc,
     )

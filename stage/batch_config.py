@@ -555,6 +555,7 @@ _BATCH_PY_KEYS = (
     "template",
     "temperatures",
     "lammps_mode",
+    "lammps_device",
     "base_structure_seed",
     "base_lammps_seed",
     "data_root",
@@ -760,6 +761,10 @@ def _validate_batch(raw, path):
             f"当前值: {lammps_mode!r}",
         )
 
+    lammps_device = raw.get("lammps_device", "gpu")
+    if lammps_device not in ("cpu", "gpu"):
+        _fail(path, "lammps_device 必须为 cpu / gpu")
+
     base_structure_seed = _require_int(
         raw.get("base_structure_seed", 20260705), "base_structure_seed", path
     )
@@ -806,6 +811,7 @@ def _validate_batch(raw, path):
         "template": template,
         "temperatures": list(temperatures),
         "lammps_mode": lammps_mode,
+        "lammps_device": lammps_device,
         "base_structure_seed": base_structure_seed,
         "base_lammps_seed": base_lammps_seed,
         "data_root": data_root,

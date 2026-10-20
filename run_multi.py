@@ -202,7 +202,7 @@ def find_poscar_structure_dirs(root: Path):
             dirs.add(path.parent.parent.resolve() if path.parent.name == "lammps" else path.parent.resolve())
     return sorted(dirs)
 
-def is_lammps_workdir(p: Path) -> bool:
+def is_lammps_workdir(p: Path, lammps_device="gpu") -> bool:
     """
     判断是否是 LAMMPS 工作目录。
     例如:
@@ -219,23 +219,23 @@ def is_lammps_workdir(p: Path) -> bool:
     if not all((p / name).exists() for name in required):
         return False
 
-    # 力场文件：接受任意 *.pth 机器学习力场，不写死文件名。
-    if not list(p.glob("*.pth")):
+    # 力场文件：cpu 使用 CH.airebo-m，gpu 使用任意 *.pth。
+    if not list(p.glob("CH.airebo-m" if lammps_device == "cpu" else "*.pth")):
         return False
 
     return True
 
 
-def find_lammps_workdirs(root: Path):
+def find_lammps_workdirs(root: Path, lammps_device="gpu"):
     """
     在 root 下递归寻找所有 lammps 工作目录。
     """
-    if is_lammps_workdir(root):
+    if is_lammps_workdir(root, lammps_device):
         return [root]
 
     workdirs = []
     for p in root.rglob("lammps"):
-        if is_lammps_workdir(p):
+        if is_lammps_workdir(p, lammps_device):
             workdirs.append(p)
 
     return sorted(set(workdirs))
@@ -653,7 +653,7 @@ def main():
         # 0.5 运行lammps任务
         # ============================================================
         L.phase(2, 7, "LAMMPS 几何优化" if lammps_mode == "opt" else "LAMMPS 退火")
-        lammps_workdirs = find_lammps_workdirs(root)
+        lammps_workdirs = find_lammps_workdirs(root, config.get("lammps_device", "gpu"))
 
         if not run_lammps:
             L.info("md_steps=0，跳过 LAMMPS 运行，直接使用 POSCAR")
@@ -661,7 +661,7 @@ def main():
             raise RuntimeError(
                 f"没有找到 LAMMPS 工作目录。请确认 {root} 下存在类似:\n"
                 f"  data/300K/5_5/DV_DV/lammps\n"
-                f"并且其中包含 data.lmp / in.lammps / *.pth / run.sh"
+                f"并且其中包含 data.lmp / in.lammps / 力场文件 / run.sh"
             )
 
         if run_lammps:
@@ -669,7 +669,7 @@ def main():
             for i, w in enumerate(lammps_workdirs, 1):
                 L.item(i, len(lammps_workdirs), w)
             for workdir in lammps_workdirs:
-                run_cmd([py, str(sub_lammps_script), str(workdir), "--scheduler", args.scheduler], dry_run=args.dry_run, env=env)
+                run_cmd([py, str(sub_lammps_script), str(workdir), "--scheduler", args.scheduler, "--lammps-device", config.get("lammps_device", "gpu")], dry_run=args.dry_run, env=env)
 
         # SLURM 屏障：等所有 LAMMPS 作业跑完再进入 dump->fdf（后者依赖 dump 产物）。
         # local 模式下每个 sub_lmps 已阻塞跑完，这里等价于一次性 flag 复核。

@@ -3,6 +3,7 @@
 structure_mode = "assemble"
 temperatures = [100]
 lammps_mode = "md"
+lammps_device = "gpu"          # "cpu": CH.airebo-m / "gpu": *.pth
 base_structure_seed = 20260705
 base_lammps_seed = 23456789
 data_root = "./assemble_data"

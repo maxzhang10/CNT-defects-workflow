@@ -59,7 +59,7 @@ def local_lammps_command() -> list[str]:
     return cmd
 
 
-def check_required_files(workdir: Path):
+def check_required_files(workdir: Path, lammps_device="gpu"):
     required = (
         "data.lmp",
         "in.lammps",
@@ -72,9 +72,10 @@ def check_required_files(workdir: Path):
         if not (workdir / name).exists()
     ]
 
-    # 力场文件：接受任意 *.pth 机器学习力场，不写死文件名。
-    if not list(workdir.glob("*.pth")):
-        missing.append("*.pth")
+    # 力场文件：cpu 使用 CH.airebo-m，gpu 使用任意 *.pth。
+    pattern = "CH.airebo-m" if lammps_device == "cpu" else "*.pth"
+    if not list(workdir.glob(pattern)):
+        missing.append(pattern)
 
     if missing:
         raise FileNotFoundError(
@@ -275,6 +276,7 @@ def main() -> int:
         default=0,
         help="最大重试次数；0 表示无限重试",
     )
+    parser.add_argument("--lammps-device", choices=("cpu", "gpu"), default="gpu")
     args = parser.parse_args()
 
     if args.submit_retry_interval < 1:
@@ -338,7 +340,7 @@ def main() -> int:
         submitted_flag.unlink(missing_ok=True)
         job_id_file.unlink(missing_ok=True)
 
-    check_required_files(workdir)
+    check_required_files(workdir, args.lammps_device)
 
     if args.scheduler == "local":
         job_id = run_lammps_local(workdir)

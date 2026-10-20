@@ -44,6 +44,7 @@ BASE_LAMMPS_SEED = 23456789
 TEMPLATE  = {
     "r_max": 6.5,
     "md_steps": 0,
+    "lammps_device": "gpu",  # "cpu": CH.airebo-m / "gpu": *.pth
     "release_uc": 0,
     "data_root": ("/public5/home/t6s008517/dpnegf/uc_opt_self_energy_culculate/5_5/"),
         
