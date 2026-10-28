@@ -11,12 +11,11 @@ from uc_source import read_poscar_metadata
 def clean_cnt_by_shift_wrap_anchor(tube, z_shift=0.1, anchor_index=0):
     """
     对完整 CNT 做 z 方向 clean：
-
-    1. 所有原子 z 坐标加一个小量 z_shift；
+    1. 按 z, y, x 排序，再将所有原子 z 坐标加一个小量 z_shift；
     2. wrap 回周期盒子；
     3. 取 anchor_index 号原子的 z 坐标作为参考；
     4. 所有原子 z 减去这个参考值，使该原子 z = 0；
-    5. 再按 z, y, x 排序。
+    5. 再次 wrap 后按 z, y, x 排序。
 
     参数
     ----
@@ -24,28 +23,32 @@ def clean_cnt_by_shift_wrap_anchor(tube, z_shift=0.1, anchor_index=0):
     z_shift : float
         z 方向平移量，默认 0.1 Å。
     anchor_index : int
-        作为 z 归零参考的原子编号，Python 从 0 开始。
-        anchor_index=0 对应“一号原子”。
+        首次排序后的原子编号，Python 从 0 开始。
+        anchor_index=0 对应 z 最小的原子。
     """
 
     tube = tube.copy()
+    # 1. 排序：z, y, x
+    p = tube.positions
+    order = np.lexsort((p[:, 0], p[:, 1], p[:, 2]))
+    tube = tube[order]
 
-    # 1. z 方向整体平移
+    # 2. z 方向整体平移
     tube.positions[:, 2] += z_shift
 
-    # 2. wrap 回 cell
+    # 3. wrap 回 cell
     tube.wrap()
 
-    # 3. 取一号原子的 z 作为参考
+    # 4. 取首次排序后 anchor_index 号原子的 z 作为参考
     z0 = tube.positions[anchor_index, 2]
 
-    # 4. z 归零
+    # 5. z 归零
     tube.positions[:, 2] -= z0
 
-    # 5. 再 wrap 一次，避免出现负 z
+    # 6. 再 wrap 一次，避免出现负 z
     tube.wrap()
 
-    # 6. 排序：z, y, x
+    # 7. wrap 可能将单胞末端的原子移到开头，需恢复轴向顺序。
     p = tube.positions
     order = np.lexsort((p[:, 0], p[:, 1], p[:, 2]))
     tube = tube[order]
