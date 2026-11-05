@@ -123,10 +123,13 @@ def write_siesta_fdf(
     wrap: bool = False,
     comment: str = "",
     origin: Optional[np.ndarray] = None,
+    left_pl_atoms: int = 0,
 ) -> None:
     # Sort by id for reproducibility
     atoms = sorted(atoms, key=lambda t: t[0])
     natoms = len(atoms)
+    if not 0 <= left_pl_atoms <= natoms:
+        raise ValueError(f"left_pl_atoms must be between 0 and {natoms}")
 
     # P2-5：LAMMPS dump 用 units metal（Å）。若输出单位选 Bohr，必须把
     # 晶格和坐标从 Å 换算到 Bohr（÷ ase.units.Bohr = ÷ 0.529177...），
@@ -147,6 +150,15 @@ def write_siesta_fdf(
     pos = np.array([[x, y, z] for _, _, x, y, z in atoms], dtype=float)
     if wrap:
         pos = wrap_positions_cartesian(pos, H, origin=origin)
+    if left_pl_atoms:
+        # LAMMPS can place a slightly negative first-lead z at the far edge
+        # of its periodic box. Restore that image without rounding away the
+        # small negative offset used by the electrode/self-energy structure.
+        lz = float(H[2, 2])
+        zhi = lz + (float(origin[2]) if origin is not None else 0.0)
+        first_pl = pos[:left_pl_atoms, 2]
+        near_upper_edge = np.abs(first_pl - zhi) <= 1e-3
+        first_pl[near_upper_edge] -= lz
     pos_out = pos * scale
 
     with open(out_path, "w", encoding="utf-8") as f:
@@ -183,8 +195,8 @@ def write_siesta_fdf(
         f.write("%endblock AtomicCoordinatesAndAtomicSpecies\n")
 
 def find_dump_files(root: str, dump_name: str) -> List[str]:
-    
-   
+
+
     import fnmatch
 
     has_glob = any(ch in dump_name for ch in ["*", "?", "[", "]"])
@@ -221,6 +233,7 @@ def extract_from_one_dump(
     end: Optional[int],
     skip_zero: bool,
     samples: Optional[int] = None,
+    left_pl_atoms: int = 0,
 ) -> int:
     """
     从 dump 文件中提取并写入 FDF 文件。
@@ -316,6 +329,7 @@ def extract_from_one_dump(
             comment=(f"from {dump_path} timestep {timestep} natoms={len(atoms)} "
                      f"tilt(xy,xz,yz)=({xy},{xz},{yz})"),
             origin=origin,
+            left_pl_atoms=left_pl_atoms,
         )
         written += 1
 
@@ -346,6 +360,8 @@ def main():
                     help="do NOT skip timestep 0 (default: skip 0)")
     ap.add_argument("--samples", type=int, default=None,
                     help="只保留最后 N 个满足条件的帧，用于从 MD 轨迹多次采样 (default: None, 保留所有)")
+    ap.add_argument("--unwrap-left-pl-atoms", type=int, default=0,
+                    help="restore first-PL atoms wrapped near the upper z boundary by subtracting Lz")
     args = ap.parse_args()
 
     dumps = find_dump_files(args.root, args.dump_name)
@@ -373,6 +389,7 @@ def main():
             end=args.end,
             skip_zero=(not args.no_skip_zero),
             samples=args.samples,
+            left_pl_atoms=args.unwrap_left_pl_atoms,
         )
         total_frames += n
         L.ok(f"{dump_path} -> {out_base_dir}/<timestep>/STRUCT.fdf   frames={n}")

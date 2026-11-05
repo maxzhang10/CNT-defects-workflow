@@ -771,6 +771,11 @@ def main():
                 "--samples",
                 "1",
             ]
+        if config.get("structure_mode") == "assemble":
+            cmd.extend([
+                "--unwrap-left-pl-atoms",
+                str(config["assembly"]["layout"]["atoms_per_pl"]),
+            ])
         run_cmd(cmd, dry_run=args.dry_run, env=env)
 
     # ============================================================

@@ -85,3 +85,31 @@ def test_ang_output_no_scaling(tmp_path):
     text = out.read_text(encoding="utf-8")
 
     assert "5.00000000" in text
+
+
+def test_restore_wrapped_first_pl_without_rounding_or_touching_right_lead(tmp_path):
+    lz = 81.16390017
+    dump = tmp_path / "optimized.dump"
+    dump.write_text(
+        "ITEM: TIMESTEP\n1\nITEM: NUMBER OF ATOMS\n4\n"
+        "ITEM: BOX BOUNDS pp pp pp\n0 20\n0 20\n"
+        f"0 {lz}\nITEM: ATOMS id type x y z\n"
+        f"4 1 1 1 {lz - 0.000001}\n"
+        "2 1 1 1 7.37853645\n"
+        "3 1 1 1 14.7570729\n"
+        f"1 1 1 1 {lz - 0.000002}\n",
+        encoding="utf-8",
+    )
+    out = tmp_path / "out"
+    written = d2f.extract_from_one_dump(
+        str(dump), str(out), every=1, coord_unit="Ang", wrap=False,
+        start=None, end=None, skip_zero=False, samples=1, left_pl_atoms=2,
+    )
+    assert written == 1
+    lines = (out / "1" / "STRUCT.fdf").read_text(encoding="utf-8").splitlines()
+    coordinates = [line.split() for line in lines if "# id " in line]
+    np.testing.assert_allclose(
+        [float(line[2]) for line in coordinates],
+        [-0.000002, 7.37853645, 14.7570729, lz - 0.000001],
+        rtol=0, atol=1e-8,
+    )
