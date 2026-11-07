@@ -276,11 +276,11 @@ class AssemblyTests(unittest.TestCase):
         self.assertEqual(info["rotation_seed"], 22)
 
     @unittest.skipUnless(importlib.util.find_spec("ase"), "ASE is unavailable locally")
-    def test_interface_layer_exactly_at_half_uc_is_included(self):
+    def test_only_outermost_interface_layer_is_checked(self):
         perfect_path = self.root / "half_layer_perfect"
         defect_path = self.root / "half_layer_defect"
         poscar(perfect_path, 2.0, [0.0, 1.0])
-        poscar(defect_path, 6.0, [0.0, 1.0, 2.5, 3.5, 5.0])
+        poscar(defect_path, 6.0, [0.0, 1.3, 2.5, 3.5, 5.0])
         perfect = assemble.module_metadata(perfect_path)
         defect = assemble.module_metadata(defect_path)
         defect["uc_count"] = 3
@@ -289,6 +289,21 @@ class AssemblyTests(unittest.TestCase):
         atoms, meta = assemble.build(self.cfg, 4)
         self.assertEqual(len(atoms), 4 + 7 + 4)
         self.assertEqual(meta["scatter_uc_count"], 4)
+
+        poscar(defect_path, 6.0, [0.4, 1.3, 2.5, 3.5, 5.0])
+        self.cfg["modules"]["defects"]["X"] = assemble.module_metadata(defect_path)
+        self.cfg["modules"]["defects"]["X"]["uc_count"] = 3
+        with self.assertRaisesRegex(ValueError, "unregistered left interface"):
+            assemble.build(self.cfg, 4)
+
+    @unittest.skipUnless(importlib.util.find_spec("ase"), "ASE is unavailable locally")
+    def test_outermost_layer_includes_small_axial_offsets(self):
+        from ase import Atoms
+
+        atoms = Atoms("CCCC", positions=[(0, 0, 0), (1, 0, 0.01),
+                                         (2, 0, 0.5), (3, 0, 1)])
+        self.assertEqual(len(assemble._outermost_layer(atoms, "left")), 2)
+        self.assertEqual(len(assemble._outermost_layer(atoms, "right")), 1)
 
     @unittest.skipUnless(importlib.util.find_spec("ase"), "ASE is unavailable locally")
     def test_real_8_2_poscar_generation(self):

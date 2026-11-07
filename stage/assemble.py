@@ -154,6 +154,15 @@ def _same_positions(reference, rotated, tolerance=0.08):
     return True
 
 
+def _outermost_layer(atoms, side, tolerance=0.2):
+    """Select the atoms in the axial layer nearest one module end."""
+    import numpy as np
+
+    z = atoms.positions[:, 2]
+    end = z.min() if side == "left" else z.max()
+    return atoms[np.abs(z - end) <= tolerance]
+
+
 def build(config, seed, *, placement_seed=None, rotation_seed=None):
     """Build electrode | scatter | electrode, returning ASE Atoms and metadata."""
     import numpy as np
@@ -188,29 +197,19 @@ def build(config, seed, *, placement_seed=None, rotation_seed=None):
         if not _same_positions(perfect, rotated):
             raise ValueError(f"rotation {angle}° does not preserve perfect-module atomic registry")
     # Input modules are user-prepared. Require a common transverse cell and
-    # matching pristine seam atoms at both ends; never shift or repair them.
+    # matching outermost atomic layers at both ends; never shift or repair them.
     for name, atoms in atoms_by_name.items():
         meta = source[name]
         if not np.allclose(np.asarray(meta["cell"])[:2], np.asarray(perfect_meta["cell"])[:2], atol=1e-5):
             raise ValueError(f"module {name} has a different transverse cell")
         if name != "perfect":
-            period = perfect_meta["length_angstrom"]
-            seam_width = min(
-                period / 2, meta["length_angstrom"] / 2,
-                max(1.5, float(perfect.positions[:, 2].min()) + 0.2,
-                    period - float(perfect.positions[:, 2].max()) + 0.2),
-            )
-            seam_tolerance = 1e-3
             for angle in angles:
                 rotated = atoms.copy()
                 rotated.rotate(angle, "z", center=(axis[0], axis[1], 0))
                 for side in ("left", "right"):
-                    if side == "left":
-                        actual = rotated[rotated.positions[:, 2] <= seam_width + seam_tolerance]
-                        expected = perfect[perfect.positions[:, 2] <= seam_width + seam_tolerance]
-                    else:
-                        actual = rotated[rotated.positions[:, 2] >= meta["length_angstrom"] - seam_width - seam_tolerance]
-                        expected = perfect[perfect.positions[:, 2] >= perfect_meta["length_angstrom"] - seam_width - seam_tolerance].copy()
+                    actual = _outermost_layer(rotated, side)
+                    expected = _outermost_layer(perfect, side).copy()
+                    if side == "right":
                         expected.positions[:, 2] += meta["length_angstrom"] - perfect_meta["length_angstrom"]
                     if not len(expected):
                         raise ValueError(f"perfect module has no {side} interface atoms to validate")
