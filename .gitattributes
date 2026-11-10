@@ -1,2 +1,2 @@
-# Keep shell scripts runnable after checkout on Windows and Linux.
-*.sh text eol=lf
+# 文本文件统一使用 LF
+* text=auto eol=lf
