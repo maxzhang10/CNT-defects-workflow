@@ -191,7 +191,20 @@ N_i = q + floor(i × f + 0.5) - floor((i-1) × f + 0.5)
 在 **batch.py 的 data_root** 写入 `transfer_manifest.json`。任何任务失败、
 末帧缺失或转换结果无效都会阻止生成清单。原始 dump 留在 A。
 
-从 A 复制轻量结构（替换账号和目录）：
+若 A 已配置用户自己的 `~/bscc_put.sh`，推荐直接调用仓库中的包装脚本：
+
+```bash
+chmod +x ./bscc_put_dpnegf.sh
+./bscc_put_dpnegf.sh \
+  /data/cnt_batch \
+  /public5/home/t6s008517/cnt_batch/
+```
+
+包装脚本严格校验 `transfer_manifest.json` 中的 SHA-256，只整理清单列出的
+轻量文件，然后一次调用 `~/bscc_put.sh` 上传。账号、主机、端口和断点续传
+配置继续由 `~/bscc_put.sh` 管理。第三个参数可指定其他上传脚本路径。
+
+也可以不使用包装脚本，手工执行等价的 rsync（替换账号和目录）：
 
 ```bash
 rsync -a --prune-empty-dirs \
