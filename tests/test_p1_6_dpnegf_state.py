@@ -16,7 +16,7 @@ if str(_REPO_ROOT) not in sys.path:
 
 
 def test_dpnegf_run_sh_implements_state_protocol():
-    run_sh = _REPO_ROOT / "input_files" / "dpnegf" / "run.sh"
+    run_sh = _REPO_ROOT / "input_files" / "gpu_cluster" / "dpnegf" / "run.sh"
     text = run_sh.read_text(encoding="utf-8")
 
     # Robust error handling matching the LAMMPS template.

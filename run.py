@@ -12,6 +12,7 @@ _STAGE_DIR = Path(__file__).resolve().parent / "stage"
 if str(_STAGE_DIR) not in sys.path:
     sys.path.insert(0, str(_STAGE_DIR))
 import logkit as L
+from cluster_inputs import input_directory
 
 def run_cmd(cmd, dry_run=False, env=None):
     L.run(" ".join(map(str, cmd)))
@@ -488,7 +489,7 @@ def main():
     # ============================================================
     L.phase(5, 6, "复制 DPNEGF 输入")
     project_root = Path(__file__).resolve().parent
-    dpnegf_input_dir = project_root / "input_files" / "dpnegf"
+    dpnegf_input_dir = input_directory(config.get('lammps_device', 'gpu'), 'dpnegf', project_root)
 
     if not dpnegf_input_dir.exists():
         raise FileNotFoundError(f"dpnegf input_dir 不存在: {dpnegf_input_dir}")

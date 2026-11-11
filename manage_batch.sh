@@ -20,6 +20,12 @@ fi
 # （那样会缺 BATCH_DATA_DIR，把仓库当成数据目录）。
 CMD="${BATCH_MANAGER_CMD:-$0}"
 
+PHASE="${BATCH_PHASE:-all}"
+case "$PHASE" in
+    all|lammps|dpnegf) ;;
+    *) echo "无效 BATCH_PHASE: $PHASE"; exit 2 ;;
+esac
+
 PID_FILE="$DATA_DIR/batch_generate.pid"
 STATUS_FILE="$DATA_DIR/batch_generate.status"
 
@@ -74,6 +80,7 @@ start_job() {
         prev_log_file="$4"
         status_file="$5"
         pid_file="$6"
+        phase="$7"
 
         # 在数据目录运行：batch_generate.py 缺省探测 ./batch.py，
         # data_root 相对路径也按数据目录解析
@@ -94,12 +101,13 @@ start_job() {
         echo "[$(date "+%F %T")] 调度器启动，PID=$$"
         echo "[$(date "+%F %T")] 工作目录：$data_dir"
         echo "[$(date "+%F %T")] 软件目录：$workflow_dir"
+        echo "[$(date "+%F %T")] 阶段：$phase"
 
         round=1
         start_time="$(date "+%F %T")"
 
-        printf "%s running PID=%s round=%s\n" \
-            "$start_time" "$$" "$round" > "$status_file"
+        printf "%s running PID=%s round=%s phase=%s\n" \
+            "$start_time" "$$" "$round" "$phase" > "$status_file"
 
         echo
         echo "============================================================"
@@ -118,7 +126,8 @@ start_job() {
 
         # manage不控制并行参数，完全交给batch_generate.py自身配置
         # （并行度写在批配置顶层 max_parallel，可用 --max-parallel 覆盖）
-        if python "$workflow_dir/batch_generate.py" >"$log_file" 2>&1; then
+        batch_args=(--phase "$phase")
+        if python "$workflow_dir/batch_generate.py" "${batch_args[@]}" >"$log_file" 2>&1; then
             rc=0
         else
             rc=$?
@@ -131,8 +140,8 @@ start_job() {
             echo "[$end_time] 第 ${round} 轮正常结束，全部任务完成"
             echo "[$end_time] 调度器自动退出"
 
-            printf "%s completed PID=%s round=%s result=success\n" \
-                "$end_time" "$$" "$round" > "$status_file"
+            printf "%s completed PID=%s round=%s phase=%s result=success\n" \
+                "$end_time" "$$" "$round" "$phase" > "$status_file"
 
             rm -f "$pid_file"
             exit 0
@@ -143,8 +152,8 @@ start_job() {
         echo "[$end_time] 第 ${round} 轮失败，exit=$rc"
         echo "[$end_time] 调度器退出；未自动重试或重交，请查看 $log_file"
 
-        printf "%s completed PID=%s round=%s result=failed exit=%s auto_retry=false\n" \
-            "$end_time" "$$" "$round" "$rc" > "$status_file"
+        printf "%s completed PID=%s round=%s phase=%s result=failed exit=%s auto_retry=false\n" \
+            "$end_time" "$$" "$round" "$phase" "$rc" > "$status_file"
 
         rm -f "$pid_file"
         exit "$rc"
@@ -155,6 +164,7 @@ start_job() {
         "$PREV_LOG_FILE" \
         "$STATUS_FILE" \
         "$PID_FILE" \
+        "$PHASE" \
         >>"$MANAGER_LOG" 2>&1 &
 
     local pid=$!
@@ -188,6 +198,7 @@ start_job() {
     echo "PID          : $pid"
     echo "数据目录     : $DATA_DIR"
     echo "软件目录     : $SCRIPT_DIR"
+    echo "阶段         : $PHASE"
     echo
     echo "状态         : $CMD status"
     echo "当前日志     : $CMD log"

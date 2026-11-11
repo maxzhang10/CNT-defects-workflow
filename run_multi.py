@@ -15,6 +15,7 @@ import logkit as L
 from slurm_utils import wait_for_jobs, check_flags, get_stage_state
 from negf_provenance import result_is_readable
 import cnt_geometry
+from cluster_inputs import input_directory, validate_templates
 
 def run_cmd(cmd, dry_run=False, env=None, cwd=None):
     L.run(" ".join(map(str, cmd)))
@@ -497,7 +498,14 @@ def main():
         default=30,
         help="slurm 模式下 squeue 轮询间隔（秒）",
     )
+    parser.add_argument('--phase', choices=('all', 'lammps', 'dpnegf'), default='all')
     args = parser.parse_args()
+    if args.phase == 'dpnegf':
+        args.skip_ele = True
+    if args.phase == 'lammps':
+        args.skip_dpnegf = True
+        if args.skip_ele:
+            raise ValueError('--phase lammps cannot be combined with --skip-ele')
 
     stage = Path(args.stage).resolve()
     py = args.python
@@ -521,7 +529,7 @@ def main():
 
     # LAMMPS 模式：
     #   "md" （缺省）NVT 热退火，温度/步数/种子由 config 驱动；
-    #   "opt" 只做几何优化（模板为 input_files/lammps/opt.lammps，
+    #   "opt" 只做几何优化（模板为 input_files/<device>_cluster/lammps/opt.lammps，
     #         拷贝后命名为 in.lammps），不消费 md_steps。
     lammps_mode = config.get("lammps_mode", "md")
     if lammps_mode not in ("md", "opt"):
@@ -641,14 +649,17 @@ def main():
     # ============================================================
     if not args.skip_ele:
         L.phase(1, 7, "生成缺陷几何 (eledefects)")
-        run_cmd(
-            [
-                py,
-                str(ele_defects_script),
-            ],
-            dry_run=args.dry_run,
-            env=env,
-        )
+        if args.phase == 'lammps' and (root / 'lammps/data.lmp').exists():
+            L.skip('Resume existing LAMMPS inputs')
+        else:
+            if run_lammps:
+                validate_templates(config.get('lammps_device', 'gpu'), 'lammps',
+                                   Path(__file__).resolve().parent, lammps_mode)
+            run_cmd(
+                [py, str(ele_defects_script)],
+                dry_run=args.dry_run,
+                env=env,
+            )
         # ============================================================
         # 0.5 运行lammps任务
         # ============================================================
@@ -682,8 +693,9 @@ def main():
     # ============================================================
     # 1. 查找含 dump 的结构目录
     # ============================================================
-    L.phase(3, 7, "dump -> fdf")
-    structure_dirs = find_poscar_structure_dirs(root) if not run_lammps else find_structure_dirs(root)
+    L.phase(3, 7, "读取交付结构" if args.phase == 'dpnegf' else "dump -> fdf")
+    structure_dirs = ([root] if args.phase == 'dpnegf' else
+                      find_poscar_structure_dirs(root) if not run_lammps else find_structure_dirs(root))
 
     if not structure_dirs:
         raise RuntimeError(
@@ -703,6 +715,8 @@ def main():
     # 2. 每个结构目录单独 dump -> fdf
     # ============================================================
     for struct_dir in structure_dirs:
+        if args.phase == 'dpnegf':
+            continue
         outroot = struct_dir / "dpnegf"
 
         if not run_lammps:
@@ -776,13 +790,20 @@ def main():
                 "--unwrap-left-pl-atoms",
                 str(config["assembly"]["layout"]["atoms_per_pl"]),
             ])
+        if args.phase == 'lammps':
+            cmd.append('--require-frames')
+            if lammps_mode == 'md':
+                cmd.extend(['--start', str(md_steps), '--end', str(md_steps)])
         run_cmd(cmd, dry_run=args.dry_run, env=env)
 
     # ============================================================
     # 3. 对每个结构的 dpnegf 目录做 fdf -> xyz
     # ============================================================
-    L.phase(4, 7, "fdf -> xyz")
+    if args.phase != 'dpnegf':
+        L.phase(4, 7, "fdf -> xyz")
     for struct_dir in structure_dirs:
+        if args.phase == 'dpnegf':
+            continue
         dpnegf_dir = struct_dir / "dpnegf"
 
         if not dpnegf_dir.exists():
@@ -807,9 +828,18 @@ def main():
     # ============================================================
     # 4. 复制 dpnegf 输入文件
     # ============================================================
+    if args.phase == 'lammps':
+        if not args.dry_run:
+            from split_workflow import validate_structures
+            validate_structures(root, config)
+        return
+
     L.phase(5, 7, "复制 DPNEGF 输入")
+    if args.phase == 'dpnegf' and not args.dry_run:
+        from split_workflow import validate_structures
+        validate_structures(root, config)
     project_root = Path(__file__).resolve().parent
-    dpnegf_input_dir = project_root / "input_files" / "dpnegf"
+    dpnegf_input_dir = input_directory(config.get('lammps_device', 'gpu'), 'dpnegf', project_root)
 
     if not dpnegf_input_dir.exists():
         raise FileNotFoundError(f"dpnegf input_dir 不存在: {dpnegf_input_dir}")
@@ -838,6 +868,19 @@ def main():
         if not dpnegf_dir.exists():
             L.warn(f"dpnegf 目录不存在，跳过 copy_input: {dpnegf_dir}")
             continue
+
+        if args.phase == 'dpnegf' and not args.dry_run:
+            from split_workflow import lock_inputs
+            from negf_provenance import compute_negf_config_hash
+            leaf = next(dpnegf_dir.rglob('STRUCT.fdf')).parent
+            if (leaf / 'dpnegf_input_fingerprint.json').exists():
+                lock_inputs(leaf)
+            if (leaf / 'dpnegf_done.flag').exists() or (leaf / 'dpnegf_submitted.flag').exists():
+                lock_inputs(leaf)
+                expected = (leaf / 'expected_negf_config_hash.txt').read_text().strip()
+                if expected != compute_negf_config_hash(config):
+                    raise ValueError(f'Configuration changed for existing DPNEGF job/result: {leaf}')
+                continue
 
         run_cmd(
             [
@@ -876,6 +919,9 @@ def main():
             L.item(i, len(dpnegf_workdirs), w)
 
         for workdir in dpnegf_workdirs:
+            if args.phase == 'dpnegf' and not args.dry_run:
+                from split_workflow import lock_inputs
+                lock_inputs(workdir)
             run_cmd(
                 [
                     py,

@@ -7,9 +7,12 @@
 #
 # 数据（batch.py、日志、pid/status、record.log、replica 结果）全部
 # 留在本文件夹；工作流软件始终调用下面 WORKFLOW_DIR 指向的仓库副本。
-# 本文件不需要随仓库更新——它只是转发参数。
+# 阶段设置由此文件导出；已有旧 wrapper 可补上 BATCH_PHASE。
 
 WORKFLOW_DIR="/personal/CNT_defects_package_slurm"
+
+# A: lammps (includes FDF/XYZ conversion); B: dpnegf; legacy: all.
+export BATCH_PHASE="lammps"
 
 export BATCH_DATA_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export BATCH_MANAGER_CMD="$0"

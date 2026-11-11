@@ -77,7 +77,7 @@ def test_resolve_placeholders():
     )
     assert resolved == {
         "use_saved": True,
-        "save_path": "/data/root/se/13_1/",
+        "save_path": f"{Path('/data/root')}/se/13_1/",
     }
 
 

@@ -316,6 +316,10 @@ def main() -> int:
 
     cleanup_legacy_false_flags(workdir)
 
+    if (workdir / 'dpnegf_input_fingerprint.json').exists():
+        from split_workflow import lock_inputs
+        lock_inputs(workdir)
+
     done_flag = workdir / "dpnegf_done.flag"
     failed_flag = workdir / "dpnegf_failed.flag"
     submitted_flag = workdir / "dpnegf_submitted.flag"

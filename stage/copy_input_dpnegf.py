@@ -8,6 +8,7 @@ import argparse
 from pathlib import Path
 from fdf2xyz import load_config, get_chirality_from_config
 import cnt_geometry
+from cluster_inputs import input_directory
 
 import logkit as L
 from negf_provenance import (
@@ -447,8 +448,8 @@ def main():
     )
     parser.add_argument(
         "--input-dir",
-        default="../input_files/dpnegf",
-        help="Directory containing input.json, run.py, run.sh, and *.pth model files."
+        default=None,
+        help="Override template directory; default: input_files/<lammps_device>_cluster/dpnegf."
     )
 
     parser.add_argument(
@@ -502,6 +503,8 @@ def main():
 
     args = parser.parse_args()
     config = load_config(args.config)
+    if args.input_dir is None:
+        args.input_dir = input_directory(config.get('lammps_device', 'gpu'), 'dpnegf')
     l_def = int(config.get("l_def", 5))
     buffer_pl = config.get("buffer_pl")
     chirality = get_chirality_from_config(config)

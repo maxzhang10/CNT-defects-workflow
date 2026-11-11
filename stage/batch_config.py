@@ -822,6 +822,10 @@ def _validate_batch(raw, path):
 
 def load_batch_config(path):
     """从 batch.json 加载批次配置（格式见模块 docstring）。"""
+    return _validate_batch(_read_batch_json(path), Path(path).resolve())
+
+
+def _read_batch_json(path):
     path = Path(path).resolve()
     if not path.is_file():
         raise FileNotFoundError(f"batch 配置文件不存在: {path}")
@@ -831,7 +835,7 @@ def load_batch_config(path):
     except json.JSONDecodeError as exc:
         _fail(path, f"JSON 解析失败: {exc}")
 
-    return _validate_batch(raw, path)
+    return raw
 
 
 def load_batch_py(path):
@@ -842,6 +846,10 @@ def load_batch_py(path):
     只应写数据生成逻辑（循环 / 变量 / 算术），文件不会获得
     import / open 等能力。
     """
+    return _validate_batch(_read_batch_py(path), Path(path).resolve())
+
+
+def _read_batch_py(path):
     path = Path(path).resolve()
     if not path.is_file():
         raise FileNotFoundError(f"batch 配置文件不存在: {path}")
@@ -872,7 +880,28 @@ def load_batch_py(path):
     }
     if "configs" not in raw and "CHIRAL_CONFIGS" in raw:
         raw["configs"] = raw.pop("CHIRAL_CONFIGS")
-    return _validate_batch(raw, path)
+    return raw
+
+
+def load_runtime_config(path):
+    """Read B's data location/concurrency without validating A's geometry sources."""
+    path = Path(path).resolve()
+    raw = _read_batch_py(path) if path.suffix == '.py' else _read_batch_json(path)
+    if not isinstance(raw, dict):
+        _fail(path, '批配置必须为对象')
+    data_root = raw.get('data_root', '.')
+    if not isinstance(data_root, str) or not data_root:
+        _fail(path, 'data_root 必须为非空字符串')
+    root = Path(data_root).expanduser()
+    if not root.is_absolute():
+        root = path.parent / root
+    max_parallel = raw.get('max_parallel')
+    if max_parallel is not None:
+        max_parallel = _require_int(max_parallel, 'max_parallel', path)
+    lammps_device = raw.get('lammps_device', 'gpu')
+    if lammps_device not in ('cpu', 'gpu'):
+        _fail(path, 'lammps_device 必须为 cpu / gpu')
+    return {'data_root': root.resolve(), 'max_parallel': max_parallel, 'lammps_device': lammps_device}
 
 
 def format_resolution_table(configs):

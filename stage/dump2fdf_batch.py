@@ -362,6 +362,7 @@ def main():
                     help="只保留最后 N 个满足条件的帧，用于从 MD 轨迹多次采样 (default: None, 保留所有)")
     ap.add_argument("--unwrap-left-pl-atoms", type=int, default=0,
                     help="restore first-PL atoms wrapped near the upper z boundary by subtracting Lz")
+    ap.add_argument('--require-frames', action='store_true', help='Fail when no frame was exported')
     args = ap.parse_args()
 
     dumps = find_dump_files(args.root, args.dump_name)
@@ -394,6 +395,8 @@ def main():
         total_frames += n
         L.ok(f"{dump_path} -> {out_base_dir}/<timestep>/STRUCT.fdf   frames={n}")
 
+    if args.require_frames and total_frames == 0:
+        raise ValueError('No requested final frame was exported')
     L.info(f"共写出帧数: {total_frames}")
     L.info(f"输出根目录: {outroot_abs}")
 

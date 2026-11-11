@@ -8,6 +8,7 @@ from pathlib import Path
 import logkit as L
 
 import cnt_geometry
+from cluster_inputs import input_directory
 
 
 def symlink_force(src: Path, dst: Path) -> None:
@@ -98,8 +99,7 @@ def prepare_lammps_inputs(
             )
 
     if input_dir is None:
-        this_file_dir = Path(__file__).resolve().parent
-        input_dir = this_file_dir / "../input_files/lammps"
+        input_dir = input_directory(lammps_device, 'lammps')
 
     input_dir = Path(input_dir).resolve()
 

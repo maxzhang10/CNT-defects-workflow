@@ -11,9 +11,19 @@
 - Python 环境及仓库依赖（DPNEGF、DeePTB、PyTorch 等）；
 - LAMMPS、MPI；
 - 使用 Slurm 时可用的 `sbatch`、`squeue`、`scancel`；
-- 与 `input_files/` 或 `cluster_input/` 模板匹配的 `run.sh`、模型文件和输入文件。
+- 与 `input_files/<device>_cluster/` 模板匹配的 `run.sh`、模型文件和输入文件。
 
-`input_files/` 是默认模板，`cluster_input/` 保存集群相关模板。脚本中的 `run.sh` 会加载节点上的 `~/dpmd.sh` 或 `~/dptb.sh`，如集群环境不同，需要先修改对应模板。
+`lammps_device` 同时决定当前集群的 LAMMPS 和 DPNEGF 输入目录：
+
+| 配置 | LAMMPS 模板 | DPNEGF 模板 |
+|---|---|---|
+| `cpu` | `input_files/cpu_cluster/lammps/` | `input_files/cpu_cluster/dpnegf/` |
+| `gpu`（默认） | `input_files/gpu_cluster/lammps/` | `input_files/gpu_cluster/dpnegf/` |
+
+各目录分别放置本集群的 `run.sh`、输入模板和力场/模型文件。CPU LAMMPS
+使用 `CH.airebo-m`，GPU LAMMPS 使用 `.pth`；两种集群的 DPNEGF 均需 `.pth`
+模型。`lammps_mode="opt"` 需要对应集群的 `lammps/opt.lammps`，当前 CPU
+目录尚未提供该文件，使用 CPU 优化前需补齐。脚本不会跨集群回退选择模板。
 
 ## 2. 批量运行（推荐）
 
@@ -169,6 +179,80 @@ N_i = q + floor(i × f + 0.5) - floor((i-1) × f + 0.5)
 
 ## 5. 单个结构或已有数据的工作流
 
+### 跨集群运行：A 完成 LAMMPS 与结构转换，B 运行 DPNEGF
+
+两台集群使用同一版本的工作流代码，各数据目录放置自己的 `manage.sh`。
+把 wrapper 的 `WORKFLOW_DIR` 改为本集群的软件路径。新 wrapper 默认
+`BATCH_PHASE="lammps"`；旧 wrapper 未设置阶段时仍运行原来的完整流程。
+
+集群 A 在 `manage.sh` 设置 `export BATCH_PHASE="lammps"`，保留原有
+`batch.py`，然后执行 `./manage.sh start`。`status`、`log`、`stop`、
+`restart` 的用法不变。A 完成全部 replica 的 LAMMPS 和末帧 FDF/XYZ 转换后，
+在 **batch.py 的 data_root** 写入 `transfer_manifest.json`。任何任务失败、
+末帧缺失或转换结果无效都会阻止生成清单。原始 dump 留在 A。
+
+从 A 复制轻量结构（替换账号和目录）：
+
+```bash
+rsync -a --prune-empty-dirs \
+  --include='_transfer_assets/***' \
+  --include='*/' \
+  --include='workflow_config.json' \
+  --include='STRUCT.fdf' \
+  --include='*.xyz' \
+  --include='transfer_manifest.json' \
+  --exclude='*' \
+  /data/cnt_batch/ user@cluster-b:/data/cnt_batch/
+```
+
+`_transfer_assets` 保存有外部 UC 引用时所需的实际 UC 文件。无需传输 dump、
+模型链接、Slurm job ID、PID 或状态文件；B 的 wrapper 单独配置。
+
+集群 B 的 `manage.sh` 设置：
+
+```bash
+export BATCH_PHASE="dpnegf"
+```
+
+在 B 的数据目录中放置 `batch.py` 或 `batch.json`，确保其中的 `data_root`
+指向传输后的批次根目录（包含 `transfer_manifest.json`）。相对路径按批配置
+文件所在目录解析。B 从该配置读取 `data_root`、`max_parallel` 和
+`lammps_device`（B 所在集群的模式），任务及物理
+参数仍以交付清单和各 replica 的 `workflow_config.json` 为准。
+
+自能缓存路径直接沿用 A 生成的 `workflow_config.json` 中的
+`self_energy_cache.save_path`。使用者应在 A 的输入配置中预先填写 B 上的自能
+位置；B 导入时原样保留该配置。使用已有自能时须先在 B 准备匹配的缓存。
+B 的 `input_files/<device>_cluster/dpnegf` 应配置本集群的模型、环境和 Slurm
+脚本。随后仍然执行 `./manage.sh start`。并发沿用批配置中的 `max_parallel`
+（未设置时默认 16）；直接运行时可用下方 `--max-parallel` 调整。
+
+B 先校验整批文件 SHA-256，再为每个 replica 保存
+`workflow_config.dpnegf.json`，保留 A 的 `workflow_config.json`。自能缓存配置
+在两份配置中保持一致；后续重交时若冻结配置与交付配置不一致，会报错。
+各配置目录中的 replica 集合必须与交付清单一致，混入旧 replica 会在提交前
+报错。缺少 B 的输入模板或模型时，也会在写入冻结配置前报错。
+B 的 `lammps_device` 按 B 批配置写入冻结配置，用于选择 DPNEGF 模板；A 的
+原配置保留原有模式。B 首次准备输入后，重交也须保持集群模式一致。
+每个 leaf 还保存 `dpnegf_input_fingerprint.json`，校验 FDF、XYZ、模型内容、
+输入 JSON、求解脚本和期望配置哈希。已有结果仍须通过原有 provenance 校验。
+结构或模型发生变化时应使用新的计算目录，不要删除指纹来复用旧结果。
+
+修复失败原因、确认该 leaf 的 Slurm 作业已结束后，删除该 leaf 的
+`dpnegf_failed.flag`、`dpnegf_submitted.flag` 和 `job_id.txt`，再运行
+`./manage.sh start`。保留冻结配置和输入指纹用于重交校验。
+已提交任务接续等待，已成功且校验一致的结果跳过。`stop` 仅停止本地调度器，
+不会取消 Slurm 作业。B 的每个 replica 运行日志追加到 `workflow.dpnegf.log`。
+
+对应的直接调用命令为：
+
+```bash
+python batch_generate.py --phase lammps --config batch.py --scheduler slurm
+python batch_generate.py --phase dpnegf --config batch.py --scheduler slurm --max-parallel 16
+```
+
+若需要原来的完整流程，将 wrapper 的 `BATCH_PHASE` 设置为 `all`。
+
 `run_multi.py` 会执行以下阶段：生成缺陷结构（eledefects）→ 运行 LAMMPS → dump 转 FDF/XYZ → 准备 DPNEGF → 运行 DPNEGF → 汇总电导。
 
 对已有数据目录运行：
@@ -206,7 +290,7 @@ python run_multi.py --root ./data/.../replica_XXX --config <对应 config.json> 
 
 `run_multi.py` 会跳过带 `dpnegf_done.flag` 且 provenance 一致的已完成 leaf，只处理未完成的目录。重提前应先查看对应目录的 `workflow.log`、`slurm-*.err` 和 `dpnegf_failed.flag` 确认失败原因，然后：
 
-- DPNEGF 真正运行失败（存在 `dpnegf_failed.flag`）：先删除该 flag 再重跑，否则 `sub_dpnegf.py` 会拒绝重复提交；
+- DPNEGF 真正运行失败（存在 `dpnegf_failed.flag`）：确认作业已结束后，删除该 leaf 的 `dpnegf_failed.flag`、`dpnegf_submitted.flag` 和 `job_id.txt` 再重跑；仅删除 failed flag 会因旧提交记录而跳过重新提交；
 - 上次 sbatch 提交阶段失败（存在 `dpnegf_submit_failed.flag`，无 `dpnegf_failed.flag`）：直接重跑即可重新提交；
 - 修改了输入配置或模型：provenance hash 校验（P0-4）会阻止复用与新配置不一致的旧结果，需删除对应 `dpnegf_done.flag` 与 `output/` 后显式重算。
 

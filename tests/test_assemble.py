@@ -370,7 +370,7 @@ class AssemblyTests(unittest.TestCase):
         fdf_lines += ["0 0 0 1"] * len(reread)
         fdf_lines += ["%endblock AtomicCoordinatesAndAtomicSpecies"]
         (leaf / "STRUCT.fdf").write_text("\n".join(fdf_lines), encoding="utf-8")
-        template_dir = STAGE.parent / "input_files" / "dpnegf"
+        template_dir = STAGE.parent / "input_files" / "gpu_cluster" / "dpnegf"
         for filename in ("input.json", "run.py"):
             (leaf / filename).write_bytes((template_dir / filename).read_bytes())
         update_input_json_for_leaf(

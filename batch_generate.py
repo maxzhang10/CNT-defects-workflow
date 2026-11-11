@@ -529,6 +529,7 @@ def run_single_task(
     batch,
     scheduler,
     workflow_dir,
+    phase="all",
 ):
     task_id = task["task_id"]
     run_root = task["run_root"]
@@ -539,7 +540,13 @@ def run_single_task(
     start = time.time()
 
     try:
-        if batch.get("structure_mode") == "assemble" and run_root.exists() and any(run_root.iterdir()):
+        if phase == "lammps" and (run_root / "lammps/data.lmp").exists() and not (run_root / "workflow_config.json").exists():
+            raise ValueError(f"Existing LAMMPS inputs have no saved configuration: {run_root}")
+        if phase == "lammps" and (run_root / "workflow_config.json").exists():
+            saved = json.loads((run_root / "workflow_config.json").read_text(encoding="utf-8"))
+            if saved != config:
+                raise ValueError(f"Existing LAMMPS configuration changed: {run_root}")
+        if phase == "all" and batch.get("structure_mode") == "assemble" and run_root.exists() and any(run_root.iterdir()):
             raise FileExistsError(f"assembly output already exists; refusing to overwrite: {run_root}")
         new_hash = negf_provenance.compute_negf_config_hash(config)
         check_provenance(run_root, new_hash)
@@ -602,6 +609,7 @@ def run_single_task(
             # 批量模式下不在每个 replica 内单独收集；
             # 等全部 workflow 成功后统一跨 replica 汇总。
             "--skip-conductance",
+            "--phase", phase,
         ]
 
         print(
@@ -740,6 +748,7 @@ def parse_args():
         help="跳过批次结束后的跨 replica 电导汇总。",
     )
 
+    parser.add_argument('--phase', choices=('all', 'lammps', 'dpnegf'), default='all')
     args = parser.parse_args()
 
     if args.max_parallel is not None and args.max_parallel < 1:
@@ -767,8 +776,18 @@ def main():
             )
     print(f"[INFO] 批配置文件: {Path(config_arg).resolve()}")
 
+    if args.phase == "dpnegf":
+        from split_workflow import run_imported_batch
+        runtime = bc.load_runtime_config(config_arg)
+        if args.max_parallel is None:
+            args.max_parallel = runtime['max_parallel'] or 16
+        return run_imported_batch(args, workflow_dir, runtime['data_root'], runtime['lammps_device'])
+
     batch = bc.load(config_arg)
     base_root = batch["data_root"]
+    if args.phase == "lammps":
+        (base_root / "transfer_manifest.json").unlink(missing_ok=True)
+        args.skip_conductance = True
     if batch.get("structure_mode") == "assemble":
         base_root.mkdir(parents=True, exist_ok=True)
 
@@ -864,6 +883,7 @@ def main():
                 batch,
                 args.scheduler,
                 workflow_dir,
+                args.phase,
             ): task
             for task in tasks
         }
@@ -953,6 +973,10 @@ def main():
             )
 
         return 1
+
+    if args.phase == "lammps":
+        from split_workflow import export_manifest
+        export_manifest(base_root, tasks)
 
     if not args.skip_conductance:
         print("\n" + "=" * 70)

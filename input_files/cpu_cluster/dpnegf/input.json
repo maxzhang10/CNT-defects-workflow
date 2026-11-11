@@ -3,6 +3,7 @@
         "task": "negf",
         "scf": false,
         "block_tridiagonal": true,
+        "btd_initialization": "direct",
         "ele_T": 300,
         "unit": "eV",
         "scf_options": {
@@ -17,7 +18,7 @@
         "self_energy_options": {
             "solver": "Sancho-Rubio",
             "parallel": {
-                "cpu_budget": 6
+                "cpu_budget": 48
             },
             "cache": {
                 "use_saved": false,
@@ -25,8 +26,8 @@
             }
         },
         "rgf_options": {
-            "device": "cuda",
-            "e_batch_size": 40
+            "device": "cpu",
+            "e_batch_size": 33
         },
         "stru_options": {
             "compute_band_edges": true,
@@ -109,7 +110,7 @@
         "eta_lead": 1e-05,
         "eta_device": 1e-05,
         "output_options": {
-            "dos": true,
+            "dos": false,
             "tc": true,
             "ldos": false,
             "current_nscf": false,
@@ -117,7 +118,7 @@
         },
         "energy_grid":{
             "method": "clenshaw_curtis",
-            "num_points": 33,
+            "num_points": 65,
             "half_width": 0.4
         },
         "conductance_options": {
