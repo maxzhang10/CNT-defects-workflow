@@ -60,7 +60,8 @@ def validate_structures(root, config):
 def export_manifest(root, tasks):
     """Publish completed replicas cumulatively; existing entries are immutable.
 
-    Called serially by the batch coordinator, never by worker threads.
+    Callers must serialize updates: the batch coordinator calls serially;
+    GPU pool workers hold the shared pool lock across this call.
     """
     root = Path(root).resolve()
     manifest_path = root / 'transfer_manifest.json'

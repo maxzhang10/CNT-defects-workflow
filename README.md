@@ -56,6 +56,40 @@ python batch_generate.py --config batch.json --scheduler slurm --max-parallel 2 
 
 `--max-parallel` 是同时运行的独立 workflow 数；Slurm 模式下每个 workflow 内部会按 LAMMPS、DPNEGF 阶段提交作业并等待阶段结束。所有 workflow 成功后，默认自动进行跨 replica 电导汇总；`--skip-conductance` 可跳过该步骤。
 
+### 动态 GPU 资源池
+
+把 `manage.sh` 和 `batch.py` 放在数据目录，确认 `WORKFLOW_DIR` 指向软件目录、`CNT_LAMMPS_CMD` 指向原来使用的 LAMMPS 程序。模板默认使用 LAMMPS 资源池，通常只需要调整卡数：
+
+```bash
+export BATCH_PHASE="lammps"
+export BATCH_SCHEDULER="pool"
+export BATCH_PARA=4
+export BATCH_POOL_SETUP="$HOME/dpmd.sh"
+export CNT_LAMMPS_CMD="/实际路径/lmp"
+```
+
+然后仍执行 `./manage.sh start`、`./manage.sh status` 和 `./manage.sh log`。manager 会等待 LAMMPS、结构转换和交付清单写入完成才报告完成；`status` 显示 pending/running/done/failed 的 replica 数。`stop` 沿用原语义，仅停止本地监控，不取消已提交的 Slurm worker；需要取消整个池时对提交日志中的 array ID 执行 `scancel <array-id>`。资源池只接受 `BATCH_PHASE="lammps"`；`all` 和 `dpnegf` 阶段使用原来的 `BATCH_SCHEDULER="slurm"`。
+
+修复失败任务并按原流程处理失败标记后，可运行 `BATCH_POOL_RETRY_FAILED=1 ./manage.sh start` 显式重提。已有数据目录中的 wrapper 需要补上上述配置，`WORKFLOW_DIR` 必须指向更新后的软件目录。
+
+`pool` 模式一次提交一个 Slurm job array，其中有 `--para` 个单卡 worker。先获得 GPU 的 worker 立即开始处理 replica；后续 worker 获得 GPU 后加入同一队列。每个 worker 在它的 Slurm 时限内持续领取 LAMMPS 任务，每次只运行一个 replica，距时限不足五分钟时停止领取新任务。完成后生成最终 FDF/XYZ，累计发布交付清单，不运行 DPNEGF 或电导汇总。`assemble` 模式仍使用原调度方式。
+
+直接复用已有的 `~/dpmd.sh`，无需新建 `pool_env.sh`。它会在计算节点启动 worker 时加载。默认每个 worker 使用 6 个 CPU 核、`gpu_4090` 分区和 8 小时时限；需要调整时在 `manage.sh` 增加 `BATCH_POOL_CPUS`、`BATCH_POOL_PARTITION`、`BATCH_WORKER_TIME` 或 `BATCH_POOL_MEM` 的 export 配置。
+
+在集群登录节点提交（提交命令所用 Python 也必须能在计算节点运行）：
+
+```bash
+export CNT_LAMMPS_CMD=/实际路径/lmp
+python batch_generate.py --config batch.py --scheduler pool --phase lammps \
+  --para 4 --worker-time 08:00:00 --pool-partition gpu_4090 \
+  --pool-cpus 6 --pool-mem 32G --pool-setup "$HOME/dpmd.sh"
+python batch_generate.py --config batch.py --pool-status
+```
+
+每个 worker 的日志位于 `data_root/.cnt_gpu_pool/worker-<array-id>_<index>.out/.err`；每个 replica 的详细日志仍在其目录下的 `workflow.log`。每完成一个 replica，worker 会在共享锁内更新 `transfer_manifest.json`，可沿用现有流程交付集群 B。所有任务处理结束后取消尚未开始的 array 元素。任务队列和进度保存在 `data_root/.cnt_gpu_pool/state.json`；不要手动编辑它，也不要对同一 `data_root` 同时运行其他批次。旧版完整流程的 pool 状态不与此 LAMMPS 专用状态混用，遇到旧状态需使用新的 `data_root`。
+
+重新运行相同提交命令会跳过队列中已成功的 replica，并将上次作业中断时仍为 `running` 的任务重新排队。计算失败的任务需先按下文“失败任务重提”处理 leaf 的失败标记和原因，再加 `--pool-retry-failed` 重交。使用共享文件系统时，必须确认计算节点之间的 POSIX `flock` 可见；资源池依赖它保证任务只被一个 worker 领取。
+
 ### 配置字段
 
 `batch.json` 的核心结构如下：

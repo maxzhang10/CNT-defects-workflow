@@ -21,6 +21,11 @@ fi
 CMD="${BATCH_MANAGER_CMD:-$0}"
 
 PHASE="${BATCH_PHASE:-all}"
+SCHEDULER="${BATCH_SCHEDULER:-slurm}"
+case "$SCHEDULER" in
+    slurm|local|pool) ;;
+    *) echo "无效 BATCH_SCHEDULER: $SCHEDULER"; exit 2 ;;
+esac
 case "$PHASE" in
     all|lammps|dpnegf) ;;
     *) echo "无效 BATCH_PHASE: $PHASE"; exit 2 ;;
@@ -49,6 +54,10 @@ is_running() {
 
 
 start_job() {
+    if [[ "$SCHEDULER" == "pool" && "$PHASE" != "lammps" ]]; then
+        echo "pool 模式要求 BATCH_PHASE=lammps；当前为 $PHASE"
+        return 2
+    fi
     if is_running; then
         echo "任务已经运行，PID=$(cat "$PID_FILE")"
         echo "查看状态：$CMD status"
@@ -81,6 +90,7 @@ start_job() {
         status_file="$5"
         pid_file="$6"
         phase="$7"
+        scheduler="$8"
 
         # 在数据目录运行：batch_generate.py 缺省探测 ./batch.py，
         # data_root 相对路径也按数据目录解析
@@ -102,6 +112,7 @@ start_job() {
         echo "[$(date "+%F %T")] 工作目录：$data_dir"
         echo "[$(date "+%F %T")] 软件目录：$workflow_dir"
         echo "[$(date "+%F %T")] 阶段：$phase"
+        echo "[$(date "+%F %T")] 调度方式：$scheduler"
 
         round=1
         start_time="$(date "+%F %T")"
@@ -126,7 +137,22 @@ start_job() {
 
         # manage不控制并行参数，完全交给batch_generate.py自身配置
         # （并行度写在批配置顶层 max_parallel，可用 --max-parallel 覆盖）
-        batch_args=(--phase "$phase")
+        batch_args=(--phase "$phase" --scheduler "$scheduler")
+        if [[ "$scheduler" == "pool" ]]; then
+            batch_args+=(--para "${BATCH_PARA:-4}" --pool-wait
+                --worker-time "${BATCH_WORKER_TIME:-08:00:00}"
+                --pool-partition "${BATCH_POOL_PARTITION:-gpu_4090}"
+                --pool-cpus "${BATCH_POOL_CPUS:-6}")
+            if [[ -n "${BATCH_POOL_MEM:-}" ]]; then
+                batch_args+=(--pool-mem "$BATCH_POOL_MEM")
+            fi
+            if [[ -n "${BATCH_POOL_SETUP:-}" ]]; then
+                batch_args+=(--pool-setup "$BATCH_POOL_SETUP")
+            fi
+            if [[ "${BATCH_POOL_RETRY_FAILED:-0}" == "1" ]]; then
+                batch_args+=(--pool-retry-failed)
+            fi
+        fi
         if python "$workflow_dir/batch_generate.py" "${batch_args[@]}" >"$log_file" 2>&1; then
             rc=0
         else
@@ -165,6 +191,7 @@ start_job() {
         "$STATUS_FILE" \
         "$PID_FILE" \
         "$PHASE" \
+        "$SCHEDULER" \
         >>"$MANAGER_LOG" 2>&1 &
 
     local pid=$!
@@ -209,6 +236,11 @@ start_job() {
 
 
 status_job() {
+    if [[ "$SCHEDULER" == "pool" ]]; then
+        echo "GPU 资源池状态："
+        (cd "$DATA_DIR" && python "$SCRIPT_DIR/batch_generate.py" --pool-status)
+        return $?
+    fi
     if is_running; then
         local pid
         pid="$(cat "$PID_FILE")"
@@ -256,6 +288,9 @@ status_job() {
 stop_job() {
     if ! is_running; then
         echo "调度器未运行"
+        if [[ "$SCHEDULER" == "pool" ]]; then
+            echo "资源池 worker 可能仍在 Slurm 中运行；stop 不取消 Slurm 作业。"
+        fi
         rm -f "$PID_FILE"
         return 0
     fi

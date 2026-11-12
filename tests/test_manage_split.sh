@@ -28,4 +28,24 @@ if grep -qx -- '--root' "$scratch/B/arguments.txt"; then
     echo 'Unexpected root override'; exit 1
 fi
 grep -q 'phase=dpnegf result=success' "$scratch/B/batch_generate.status"
+
+mkdir -p "$scratch/pool"
+touch "$scratch/pool/batch.py"
+export BATCH_DATA_DIR="$scratch/pool" BATCH_PHASE=lammps BATCH_SCHEDULER=pool
+export BATCH_PARA=3 BATCH_WORKER_TIME=02:00:00 BATCH_POOL_CPUS=8
+export BATCH_POOL_SETUP="./pool env.sh" BATCH_POOL_MEM=32G
+bash "$repo/manage_batch.sh" start
+grep -qx -- '--pool-wait' "$scratch/pool/arguments.txt"
+grep -qx -- '--para' "$scratch/pool/arguments.txt"
+grep -qx '3' "$scratch/pool/arguments.txt"
+grep -qx '02:00:00' "$scratch/pool/arguments.txt"
+grep -qx './pool env.sh' "$scratch/pool/arguments.txt"
+grep -q 'phase=lammps result=success' "$scratch/pool/batch_generate.status"
+bash "$repo/manage_batch.sh" status
+grep -qx -- '--pool-status' "$scratch/pool/arguments.txt"
+for phase in all dpnegf; do
+    if BATCH_PHASE="$phase" bash "$repo/manage_batch.sh" start; then
+        echo "pool unexpectedly accepted phase=$phase"; exit 1
+    fi
+done
 echo 'Manager phase forwarding and status checks passed'

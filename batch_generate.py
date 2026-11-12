@@ -718,6 +718,7 @@ def parse_args():
         choices=[
             "local",
             "slurm",
+            "pool",
         ],
         default="slurm",
     )
@@ -731,6 +732,25 @@ def parse_args():
             "缺省用批配置里的 max_parallel（未配置则为 16）。"
         ),
     )
+
+    parser.add_argument("--para", type=int, default=None,
+                        help="pool 模式的目标 GPU 数；每张卡对应一个 Slurm array worker")
+    parser.add_argument("--worker-time", default="08:00:00",
+                        help="pool 模式每个单卡 worker 的 Slurm 时限")
+    parser.add_argument("--pool-partition", default="gpu_4090",
+                        help="pool 模式的 GPU 分区")
+    parser.add_argument("--pool-cpus", type=int, default=6,
+                        help="pool 模式每张 GPU 配套的 CPU 核数")
+    parser.add_argument("--pool-mem", default=None,
+                        help="pool 模式每个 worker 的内存，例如 32G")
+    parser.add_argument("--pool-setup", default=None,
+                        help="计算节点上执行的 Bash 环境初始化脚本")
+    parser.add_argument("--pool-status", action="store_true",
+                        help="查看当前 data_root 的 GPU 资源池进度")
+    parser.add_argument("--pool-wait", action="store_true",
+                        help="提交后等待 LAMMPS 资源池计算及结构交付结束（manage 使用）")
+    parser.add_argument("--pool-retry-failed", action="store_true",
+                        help="重新领取已失败任务；需先按现有恢复流程处理 leaf 失败标记")
 
     parser.add_argument(
         "--workflow-dir",
@@ -775,6 +795,30 @@ def main():
                 "未指定 --config，且当前目录下找不到 batch.py / batch.json"
             )
     print(f"[INFO] 批配置文件: {Path(config_arg).resolve()}")
+
+    if args.scheduler == "pool" or args.pool_status:
+        import gpu_pool
+        if args.pool_status:
+            gpu_pool.status(bc.load(config_arg)["data_root"])
+            return 0
+        if args.phase != "lammps":
+            raise ValueError("pool 模式仅支持 --phase lammps")
+        args.skip_conductance = True
+        if args.para is None or args.para < 1 or args.pool_cpus < 1:
+            raise ValueError("pool 模式要求 --para 和 --pool-cpus 均大于 0")
+        if args.pool_setup and not Path(args.pool_setup).is_file():
+            raise FileNotFoundError(args.pool_setup)
+        batch = bc.load(config_arg)
+        if batch["lammps_device"] != "gpu":
+            raise ValueError("pool 模式需要 lammps_device='gpu'")
+        if batch.get("structure_mode") == "assemble":
+            raise ValueError("pool 模式目前不支持 assemble 的失败恢复；请使用现有 slurm 模式")
+        base_root = batch["data_root"]
+        tasks = build_tasks(batch, base_root)
+        rc = gpu_pool.submit(args, batch, tasks, workflow_dir, config_arg)
+        if rc == 0 and args.pool_wait:
+            return gpu_pool.wait(base_root)
+        return rc
 
     if args.phase == "dpnegf":
         from split_workflow import run_imported_batch
