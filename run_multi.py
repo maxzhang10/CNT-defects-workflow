@@ -12,7 +12,7 @@ _STAGE_DIR = Path(__file__).resolve().parent / "stage"
 if str(_STAGE_DIR) not in sys.path:
     sys.path.insert(0, str(_STAGE_DIR))
 import logkit as L
-from slurm_utils import wait_for_jobs, check_flags, get_stage_state
+from slurm_utils import SlurmQueryError, wait_for_jobs, check_flags, get_stage_state
 from negf_provenance import result_is_readable
 import cnt_geometry
 from cluster_inputs import input_directory, validate_templates
@@ -91,6 +91,21 @@ def barrier_and_check(workdirs, kind, poll_interval, dry_run):
             f"{kind} 阶段有作业未成功，已中止后续阶段。"
             f"修复后删除对应 {kind}_failed.flag / *_submitted.flag 重跑。"
         )
+
+
+def dpnegf_barrier_and_check(workdirs, root, config, poll_interval, dry_run):
+    """查询重试耗尽时清理本次 DPNEGF 缓存，并保留查询失败状态。"""
+    try:
+        barrier_and_check(workdirs, "dpnegf", poll_interval, dry_run)
+    except SlurmQueryError:
+        if not dry_run:
+            L.warn("DPNEGF 的 squeue 查询重试耗尽，清理本次任务的输出缓存")
+            try:
+                clean_dpnegf_cache_for_config(root, config)
+            except Exception as cleanup_exc:
+                L.error(f"DPNEGF 查询失败后的缓存清理也失败: {cleanup_exc}")
+        raise
+
 
 def has_dump_files(p: Path) -> bool:
     """
@@ -383,6 +398,20 @@ def clean_dpnegf_output_cache(root, save_self_energy=False, self_energy_save_pat
         L.clean(f"保留 self_energy 目录，已清理 HS 文件: {removed_files} 个")
     else:
         L.clean(f"已清理 self_energy 目录: {removed_dirs} 个，HS 文件: {removed_files} 个")
+
+
+def clean_dpnegf_cache_for_config(root, config):
+    """按本次运行配置清理 DPNEGF 输出缓存。"""
+    save_self_energy = config.get("save_self_energy", False)
+    if not isinstance(save_self_energy, bool):
+        raise ValueError("save_self_energy must be a boolean")
+    se_cache = config.get("self_energy_cache", {})
+    se_save_path = se_cache.get("save_path") if isinstance(se_cache, dict) else None
+    clean_dpnegf_output_cache(
+        root,
+        save_self_energy=save_self_energy,
+        self_energy_save_path=se_save_path,
+    )
 
 
 def remove_lammps_dump_files(lammps_dir: Path) -> int:
@@ -937,8 +966,8 @@ def main():
         # SLURM 屏障：等所有 DPNEGF 作业跑完并检查 flag，再统一清理缓存。
         # local 模式下每个 sub_dpnegf 已阻塞跑完，可直接进入清理。
         if args.scheduler == "slurm":
-            barrier_and_check(
-                dpnegf_workdirs, "dpnegf",
+            dpnegf_barrier_and_check(
+                dpnegf_workdirs, root, config,
                 poll_interval=args.poll_interval,
                 dry_run=args.dry_run,
             )
@@ -948,19 +977,7 @@ def main():
         # 且并行化后会误删其它 workdir 尚在使用的 self_energy / HS_*.h5。
         # slurm 屏障保证此刻所有作业都已结束，清理是安全的。
         if not args.dry_run:
-            save_self_energy = config.get("save_self_energy", False)
-            if not isinstance(save_self_energy, bool):
-                raise ValueError("save_self_energy must be a boolean")
-            # P2-6：读取配置中的自能缓存路径，确保清理路径与实际写入路径一致。
-            se_cache = config.get("self_energy_cache", {})
-            se_save_path = None
-            if isinstance(se_cache, dict):
-                se_save_path = se_cache.get("save_path")
-            clean_dpnegf_output_cache(
-                root,
-                save_self_energy=save_self_energy,
-                self_energy_save_path=se_save_path,
-            )
+            clean_dpnegf_cache_for_config(root, config)
 
             # 仅在本次发现的全部 DPNEGF 工作目录均成功后才删除对应 MD
             # 轨迹；任一 DPNEGF 失败会在屏障/本地运行处抛错并跳过这里。

@@ -73,6 +73,40 @@ def test_wait_for_jobs_empty_job_ids_returns_immediately():
     su.wait_for_jobs([], poll_interval=1, label="TEST")
 
 
+def test_dpnegf_query_failure_cleans_this_root_then_raises(tmp_path, monkeypatch):
+    import pytest
+
+    root = tmp_path / "current"
+    output = root / "leaf" / "output"
+    output.mkdir(parents=True)
+    (output / "HS_device.h5").write_bytes(b"cache")
+    self_energy = output.parent / "self_energy"
+    self_energy.mkdir()
+    (self_energy / "cache.h5").write_bytes(b"cache")
+    (output / "negf.out.pth").write_bytes(b"result")
+
+    other_output = tmp_path / "other" / "leaf" / "output"
+    other_output.mkdir(parents=True)
+    (other_output / "HS_device.h5").write_bytes(b"other cache")
+
+    def failed_barrier(*args, **kwargs):
+        raise su.SlurmQueryError("query retries exhausted")
+
+    monkeypatch.setattr(run_multi, "barrier_and_check", failed_barrier)
+    with pytest.raises(su.SlurmQueryError, match="query retries exhausted"):
+        run_multi.dpnegf_barrier_and_check(
+            [output.parent], root,
+            {"save_self_energy": False,
+             "self_energy_cache": {"save_path": "./self_energy/"}},
+            poll_interval=1, dry_run=False,
+        )
+
+    assert not (output / "HS_device.h5").exists()
+    assert not self_energy.exists()
+    assert (output / "negf.out.pth").exists()
+    assert (other_output / "HS_device.h5").exists()
+
+
 def test_collect_job_ids_ignores_completed_or_failed_stage(tmp_path):
     done = tmp_path / "done"
     done.mkdir()
