@@ -786,7 +786,6 @@ def main():
     batch = bc.load(config_arg)
     base_root = batch["data_root"]
     if args.phase == "lammps":
-        (base_root / "transfer_manifest.json").unlink(missing_ok=True)
         args.skip_conductance = True
     if batch.get("structure_mode") == "assemble":
         base_root.mkdir(parents=True, exist_ok=True)
@@ -834,6 +833,21 @@ def main():
         print("[INFO] 没有需要运行的任务")
         return 0
 
+    published = set()
+    if args.phase == "lammps" and (base_root / "transfer_manifest.json").exists():
+        from split_workflow import load_manifest
+        # A also contains unfinished replica directories; B retains the strict check.
+        manifest = load_manifest(base_root, check_replica_directories=False)
+        by_root = {task['run_root'].resolve(): task for task in tasks}
+        for entry in manifest['replicas']:
+            run = (base_root / entry['replica']).resolve()
+            if run not in by_root:
+                raise ValueError(f"Published replica is absent from this batch: {run}; use a new data_root")
+            saved = json.loads((run / 'workflow_config.json').read_text(encoding='utf-8'))
+            if saved != make_task_config(by_root[run], batch):
+                raise ValueError(f"Published LAMMPS configuration changed: {run}; use a new data_root")
+            published.add(by_root[run]['task_id'])
+
     max_workers = min(
         max_parallel,
         len(tasks),
@@ -870,6 +884,14 @@ def main():
 
     print(f"[INFO] record.log: {record_log}")
 
+    # Do not rewrite/reconvert files that may already be in use on B.
+    for task in tasks:
+        if task['task_id'] in published:
+            all_results[task['task_id']] = (task['task_id'], 0)
+            recorder.record(task['config_name'], task['task_id'], 'REUSED')
+    if published:
+        print(f"[INFO] Reusing {len(published)} published replicas", flush=True)
+
     # 每个 task 都有独立 run_root，并发执行所有任务。
     # 单个任务失败不中断整个批次：保留其目录文件，记录失败信息，
     # 由调用方事后检查并决定是否手动重跑。
@@ -886,6 +908,7 @@ def main():
                 args.phase,
             ): task
             for task in tasks
+            if task['task_id'] not in published
         }
 
         for future in as_completed(
@@ -898,6 +921,9 @@ def main():
                 result = future.result()
                 returncode = result[1]
                 status = result[2]
+                if returncode == 0 and args.phase == "lammps":
+                    from split_workflow import export_manifest
+                    export_manifest(base_root, [task])
             except Exception as exc:
                 print(
                     f"[ERROR] 未捕获异常 "
@@ -973,10 +999,6 @@ def main():
             )
 
         return 1
-
-    if args.phase == "lammps":
-        from split_workflow import export_manifest
-        export_manifest(base_root, tasks)
 
     if not args.skip_conductance:
         print("\n" + "=" * 70)

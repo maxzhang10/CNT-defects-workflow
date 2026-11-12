@@ -18,11 +18,13 @@ show_help() {
 说明:
   - 数据根目录中必须存在 transfer_manifest.json
   - 上传前严格校验清单内每个文件的 SHA-256
+  - 固定本次清单快照，A 可继续计算并发布后续 replica
   - 只上传清单中的 workflow_config.json、STRUCT.fdf、XYZ、外部 UC
     以及 transfer_manifest.json
   - 不上传 LAMMPS dump、日志、flag、job_id、模型或计算输出
   - 远端路径表示 B 集群 batch.py 中 data_root 对应的目录
   - B 集群自己的 batch.py、manage.sh 和输入模型需提前准备
+  - 等 B 上一轮结束后补传；本次上传成功后再启动 B
 EOF
 }
 
@@ -45,17 +47,12 @@ MANIFEST="$DATA_ROOT/transfer_manifest.json"
 
 if [[ ! -f "$MANIFEST" ]]; then
     echo "[ERROR] 找不到传输清单: $MANIFEST" >&2
-    echo "[ERROR] 请先在 A 集群完成 BATCH_PHASE=lammps。" >&2
+    echo "[ERROR] 请等待 A 集群至少一个 replica 完成 LAMMPS 和结构转换。" >&2
     exit 1
 fi
 
 if [[ ! -x "$PUT_SCRIPT" ]]; then
     echo "[ERROR] 上传脚本不存在或不可执行: $PUT_SCRIPT" >&2
-    exit 1
-fi
-
-if ! command -v rsync >/dev/null 2>&1; then
-    echo "[ERROR] 未找到 rsync。" >&2
     exit 1
 fi
 
@@ -90,20 +87,22 @@ echo "[INFO] 数据根目录: $DATA_ROOT"
 echo "[INFO] 远端数据根目录: $REMOTE_PATH"
 echo "[INFO] 校验传输清单并准备轻量文件..."
 
-# Python 向 stdout 输出 NUL 分隔的相对路径；rsync 按该列表保持目录结构。
-"$PYTHON_CMD" - "$DATA_ROOT" <<'PY' |
+# 只读一次清单；复制后校验临时包，避免 A 更新清单或源文件导致交接不一致。
+"$PYTHON_CMD" - "$DATA_ROOT" "$STAGING_DIR" <<'PY'
 import hashlib
 import json
-import os
 import re
+import shutil
 import sys
 from pathlib import Path, PurePosixPath
 
 root = Path(sys.argv[1]).resolve()
+staging = Path(sys.argv[2]).resolve()
 manifest_path = root / "transfer_manifest.json"
 
 try:
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    snapshot = manifest_path.read_bytes()
+    manifest = json.loads(snapshot)
 except (OSError, json.JSONDecodeError) as exc:
     raise SystemExit(f"[ERROR] 无法读取传输清单: {exc}")
 
@@ -114,7 +113,6 @@ files = manifest.get("files")
 if not isinstance(files, dict) or not files:
     raise SystemExit("[ERROR] 传输清单 files 为空或格式错误")
 
-validated = []
 total_bytes = 0
 hash_pattern = re.compile(r"[0-9a-fA-F]{64}")
 
@@ -122,7 +120,9 @@ for raw_name, expected_hash in sorted(files.items()):
     if not isinstance(raw_name, str) or not isinstance(expected_hash, str):
         raise SystemExit("[ERROR] 清单路径或 SHA-256 不是字符串")
     relative = PurePosixPath(raw_name)
-    if relative.is_absolute() or not relative.parts or any(part in ("", ".", "..") for part in relative.parts):
+    if (raw_name == 'transfer_manifest.json' or '\\' in raw_name
+            or relative.is_absolute() or not relative.parts
+            or any(part in ("", ".", "..") for part in raw_name.split('/'))):
         raise SystemExit(f"[ERROR] 清单包含不安全路径: {raw_name!r}")
     if not hash_pattern.fullmatch(expected_hash):
         raise SystemExit(f"[ERROR] 清单 SHA-256 格式错误: {raw_name}")
@@ -142,8 +142,11 @@ for raw_name, expected_hash in sorted(files.items()):
     if not source.is_file():
         raise SystemExit(f"[ERROR] 清单条目不是普通文件: {raw_name}")
 
+    destination = staging.joinpath(*relative.parts)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source, destination)
     digest = hashlib.sha256()
-    with source.open("rb") as stream:
+    with destination.open("rb") as stream:
         for block in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(block)
     actual_hash = digest.hexdigest()
@@ -153,14 +156,11 @@ for raw_name, expected_hash in sorted(files.items()):
             f"        expected={expected_hash.lower()}\n"
             f"        actual  ={actual_hash}"
         )
-    validated.append(raw_name)
-    total_bytes += source.stat().st_size
+    total_bytes += destination.stat().st_size
 
-print(f"[OK] 已校验 {len(validated)} 个清单文件，共 {total_bytes} bytes", file=sys.stderr)
-for name in ["transfer_manifest.json", *validated]:
-    sys.stdout.buffer.write(os.fsencode(name) + b"\0")
+(staging / 'transfer_manifest.json').write_bytes(snapshot)
+print(f"[OK] 已校验 {len(files)} 个清单文件，共 {total_bytes} bytes", file=sys.stderr)
 PY
-rsync -a --from0 --files-from=- --prune-empty-dirs "$DATA_ROOT/" "$STAGING_DIR/"
 
 echo "[INFO] 临时传输包: $STAGING_DIR"
 echo "[INFO] 调用: $PUT_SCRIPT"

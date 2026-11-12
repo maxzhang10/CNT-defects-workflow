@@ -58,8 +58,18 @@ def validate_structures(root, config):
 
 
 def export_manifest(root, tasks):
+    """Publish completed replicas cumulatively; existing entries are immutable.
+
+    Called serially by the batch coordinator, never by worker threads.
+    """
     root = Path(root).resolve()
-    files, entries = {}, []
+    manifest_path = root / 'transfer_manifest.json'
+    manifest = (json.loads(manifest_path.read_text(encoding='utf-8'))
+                if manifest_path.exists() else {'version': 1, 'replicas': [], 'files': {}})
+    if manifest.get('version') != 1:
+        raise ValueError('Unsupported transfer manifest version')
+    files = dict(manifest['files'])
+    entries = {entry['replica']: entry for entry in manifest['replicas']}
     for task in tasks:
         run = Path(task['run_root']).resolve()
         config_path = run / 'workflow_config.json'
@@ -77,17 +87,28 @@ def export_manifest(root, tasks):
                 raise ValueError(f'UC hash mismatch: {source}')
             asset = root / '_transfer_assets' / sha / source.name
             asset.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(source, asset)
+            if asset.exists():
+                if digest(asset) != sha:
+                    raise ValueError(f'Published UC contents changed: {asset}')
+            else:
+                shutil.copy2(source, asset)
             entry['uc_file'] = asset.relative_to(root).as_posix()
             required.append(asset)
         for path in required:
-            files[path.relative_to(root).as_posix()] = digest(path)
-        entries.append(entry)
-    write_json(root / 'transfer_manifest.json', {'version': 1, 'replicas': entries, 'files': files})
-    print(f'[OK] Transfer ready: {len(entries)} replicas; {root / "transfer_manifest.json"}')
+            name, sha = path.relative_to(root).as_posix(), digest(path)
+            if name in files and files[name] != sha:
+                raise ValueError(f'Published input contents changed: {path}')
+            files[name] = sha
+        previous = entries.get(entry['replica'])
+        if previous is not None and previous != entry:
+            raise ValueError(f'Published replica changed: {run}')
+        entries[entry['replica']] = entry
+    write_json(manifest_path, {'version': 1,
+                              'replicas': [entries[name] for name in sorted(entries)], 'files': files})
+    print(f'[OK] Transfer ready: {len(entries)} replicas; {root / "transfer_manifest.json"}', flush=True)
 
 
-def load_manifest(root):
+def load_manifest(root, *, check_replica_directories=True):
     manifest = json.loads((root / 'transfer_manifest.json').read_text(encoding='utf-8'))
     if manifest.get('version') != 1 or not manifest.get('replicas'):
         raise ValueError('Invalid or empty transfer manifest')
@@ -112,13 +133,41 @@ def load_manifest(root):
             required.append(inside(root, entry['uc_file']))
         if any(p.relative_to(root).as_posix() not in manifest['files'] for p in required):
             raise ValueError(f'Manifest omits required inputs: {run}')
-    for configuration, expected in configurations.items():
+    for configuration, expected in configurations.items() if check_replica_directories else []:
         actual = {path.resolve() for path in configuration.iterdir()
                   if path.is_dir() and re.fullmatch(r'replica_\d+', path.name)}
         if actual != expected:
             raise ValueError(f'Replica directories differ from transfer manifest: {configuration}; '
                              f'extra={sorted(map(str, actual - expected))}; missing={sorted(map(str, expected - actual))}')
     return manifest
+
+
+def complete_configurations(root, manifest):
+    """Select only configurations with every planned replica delivered."""
+    groups = {}
+    for entry in manifest['replicas']:
+        groups.setdefault(entry['configuration'], []).append(entry)
+    complete = []
+    for name, entries in sorted(groups.items()):
+        counts = set()
+        for entry in entries:
+            config = json.loads((inside(root, entry['replica']) / 'workflow_config.json').read_text(encoding='utf-8'))
+            expected = config.get('lammps_repeats')
+            if type(expected) is not int or expected < 1:
+                raise ValueError(f'Invalid expected replica count: {entry["replica"]}')
+            counts.add(expected)
+        if len(counts) != 1:
+            raise ValueError(f'Inconsistent expected replica counts: {name}')
+        expected = counts.pop()
+        planned = {f'replica_{i:03d}' for i in range(1, expected + 1)}
+        received = {Path(entry['replica']).name for entry in entries}
+        if not received <= planned:
+            raise ValueError(f'Unexpected replica numbers: {name}')
+        if received == planned:
+            complete.append(name)
+        else:
+            print(f'[WAIT] Conductance deferred: {name}; received {len(received)}/{expected} replicas', flush=True)
+    return complete
 
 
 def freeze_config(root, entry, lammps_device=None):
@@ -169,6 +218,7 @@ def run_imported_batch(args, workflow_dir, root, lammps_device=None):
         source = inside(root, manifest['replicas'][0]['replica']) / 'workflow_config.json'
         device = json.loads(source.read_text(encoding='utf-8')).get('lammps_device', 'gpu')
     validate_templates(device, 'dpnegf', workflow_dir)
+    collect_names = complete_configurations(root, manifest) if not args.skip_conductance else []
     configs = [freeze_config(root, entry, lammps_device) for entry in manifest['replicas']]
     def run_one(config):
         with (config.parent / 'workflow.dpnegf.log').open('a', encoding='utf-8') as log:
@@ -194,9 +244,9 @@ def run_imported_batch(args, workflow_dir, root, lammps_device=None):
                 log.write(message + '\n')
     if any(results):
         return 1
-    if not args.skip_conductance:
+    if collect_names:
         cmd = [sys.executable, str(workflow_dir / 'stage/collect_md_conductance.py'), '--root', str(root)]
-        for name in sorted({entry['configuration'] for entry in manifest['replicas']}):
+        for name in collect_names:
             cmd += ['--configuration-dir', str(inside(root, name))]
         return subprocess.run(cmd).returncode
     return 0

@@ -187,9 +187,11 @@ N_i = q + floor(i × f + 0.5) - floor((i-1) × f + 0.5)
 
 集群 A 在 `manage.sh` 设置 `export BATCH_PHASE="lammps"`，保留原有
 `batch.py`，然后执行 `./manage.sh start`。`status`、`log`、`stop`、
-`restart` 的用法不变。A 完成全部 replica 的 LAMMPS 和末帧 FDF/XYZ 转换后，
-在 **batch.py 的 data_root** 写入 `transfer_manifest.json`。任何任务失败、
-末帧缺失或转换结果无效都会阻止生成清单。原始 dump 留在 A。
+`restart` 的用法不变。A 每完成一个 replica 的 LAMMPS、末帧 FDF/XYZ 转换和
+校验，就在 **batch.py 的 data_root** 原子更新累计的 `transfer_manifest.json`。
+未完成或失败的 replica 不进入清单，不影响其他成功任务的交接；原始 dump 留在 A。
+重启 A 时会校验并复用已发布任务，保留累计清单，不重新生成已发布结构。
+已发布任务的配置和文件必须保持不变；改变批次参数导致已有任务不一致时，需使用新目录。
 
 若 A 已配置用户自己的 `~/bscc_put.sh`，推荐直接调用仓库中的包装脚本：
 
@@ -200,11 +202,13 @@ chmod +x ./bscc_put_dpnegf.sh
   /public5/home/t6s008517/cnt_batch/
 ```
 
-包装脚本严格校验 `transfer_manifest.json` 中的 SHA-256，只整理清单列出的
-轻量文件，然后一次调用 `~/bscc_put.sh` 上传。账号、主机、端口和断点续传
+包装脚本固定读取一次 `transfer_manifest.json` 快照，只整理该快照列出的
+轻量文件，并校验临时包内文件的 SHA-256，然后一次调用 `~/bscc_put.sh` 上传。
+A 在此期间可以继续计算、更新清单，新完成任务留待下次传输。账号、主机、端口和断点续传
 配置继续由 `~/bscc_put.sh` 管理。第三个参数可指定其他上传脚本路径。
 
-也可以不使用包装脚本，手工执行等价的 rsync（替换账号和目录）：
+仅在 A 整批成功结束、不再写文件后，也可以手工执行以下 rsync（替换账号和目录）。
+运行中分批交接应使用上面的包装脚本，避免复制未完成的 replica 或不匹配的清单：
 
 ```bash
 rsync -a --prune-empty-dirs \
@@ -239,6 +243,14 @@ export BATCH_PHASE="dpnegf"
 B 的 `input_files/<device>_cluster/dpnegf` 应配置本集群的模型、环境和 Slurm
 脚本。随后仍然执行 `./manage.sh start`。并发沿用批配置中的 `max_parallel`
 （未设置时默认 16）；直接运行时可用下方 `--max-parallel` 调整。
+
+分批交接时，先上传当前快照，上传成功后在 B 执行 `./manage.sh start`。
+B 每次启动只处理这一份清单，不自动监听新任务。等 B 本轮进程结束，再补传
+下一份累计清单并再次执行 `./manage.sh start`；已完成结果通过原有哈希校验后复用。
+若传输中断，先重跑上传命令并确认成功，再启动 B。不要在 B 运行期间向同一目录补传。
+某个配置收到的 replica 尚未达到其 `lammps_repeats` 时，B 输出 `[WAIT]` 并延后
+该配置的电导汇总，本轮 DPNEGF 计算仍可正常结束。全部 replica 到齐且计算成功后自动汇总。
+单集群的 `BATCH_PHASE="all"` 流程不变。
 
 B 先校验整批文件 SHA-256，再为每个 replica 保存
 `workflow_config.dpnegf.json`，保留 A 的 `workflow_config.json`。自能缓存配置

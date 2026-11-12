@@ -84,6 +84,119 @@ class SplitWorkflowTests(unittest.TestCase):
             split.export_manifest(self.root, self.tasks)
         self.assertFalse((self.root / 'transfer_manifest.json').exists())
 
+    def second_replica(self):
+        run = self.run.with_name('replica_002')
+        shutil.copytree(self.run, run)
+        return {'run_root': run, 'configuration_root': run.parent}
+
+    def test_manifest_grows_without_changing_published_entries(self):
+        first = self.export()
+        second = self.second_replica()
+        split.export_manifest(self.root, [second])
+        manifest = split.load_manifest(self.root)
+        self.assertEqual(len(manifest['replicas']), 2)
+        self.assertEqual(manifest['replicas'][0], first['replicas'][0])
+        for name, sha in first['files'].items():
+            self.assertEqual(manifest['files'][name], sha)
+        before = (self.root / 'transfer_manifest.json').read_bytes()
+        self.config['temperature'] = 400
+        split.write_json(self.run / 'workflow_config.json', self.config)
+        with self.assertRaisesRegex(ValueError, 'Published input contents changed'):
+            split.export_manifest(self.root, self.tasks)
+        self.assertEqual((self.root / 'transfer_manifest.json').read_bytes(), before)
+
+    def test_a_publishes_before_batch_end_and_preserves_manifest_on_restart(self):
+        import batch_generate as batch
+        second = self.second_replica()
+        tasks = [dict(task, task_id=f'task{i}', config_name='case')
+                 for i, task in enumerate([*self.tasks, second])]
+        raw = {'data_root': self.root, 'max_parallel': 1, 'configs': []}
+        argv = ['batch_generate.py', '--config', 'unused.json', '--phase', 'lammps',
+                '--workflow-dir', str(ROOT), '--scheduler', 'local']
+        def ordered_completed(futures):
+            for i, future in enumerate(futures):
+                if i == 1:
+                    manifest = json.loads((self.root / 'transfer_manifest.json').read_text())
+                    self.assertEqual(len(manifest['replicas']), 1)
+                yield future
+        with patch.object(sys, 'argv', argv), patch.object(batch.bc, 'load', return_value=raw), \
+                patch.object(batch.bc, 'format_resolution_table', return_value=None), \
+                patch.object(batch, 'build_tasks', return_value=tasks), \
+                patch.object(batch, 'make_task_config', return_value=self.config), \
+                patch.object(batch, 'as_completed', side_effect=ordered_completed), \
+                patch.object(batch, 'run_single_task', side_effect=lambda task, *args:
+                             (task['task_id'], 0 if task['task_id'] == 'task0' else 1, 'TEST')) as run:
+            self.assertEqual(batch.main(), 1)
+            before = (self.root / 'transfer_manifest.json').read_bytes()
+            run.reset_mock()
+            self.assertEqual(batch.main(), 1)
+            self.assertEqual([call.args[0]['task_id'] for call in run.call_args_list], ['task1'])
+            self.assertEqual((self.root / 'transfer_manifest.json').read_bytes(), before)
+            run.side_effect = lambda task, *args: (task['task_id'], 0, 'OK')
+            self.assertEqual(batch.main(), 0)
+        self.assertEqual(len(split.load_manifest(self.root)['replicas']), 2)
+
+    def test_partial_delivery_defers_collection_until_all_replicas_arrive(self):
+        self.config['lammps_repeats'] = 2
+        split.write_json(self.run / 'workflow_config.json', self.config)
+        self.export()
+        args = SimpleNamespace(scheduler='slurm', max_parallel=1, skip_conductance=False)
+        with patch.object(split.subprocess, 'run', return_value=SimpleNamespace(returncode=0)) as run, \
+                patch('cluster_inputs.validate_templates'):
+            self.assertEqual(split.run_imported_batch(args, ROOT, self.root), 0)
+            self.assertEqual(run.call_count, 1)
+            self.assertIn('run_multi.py', run.call_args.args[0][1])
+            second = self.second_replica()
+            # A source has no B frozen configuration. The new task freezes its own paths.
+            (second['run_root'] / 'workflow_config.dpnegf.json').unlink()
+            split.export_manifest(self.root, [second])
+            run.reset_mock()
+            self.assertEqual(split.run_imported_batch(args, ROOT, self.root), 0)
+            self.assertEqual(run.call_count, 3)
+            self.assertIn('collect_md_conductance.py', run.call_args.args[0][1])
+
+    def test_collection_requires_consistent_counts_and_exact_replica_numbers(self):
+        manifest = self.export()
+        first = manifest['replicas'][0]
+        entry = dict(manifest['replicas'][0])
+        entry['replica'] = entry['replica'].replace('001', '002')
+        second = self.second_replica()
+        manifest['replicas'] = [entry]
+        with self.assertRaisesRegex(ValueError, 'Unexpected replica numbers'):
+            split.complete_configurations(self.root, manifest)
+        split.write_json(second['run_root'] / 'workflow_config.json', dict(self.config, lammps_repeats=2))
+        manifest['replicas'].append(first)
+        with self.assertRaisesRegex(ValueError, 'Inconsistent expected replica counts'):
+            split.complete_configurations(self.root, manifest)
+
+    def test_transfer_uses_fixed_manifest_and_checks_copied_bytes(self):
+        self.export()
+        script = (ROOT / 'bscc_put_dpnegf.sh').read_text(encoding='utf-8')
+        code = script.split("<<'PY'\n", 1)[1].split('\nPY\n', 1)[0]
+        manifest_path = self.root / 'transfer_manifest.json'
+        snapshot = manifest_path.read_bytes()
+        copy = shutil.copy2
+        for corrupt in (False, True):
+            manifest_path.write_bytes(snapshot)
+            staging = self.root / ('staging-bad' if corrupt else 'staging-good')
+            staging.mkdir()
+            def during_copy(source, destination):
+                result = copy(source, destination)
+                manifest_path.write_text('{"version": 999}')
+                if corrupt:
+                    Path(destination).write_text('changed during copy')
+                return result
+            with patch.object(sys, 'argv', ['-', str(self.root), str(staging)]), \
+                    patch.object(shutil, 'copy2', side_effect=during_copy):
+                if corrupt:
+                    with self.assertRaisesRegex(SystemExit, 'SHA-256'):
+                        exec(compile(code, 'transfer-staging', 'exec'), {})
+                    self.assertFalse((staging / 'transfer_manifest.json').exists())
+                else:
+                    exec(compile(code, 'transfer-staging', 'exec'), {})
+                    self.assertEqual((staging / 'transfer_manifest.json').read_bytes(), snapshot)
+                    split.load_manifest(staging)
+
     def test_source_cache_is_preserved_and_changes_are_rejected(self):
         entry = self.export()['replicas'][0]
         target = split.freeze_config(self.root, entry)
@@ -164,7 +277,7 @@ class SplitWorkflowTests(unittest.TestCase):
             'try:\n import torch\nexcept ImportError:\n'
             ' Path("output/negf.out.pth").write_bytes(b"fake result")\n'
             'else:\n torch.save({"fake": True}, "output/negf.out.pth")\n')
-        self.config.update(lammps_device='gpu', r_max=6.5, l_def=1, structure_mode='assemble',
+        self.config.update(lammps_device='gpu', r_max=6.5, l_def=1, structure_mode='assemble', lammps_repeats=2,
             conductance_options={'mu': ['Ef']}, save_self_energy=True,
             assembly={'scatter_uc_count': 4, 'buffer_pl': 2, 'defect_counts': {},
                       'layout': {'l_PL_uc': 1, 'atoms_per_pl': 1, 'atoms_per_uc': 1, 'uc_length_angstrom': 2.46}})
@@ -185,6 +298,26 @@ class SplitWorkflowTests(unittest.TestCase):
         self.assertTrue((self.leaf / 'dpnegf_done.flag').exists())
         self.assertEqual((self.leaf / 'expected_negf_config_hash.txt').read_text(),
                          (self.leaf / 'output/negf_config_hash.txt').read_text())
+        frozen = (self.run / 'workflow_config.dpnegf.json').read_bytes()
+        fingerprint = (self.leaf / 'dpnegf_input_fingerprint.json').read_bytes()
+        # Deliver another replica into the same B root while preserving the old result.
+        second = self.run.with_name('replica_002')
+        second_leaf = second / 'dpnegf/40000'
+        second_leaf.mkdir(parents=True)
+        shutil.copy2(self.run / 'workflow_config.json', second / 'workflow_config.json')
+        for name in ('STRUCT.fdf', '5_5.xyz'):
+            shutil.copy2(self.leaf / name, second_leaf / name)
+        (second / 'lammps').mkdir()
+        (second / 'lammps/lammps_done.flag').touch()
+        split.export_manifest(self.root, [{'run_root': second, 'configuration_root': second.parent}])
+        shutil.rmtree(second / 'lammps')
+        with patch.dict(os.environ, {'PYTHONPATH': os.pathsep.join(paths), 'PYTHONIOENCODING': 'utf-8'}):
+            rc = split.run_imported_batch(args, software, self.root, 'cpu')
+            self.assertEqual(rc, 0, (second / 'workflow.dpnegf.log').read_text(encoding='utf-8'))
+        self.assertEqual((self.leaf / 'solver_count.txt').read_text(), '1')
+        self.assertEqual((second_leaf / 'solver_count.txt').read_text(), '1')
+        self.assertEqual((self.run / 'workflow_config.dpnegf.json').read_bytes(), frozen)
+        self.assertEqual((self.leaf / 'dpnegf_input_fingerprint.json').read_bytes(), fingerprint)
 
     def test_b_reads_data_root_from_batch_py_and_json(self):
         import batch_generate
