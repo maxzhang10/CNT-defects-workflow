@@ -814,11 +814,14 @@ def main():
                 "--samples",
                 "1",
             ]
-        if config.get("structure_mode") == "assemble":
-            cmd.extend([
-                "--unwrap-left-pl-atoms",
-                str(config["assembly"]["layout"]["atoms_per_pl"]),
-            ])
+        # 两种结构模式都可能有左电极的近零 z 被 LAMMPS 包裹到盒子上边界。
+        # dump2fdf 只在首个 PL 内还原该周期像，保持电极按 ID 的轴向连续性。
+        left_pl_atoms = (
+            config["assembly"]["layout"]["atoms_per_pl"]
+            if config.get("structure_mode") == "assemble"
+            else info["l_PL_uc"] * info["N_uc"]
+        )
+        cmd.extend(["--unwrap-left-pl-atoms", str(left_pl_atoms)])
         if args.phase == 'lammps':
             cmd.append('--require-frames')
             if lammps_mode == 'md':
