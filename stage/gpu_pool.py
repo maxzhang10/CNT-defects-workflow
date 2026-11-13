@@ -87,13 +87,30 @@ def _array_active(job_id):
     return bool(result.stdout.strip())
 
 
-def _published_tasks(root, tasks, batch):
+def _published_tasks(root, tasks, batch, deleted=None):
     """Verify immutable handoff entries before skipping already published replicas."""
     if not (root / "transfer_manifest.json").exists():
         return set()
     import batch_generate as bg
-    from split_workflow import load_manifest
-    manifest = load_manifest(root, check_replica_directories=False)
+    from split_workflow import inside, load_manifest, write_json
+    manifest_path = root / "transfer_manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if manifest.get("version") != 1:
+        raise ValueError("Unsupported transfer manifest version")
+    deleted = set(deleted or ())
+    removed = {entry["replica"] for entry in manifest["replicas"]
+               if inside(root, entry["replica"]) in deleted}
+    if removed:
+        def belongs_to_deleted(name):
+            path = inside(root, name)
+            return path in deleted or any(parent in deleted for parent in path.parents)
+        manifest["replicas"] = [entry for entry in manifest["replicas"] if entry["replica"] not in removed]
+        manifest["files"] = {name: sha for name, sha in manifest["files"].items()
+                             if not belongs_to_deleted(name)}
+        if not manifest["replicas"]:
+            manifest["files"] = {}  # No published replica still refers to transfer assets.
+    if manifest["replicas"] or manifest["files"]:
+        load_manifest(root, check_replica_directories=False, manifest=manifest)
     by_root = {Path(task["run_root"]).resolve(): task for task in tasks}
     published = set()
     for entry in manifest["replicas"]:
@@ -104,6 +121,9 @@ def _published_tasks(root, tasks, batch):
         if saved != bg.make_task_config(by_root[run], batch):
             raise ValueError(f"Published LAMMPS configuration changed: {run}")
         published.add(by_root[run]["task_id"])
+    if removed:
+        write_json(manifest_path, manifest)
+        print(f"[INFO] Removed {len(removed)} deleted replicas from transfer manifest", flush=True)
     return published
 
 
@@ -165,7 +185,18 @@ def submit(args, batch, tasks, workflow_dir, config_path):
                 raise ValueError("GPU pool configuration changed; use a new data_root")
             if _array_active(state.get("array_job_id")):
                 raise RuntimeError(f"GPU pool already active: {state['array_job_id']}")
-            published = _published_tasks(root, tasks, batch)
+            deleted = set()
+            for task in tasks:
+                run = Path(task["run_root"])
+                entry = state["tasks"][task["task_id"]]
+                # A fully removed directory can be regenerated from the batch.
+                # Partial results / broken symlinks still require validation.
+                if entry["status"] == "done" and not run.exists() and not run.is_symlink():
+                    deleted.add(run.resolve())
+                    state["tasks"][task["task_id"]] = {"status": "pending", "owner": None,
+                                                      "recovery_reason": "replica_directory_deleted"}
+                    print(f"[INFO] Deleted replica requeued: {run}", flush=True)
+            published = _published_tasks(root, tasks, batch, deleted=deleted)
             published = _restore_done_manifest(root, tasks, batch, state, published)
             for task_id, entry in state["tasks"].items():
                 if task_id in published:

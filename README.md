@@ -92,6 +92,8 @@ python batch_generate.py --config batch.py --pool-status
 
 若 `transfer_manifest.json` 被删除，或缺少队列中已完成的 replica，再次 `./manage.sh start` 会根据 `state.json` 中的 `done` 记录补建清单。恢复前会核对保存的 workflow 配置、LAMMPS 完成标记、最终 FDF/XYZ 和 UC 校验值，已完成的计算不会重跑。请保留 `.cnt_gpu_pool/state.json` 和各 replica 的结果文件；若配置变化或结果缺失/损坏，会明确报错，不能仅凭 `done` 状态重新发布。已有清单的校验失败仍会报错，不会覆盖其内容。
 
+如果整个已完成 replica 目录（或其上层手性目录）被删除，而该任务仍在 `batch.py` 中，重新启动会将它从 `done` 改为 `pending`，移除清单中的对应旧条目，再重新生成计算。其他已完成且有效的结果继续复用。仅删除目录中的部分文件（例如 `workflow_config.json`）仍会报错，以免覆盖残留数据。这项恢复要求之前的资源池已退出；它不会将仍在批配置中的任务永久跳过。
+
 ### 配置字段
 
 `batch.json` 的核心结构如下：

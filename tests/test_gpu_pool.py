@@ -1,6 +1,7 @@
 """Resource-pool queue and Slurm submission regression checks."""
 
 import json
+import shutil
 import sys
 import tempfile
 import unittest
@@ -284,13 +285,15 @@ class ManifestRecoveryTests(unittest.TestCase):
 
     def test_invalid_completed_outputs_block_recovery_and_submission(self):
         import split_workflow as sw
-        for fault in ("config", "structure", "flag"):
+        for fault in ("config", "missing_config", "structure", "flag"):
             with self.subTest(fault=fault), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
                 args, batch, tasks, config, saved = self.prepare(root)
                 run = tasks[1]["run_root"]
                 if fault == "config":
                     (run / "workflow_config.json").write_text('{"md_steps": 200}')
+                elif fault == "missing_config":
+                    (run / "workflow_config.json").unlink()
                 elif fault == "structure":
                     (run / "dpnegf/100/18_0.xyz").unlink()
                 else:
@@ -305,6 +308,37 @@ class ManifestRecoveryTests(unittest.TestCase):
                 sbatch.assert_not_called()
                 self.assertFalse((root / "transfer_manifest.json").exists())
                 self.assertEqual(state_path.read_bytes(), before)
+
+    def test_deleted_replica_is_requeued_with_or_without_manifest(self):
+        import split_workflow as sw
+        for keep_manifest in (False, True):
+            for delete_all in (False, True):
+                with self.subTest(manifest=keep_manifest, all=delete_all), tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    args, batch, tasks, config, saved = self.prepare(root)
+                    with patch.dict(sys.modules, {"batch_generate": SimpleNamespace(make_task_config=lambda *_: saved)}), \
+                         patch.object(sw, "validate_structures", side_effect=self.validate_fixture), \
+                         patch.object(gp.subprocess, "run", return_value=SimpleNamespace(
+                             returncode=0, stdout="12345\n", stderr="")):
+                        if keep_manifest:
+                            sw.export_manifest(root, tasks[:2])
+                        for task in tasks[:2] if delete_all else tasks[:1]:
+                            target = task["run_root"].resolve()
+                            self.assertTrue(target.is_relative_to(root.resolve()))
+                            shutil.rmtree(target)
+                        self.assertEqual(gp.submit(args, batch, tasks, ROOT, config), 0)
+                        state = json.loads((root / ".cnt_gpu_pool/state.json").read_text())
+                        self.assertEqual(state["tasks"]["0"]["status"], "pending")
+                        self.assertEqual(state["tasks"]["1"]["status"], "pending" if delete_all else "done")
+                        self.assertFalse(tasks[0]["run_root"].exists())
+                        manifest_path = root / "transfer_manifest.json"
+                        if manifest_path.exists():
+                            manifest = json.loads(manifest_path.read_text())
+                            self.assertEqual(len(manifest["replicas"]), 0 if delete_all else 1)
+                            self.assertEqual(len(manifest["files"]), 0 if delete_all else 3)
+                            if not delete_all:
+                                sw.load_manifest(root, check_replica_directories=False)
+                        self.assertEqual(gp._claim(root, state["generation"], "worker"), "0")
 
 
 if __name__ == "__main__":

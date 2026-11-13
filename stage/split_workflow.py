@@ -109,8 +109,10 @@ def export_manifest(root, tasks):
     print(f'[OK] Transfer ready: {len(entries)} replicas; {root / "transfer_manifest.json"}', flush=True)
 
 
-def load_manifest(root, *, check_replica_directories=True):
-    manifest = json.loads((root / 'transfer_manifest.json').read_text(encoding='utf-8'))
+def load_manifest(root, *, check_replica_directories=True, manifest=None):
+    # A supplied snapshot can be validated before an atomic recovery write.
+    if manifest is None:
+        manifest = json.loads((root / 'transfer_manifest.json').read_text(encoding='utf-8'))
     if manifest.get('version') != 1 or not manifest.get('replicas'):
         raise ValueError('Invalid or empty transfer manifest')
     for name, sha in manifest['files'].items():
