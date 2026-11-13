@@ -7,6 +7,7 @@ WORKFLOW_DIR="/personal/CNT_defects_package_slurm"
 export BATCH_PHASE="lammps"
 export BATCH_SCHEDULER="pool"
 export BATCH_PARA=4
+export BATCH_POOL_CPUS=1  # 每个单卡 worker 使用 1 个 CPU 核，与 LAMMPS run.sh 一致。
 
 # 复用原 run.sh 的环境和 LAMMPS 程序；由计算节点加载环境。
 export BATCH_POOL_SETUP="$HOME/dpmd.sh"

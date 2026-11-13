@@ -53,7 +53,7 @@ class GpuPoolTests(unittest.TestCase):
     tasks = [{"task_id": "a", "run_root": tmp_path / "a"},
              {"task_id": "b", "run_root": tmp_path / "b"}]
     args = SimpleNamespace(phase="lammps", para=3, pool_cpus=6, worker_time="08:00:00",
-                           pool_partition="gpu_4090", pool_mem="32G",
+                           pool_partition=None, pool_mem="32G",
                            pool_setup=None, skip_conductance=True,
                            pool_retry_failed=False)
 
@@ -62,6 +62,8 @@ class GpuPoolTests(unittest.TestCase):
         assert "--array=0-2%3" in cmd
         assert "--gpus=1" in cmd
         assert "--cpus-per-task=6" in cmd
+        partitions = [option for option in cmd if option.startswith("--partition=")]
+        assert partitions == ([f"--partition={args.pool_partition}"] if args.pool_partition else [])
         return SimpleNamespace(returncode=0, stdout="12345\n", stderr="")
 
     with patch.object(gp.subprocess, "run", side_effect=fake_run):
@@ -69,6 +71,10 @@ class GpuPoolTests(unittest.TestCase):
     state = json.loads((tmp_path / ".cnt_gpu_pool" / "state.json").read_text())
     assert state["array_job_id"] == "12345"
     assert len(state["tasks"]) == 2
+    args.pool_partition = "gpu_real"
+    with patch.object(gp, "_array_active", return_value=False), \
+         patch.object(gp.subprocess, "run", side_effect=fake_run):
+        gp.submit(args, {"data_root": tmp_path}, tasks, ROOT, config)
 
  def test_failed_tasks_require_explicit_retry(self):
     with tempfile.TemporaryDirectory() as directory:

@@ -74,14 +74,14 @@ export CNT_LAMMPS_CMD="/实际路径/lmp"
 
 `pool` 模式一次提交一个 Slurm job array，其中有 `--para` 个单卡 worker。先获得 GPU 的 worker 立即开始处理 replica；后续 worker 获得 GPU 后加入同一队列。每个 worker 在它的 Slurm 时限内持续领取 LAMMPS 任务，每次只运行一个 replica，距时限不足五分钟时停止领取新任务。完成后生成最终 FDF/XYZ，累计发布交付清单，不运行 DPNEGF 或电导汇总。`assemble` 模式仍使用原调度方式。
 
-直接复用已有的 `~/dpmd.sh`，无需新建 `pool_env.sh`。它会在计算节点启动 worker 时加载。默认每个 worker 使用 6 个 CPU 核、`gpu_4090` 分区和 8 小时时限；需要调整时在 `manage.sh` 增加 `BATCH_POOL_CPUS`、`BATCH_POOL_PARTITION`、`BATCH_WORKER_TIME` 或 `BATCH_POOL_MEM` 的 export 配置。
+直接复用已有的 `~/dpmd.sh`，无需新建 `pool_env.sh`。它会在计算节点启动 worker 时加载。默认每个 worker 使用 6 个 CPU 核、8 小时时限，并由 Slurm 选择默认分区。若默认分区没有 GPU，用 `sinfo -o '%P %G'` 查看可用的 GPU 分区，再在 `manage.sh` 中设置 `export BATCH_POOL_PARTITION="实际分区名"`。也可以通过 `BATCH_POOL_CPUS`、`BATCH_WORKER_TIME`、`BATCH_POOL_MEM` 调整其他资源。
 
 在集群登录节点提交（提交命令所用 Python 也必须能在计算节点运行）：
 
 ```bash
 export CNT_LAMMPS_CMD=/实际路径/lmp
 python batch_generate.py --config batch.py --scheduler pool --phase lammps \
-  --para 4 --worker-time 08:00:00 --pool-partition gpu_4090 \
+  --para 4 --worker-time 08:00:00 \
   --pool-cpus 6 --pool-mem 32G --pool-setup "$HOME/dpmd.sh"
 python batch_generate.py --config batch.py --pool-status
 ```

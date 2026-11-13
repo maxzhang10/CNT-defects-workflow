@@ -39,6 +39,9 @@ grep -qx -- '--pool-wait' "$scratch/pool/arguments.txt"
 grep -qx -- '--para' "$scratch/pool/arguments.txt"
 grep -qx '3' "$scratch/pool/arguments.txt"
 grep -qx '02:00:00' "$scratch/pool/arguments.txt"
+if grep -qx -- '--pool-partition' "$scratch/pool/arguments.txt"; then
+    echo 'Unexpected hard-coded partition'; exit 1
+fi
 grep -qx './pool env.sh' "$scratch/pool/arguments.txt"
 grep -q 'phase=lammps result=success' "$scratch/pool/batch_generate.status"
 bash "$repo/manage_batch.sh" status

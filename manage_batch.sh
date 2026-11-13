@@ -141,8 +141,10 @@ start_job() {
         if [[ "$scheduler" == "pool" ]]; then
             batch_args+=(--para "${BATCH_PARA:-4}" --pool-wait
                 --worker-time "${BATCH_WORKER_TIME:-08:00:00}"
-                --pool-partition "${BATCH_POOL_PARTITION:-gpu_4090}"
                 --pool-cpus "${BATCH_POOL_CPUS:-6}")
+            if [[ -n "${BATCH_POOL_PARTITION:-}" ]]; then
+                batch_args+=(--pool-partition "$BATCH_POOL_PARTITION")
+            fi
             if [[ -n "${BATCH_POOL_MEM:-}" ]]; then
                 batch_args+=(--pool-mem "$BATCH_POOL_MEM")
             fi

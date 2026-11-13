@@ -737,8 +737,8 @@ def parse_args():
                         help="pool 模式的目标 GPU 数；每张卡对应一个 Slurm array worker")
     parser.add_argument("--worker-time", default="08:00:00",
                         help="pool 模式每个单卡 worker 的 Slurm 时限")
-    parser.add_argument("--pool-partition", default="gpu_4090",
-                        help="pool 模式的 GPU 分区")
+    parser.add_argument("--pool-partition", default=None,
+                        help="pool 模式的 GPU 分区；不指定时使用集群默认分区")
     parser.add_argument("--pool-cpus", type=int, default=6,
                         help="pool 模式每张 GPU 配套的 CPU 核数")
     parser.add_argument("--pool-mem", default=None,
