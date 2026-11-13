@@ -217,5 +217,95 @@ class GpuPoolTests(unittest.TestCase):
             gp._validate_result({"run_root": root})
 
 
+class ManifestRecoveryTests(unittest.TestCase):
+    def prepare(self, root):
+        config_path = root / "batch.json"
+        config_path.write_text("{}", encoding="utf-8")
+        tasks = [{"task_id": str(i), "run_root": root / "config" / f"replica_{i:03d}",
+                  "configuration_root": root / "config"} for i in range(3)]
+        saved = {"md_steps": 100, "lammps_mode": "md", "chirality": [18, 0]}
+        for task in tasks[:2]:
+            run = task["run_root"]
+            (run / "lammps").mkdir(parents=True)
+            (run / "lammps/lammps_done.flag").touch()
+            (run / "workflow_config.json").write_text(json.dumps(saved), encoding="utf-8")
+            leaf = run / "dpnegf/100"
+            leaf.mkdir(parents=True)
+            (leaf / "STRUCT.fdf").write_text("fdf")
+            (leaf / "18_0.xyz").write_text("xyz")
+        gp._initialize(root, {
+            "phase": "lammps", "config_hash": gp._config_hash(config_path),
+            "task_ids": ["0", "1", "2"], "array_job_id": None,
+            "generation": "old", "finalized": False,
+            "tasks": {str(i): {"status": "done" if i < 2 else "pending", "owner": None}
+                      for i in range(3)},
+        })
+        args = SimpleNamespace(phase="lammps", para=2, pool_cpus=1, worker_time="08:00:00",
+                               pool_partition=None, pool_mem=None, pool_setup=None,
+                               pool_retry_failed=False)
+        return args, {"data_root": root}, tasks, config_path, saved
+
+    @staticmethod
+    def validate_fixture(run, config):
+        # Exercise real manifest merging/hashing with small fixture payloads;
+        # structural parsing is covered by the existing split-workflow tests.
+        paths = [run / "dpnegf/100/STRUCT.fdf", run / "dpnegf/100/18_0.xyz"]
+        if any(not path.is_file() or not path.read_text() for path in paths):
+            raise ValueError(f"Invalid converted structure: {run}")
+        return paths
+
+    def test_submit_restores_deleted_or_partial_manifest_without_recomputing(self):
+        import split_workflow as sw
+        for partial in (False, True):
+            with self.subTest(partial=partial), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                args, batch, tasks, config, saved = self.prepare(root)
+                fake_bg = SimpleNamespace(make_task_config=lambda *_: saved)
+                with patch.dict(sys.modules, {"batch_generate": fake_bg}), \
+                     patch.object(sw, "validate_structures", side_effect=self.validate_fixture), \
+                     patch.object(gp.subprocess, "run", return_value=SimpleNamespace(
+                         returncode=0, stdout="12345\n", stderr="")) as sbatch:
+                    sw.export_manifest(root, tasks[:1] if partial else tasks[:2])
+                    if not partial:
+                        (root / "transfer_manifest.json").unlink()
+                    before = {p: p.read_bytes() for t in tasks[:2]
+                              for p in t["run_root"].rglob("*") if p.is_file()}
+                    self.assertEqual(gp.submit(args, batch, tasks, ROOT, config), 0)
+                    manifest = sw.load_manifest(root, check_replica_directories=False)
+                self.assertEqual(len(manifest["replicas"]), 2)
+                self.assertEqual(len(manifest["files"]), 6)
+                sbatch.assert_called_once()
+                self.assertEqual(sbatch.call_args.args[0][0], "sbatch")
+                self.assertTrue(all(p.read_bytes() == content for p, content in before.items()))
+                state = json.loads((root / ".cnt_gpu_pool/state.json").read_text())
+                self.assertEqual(gp._claim(root, state["generation"], "worker"), "2")
+                self.assertEqual([state["tasks"][str(i)]["status"] for i in range(3)],
+                                 ["done", "done", "pending"])
+
+    def test_invalid_completed_outputs_block_recovery_and_submission(self):
+        import split_workflow as sw
+        for fault in ("config", "structure", "flag"):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                args, batch, tasks, config, saved = self.prepare(root)
+                run = tasks[1]["run_root"]
+                if fault == "config":
+                    (run / "workflow_config.json").write_text('{"md_steps": 200}')
+                elif fault == "structure":
+                    (run / "dpnegf/100/18_0.xyz").unlink()
+                else:
+                    (run / "lammps/lammps_done.flag").unlink()
+                state_path = root / ".cnt_gpu_pool/state.json"
+                before = state_path.read_bytes()
+                with patch.dict(sys.modules, {"batch_generate": SimpleNamespace(make_task_config=lambda *_: saved)}), \
+                     patch.object(sw, "validate_structures", side_effect=self.validate_fixture), \
+                     patch.object(gp.subprocess, "run") as sbatch:
+                    with self.assertRaises(ValueError):
+                        gp.submit(args, batch, tasks, ROOT, config)
+                sbatch.assert_not_called()
+                self.assertFalse((root / "transfer_manifest.json").exists())
+                self.assertEqual(state_path.read_bytes(), before)
+
+
 if __name__ == "__main__":
     unittest.main()

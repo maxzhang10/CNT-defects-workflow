@@ -107,6 +107,36 @@ def _published_tasks(root, tasks, batch):
     return published
 
 
+def _restore_done_manifest(root, tasks, batch, state, published):
+    """Rebuild missing handoff metadata from validated DONE outputs.
+
+    The caller holds the pool lock and has checked that no old array is active.
+    Existing manifest entries were verified by _published_tasks; export_manifest
+    preserves them and atomically publishes all recovered entries in one write.
+    """
+    missing = [task for task in tasks
+               if state["tasks"][task["task_id"]]["status"] == "done"
+               and task["task_id"] not in published]
+    if not missing:
+        return published
+    print(f"[INFO] Validating {len(missing)} completed replicas to restore transfer manifest...", flush=True)
+    import batch_generate as bg
+    from split_workflow import export_manifest
+    for task in missing:
+        run = Path(task["run_root"])
+        path = run / "workflow_config.json"
+        if not path.is_file():
+            raise ValueError(f"Cannot restore transfer manifest: missing configuration: {path}")
+        saved = json.loads(path.read_text(encoding="utf-8"))
+        if saved != bg.make_task_config(task, batch):
+            raise ValueError(f"Cannot restore transfer manifest: LAMMPS configuration changed: {run}")
+    # Reuses the handoff validation of LAMMPS flags, FDF/XYZ and UC checksums.
+    # No calculation or structure generation is performed here.
+    export_manifest(root, missing)
+    print(f"[OK] Restored {len(missing)} completed replicas to transfer_manifest.json", flush=True)
+    return published | {task["task_id"] for task in missing}
+
+
 def submit(args, batch, tasks, workflow_dir, config_path):
     if args.phase != "lammps":
         raise ValueError("GPU pool only supports phase=lammps")
@@ -136,11 +166,10 @@ def submit(args, batch, tasks, workflow_dir, config_path):
             if _array_active(state.get("array_job_id")):
                 raise RuntimeError(f"GPU pool already active: {state['array_job_id']}")
             published = _published_tasks(root, tasks, batch)
+            published = _restore_done_manifest(root, tasks, batch, state, published)
             for task_id, entry in state["tasks"].items():
                 if task_id in published:
                     entry.update(status="done", owner=None)
-                elif entry["status"] == "done":
-                    raise ValueError(f"Completed replica missing from transfer manifest: {task_id}")
             if not args.pool_retry_failed and any(
                 entry["status"] == "failed" for entry in state["tasks"].values()
             ):

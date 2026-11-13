@@ -90,6 +90,8 @@ python batch_generate.py --config batch.py --pool-status
 
 重新运行相同提交命令会跳过队列中已成功的 replica，并将上次作业中断时仍为 `running` 的任务重新排队。计算失败的任务需先按下文“失败任务重提”处理 leaf 的失败标记和原因，再加 `--pool-retry-failed` 重交。使用共享文件系统时，必须确认计算节点之间的 POSIX `flock` 可见；资源池依赖它保证任务只被一个 worker 领取。
 
+若 `transfer_manifest.json` 被删除，或缺少队列中已完成的 replica，再次 `./manage.sh start` 会根据 `state.json` 中的 `done` 记录补建清单。恢复前会核对保存的 workflow 配置、LAMMPS 完成标记、最终 FDF/XYZ 和 UC 校验值，已完成的计算不会重跑。请保留 `.cnt_gpu_pool/state.json` 和各 replica 的结果文件；若配置变化或结果缺失/损坏，会明确报错，不能仅凭 `done` 状态重新发布。已有清单的校验失败仍会报错，不会覆盖其内容。
+
 ### 配置字段
 
 `batch.json` 的核心结构如下：
