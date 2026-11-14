@@ -47,8 +47,9 @@ grep -q 'phase=lammps result=success' "$scratch/pool/batch_generate.status"
 bash "$repo/manage_batch.sh" status
 grep -qx -- '--pool-status' "$scratch/pool/arguments.txt"
 for phase in all dpnegf; do
-    if BATCH_PHASE="$phase" bash "$repo/manage_batch.sh" start; then
-        echo "pool unexpectedly accepted phase=$phase"; exit 1
-    fi
+    BATCH_PHASE="$phase" bash "$repo/manage_batch.sh" start
+    grep -qx "$phase" "$scratch/pool/arguments.txt"
+    grep -qx -- '--pool-wait' "$scratch/pool/arguments.txt"
+    grep -q "phase=$phase result=success" "$scratch/pool/batch_generate.status"
 done
 echo 'Manager phase forwarding and status checks passed'

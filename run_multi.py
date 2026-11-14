@@ -678,7 +678,7 @@ def main():
     # ============================================================
     if not args.skip_ele:
         L.phase(1, 7, "生成缺陷几何 (eledefects)")
-        if args.phase == 'lammps' and (root / 'lammps/data.lmp').exists():
+        if args.phase in ('lammps', 'all') and (root / 'lammps/data.lmp').exists():
             L.skip('Resume existing LAMMPS inputs')
         else:
             if run_lammps:

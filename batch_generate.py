@@ -540,9 +540,9 @@ def run_single_task(
     start = time.time()
 
     try:
-        if phase == "lammps" and (run_root / "lammps/data.lmp").exists() and not (run_root / "workflow_config.json").exists():
+        if phase in ("lammps", "all") and (run_root / "lammps/data.lmp").exists() and not (run_root / "workflow_config.json").exists():
             raise ValueError(f"Existing LAMMPS inputs have no saved configuration: {run_root}")
-        if phase == "lammps" and (run_root / "workflow_config.json").exists():
+        if phase in ("lammps", "all") and (run_root / "workflow_config.json").exists():
             saved = json.loads((run_root / "workflow_config.json").read_text(encoding="utf-8"))
             if saved != config:
                 raise ValueError(f"Existing LAMMPS configuration changed: {run_root}")
@@ -799,22 +799,23 @@ def main():
     if args.scheduler == "pool" or args.pool_status:
         import gpu_pool
         if args.pool_status:
-            gpu_pool.status(bc.load(config_arg)["data_root"])
+            gpu_pool.status(bc.load_runtime_config(config_arg)["data_root"])
             return 0
-        if args.phase != "lammps":
-            raise ValueError("pool 模式仅支持 --phase lammps")
-        args.skip_conductance = True
+        if args.phase == "lammps":
+            args.skip_conductance = True
         if args.para is None or args.para < 1 or args.pool_cpus < 1:
             raise ValueError("pool 模式要求 --para 和 --pool-cpus 均大于 0")
         if args.pool_setup and not Path(args.pool_setup).is_file():
             raise FileNotFoundError(args.pool_setup)
-        batch = bc.load(config_arg)
+        batch = (bc.load_runtime_config(config_arg) if args.phase == "dpnegf"
+                 else bc.load(config_arg))
         if batch["lammps_device"] != "gpu":
             raise ValueError("pool 模式需要 lammps_device='gpu'")
         if batch.get("structure_mode") == "assemble":
             raise ValueError("pool 模式目前不支持 assemble 的失败恢复；请使用现有 slurm 模式")
         base_root = batch["data_root"]
-        tasks = build_tasks(batch, base_root)
+        tasks = (gpu_pool.imported_tasks(batch, workflow_dir) if args.phase == "dpnegf"
+                 else build_tasks(batch, base_root))
         rc = gpu_pool.submit(args, batch, tasks, workflow_dir, config_arg)
         if rc == 0 and args.pool_wait:
             return gpu_pool.wait(base_root)

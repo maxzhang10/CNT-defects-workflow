@@ -157,9 +157,31 @@ def _restore_done_manifest(root, tasks, batch, state, published):
     return published | {task["task_id"] for task in missing}
 
 
+def imported_tasks(batch, workflow_dir):
+    """Use the same immutable handoff and runtime-only config as DPNEGF import."""
+    from split_workflow import load_manifest, inside
+    from cluster_inputs import validate_templates
+    root = Path(batch["data_root"]).resolve()
+    manifest = load_manifest(root)
+    validate_templates(batch["lammps_device"], "dpnegf", workflow_dir)
+    return [{"task_id": entry["replica"], "run_root": inside(root, entry["replica"]),
+             "configuration_root": inside(root, entry["configuration"]),
+             "manifest_entry": entry} for entry in manifest["replicas"]]
+
+
+def _run_imported(task, batch, workflow_dir):
+    from split_workflow import freeze_config
+    config = freeze_config(Path(batch["data_root"]), task["manifest_entry"], batch["lammps_device"])
+    with (config.parent / "workflow.dpnegf.log").open("a", encoding="utf-8") as log:
+        return subprocess.run([sys.executable, str(workflow_dir / "run_multi.py"),
+                               "--phase", "dpnegf", "--root", str(config.parent),
+                               "--config", str(config), "--scheduler", "local",
+                               "--skip-conductance"], stdout=log, stderr=subprocess.STDOUT).returncode
+
+
 def submit(args, batch, tasks, workflow_dir, config_path):
-    if args.phase != "lammps":
-        raise ValueError("GPU pool only supports phase=lammps")
+    if args.phase not in ("lammps", "dpnegf", "all"):
+        raise ValueError("Unsupported GPU pool phase")
     root = Path(batch["data_root"]).resolve()
     config_path = Path(config_path).resolve()
     directory, _, _ = _paths(root)
@@ -168,7 +190,7 @@ def submit(args, batch, tasks, workflow_dir, config_path):
     if len(ids) != len(set(ids)):
         raise ValueError("Duplicate task IDs in GPU pool")
     initial = {
-        "phase": "lammps",
+        "phase": args.phase,
         "config_hash": _config_hash(config_path), "task_ids": ids,
         "tasks": {task_id: {"status": "pending", "owner": None} for task_id in ids},
         "array_job_id": None, "generation": uuid.uuid4().hex,
@@ -176,28 +198,35 @@ def submit(args, batch, tasks, workflow_dir, config_path):
     }
     _initialize(root, initial)
     with _locked(root) as state:
-        if state.get("phase") != "lammps":
-            raise ValueError("Existing pool state is not LAMMPS-only; use a new data_root")
         if state.get("submitting"):
             raise RuntimeError("Another GPU pool submission is in progress")
+        if _array_active(state.get("array_job_id")):
+            raise RuntimeError(f"GPU pool already active: {state['array_job_id']}")
+        if state.get("phase") != args.phase:
+            state.clear()
+            state.update(initial)
         if state is not None:
             if state["config_hash"] != _config_hash(config_path) or state["task_ids"] != ids:
                 raise ValueError("GPU pool configuration changed; use a new data_root")
-            if _array_active(state.get("array_job_id")):
-                raise RuntimeError(f"GPU pool already active: {state['array_job_id']}")
             deleted = set()
             for task in tasks:
                 run = Path(task["run_root"])
                 entry = state["tasks"][task["task_id"]]
                 # A fully removed directory can be regenerated from the batch.
                 # Partial results / broken symlinks still require validation.
-                if entry["status"] == "done" and not run.exists() and not run.is_symlink():
+                if args.phase != "dpnegf" and entry["status"] == "done" and not run.exists() and not run.is_symlink():
                     deleted.add(run.resolve())
                     state["tasks"][task["task_id"]] = {"status": "pending", "owner": None,
                                                       "recovery_reason": "replica_directory_deleted"}
                     print(f"[INFO] Deleted replica requeued: {run}", flush=True)
-            published = _published_tasks(root, tasks, batch, deleted=deleted)
-            published = _restore_done_manifest(root, tasks, batch, state, published)
+            published = set()
+            if args.phase == "lammps":
+                published = _published_tasks(root, tasks, batch, deleted=deleted)
+                published = _restore_done_manifest(root, tasks, batch, state, published)
+            else:
+                for task in tasks:
+                    if state["tasks"][task["task_id"]]["status"] == "done":
+                        _validate_dpnegf_result(task)
             for task_id, entry in state["tasks"].items():
                 if task_id in published:
                     entry.update(status="done", owner=None)
@@ -213,7 +242,7 @@ def submit(args, batch, tasks, workflow_dir, config_path):
                     entry = state["tasks"][task["task_id"]]
                     if entry["status"] != "failed":
                         continue
-                    flags = list((Path(task["run_root"]) / "lammps").glob("*_failed.flag"))
+                    flags = list(Path(task["run_root"]).rglob("*_failed.flag"))
                     if flags:
                         raise RuntimeError(
                             f"Repair failed leaf and clear its failure flags before retry: {flags[0]}")
@@ -222,6 +251,7 @@ def submit(args, batch, tasks, workflow_dir, config_path):
             state.pop("summary", None)
             state["array_job_id"] = None
             state["generation"] = uuid.uuid4().hex
+        state["skip_conductance"] = args.phase == "lammps" or getattr(args, "skip_conductance", False)
         state["submitting"] = True
     with _locked(root) as state:
         if state["config_hash"] != _config_hash(config_path):
@@ -238,7 +268,7 @@ def submit(args, batch, tasks, workflow_dir, config_path):
             + 'export OPENBLAS_NUM_THREADS="$OMP_NUM_THREADS"\n'
             + 'export NUMEXPR_NUM_THREADS="$OMP_NUM_THREADS"\n'
             + f"cd {shlex.quote(str(workflow_dir))}\n"
-            + f"exec {shlex.quote(sys.executable)} {shlex.quote(str(Path(__file__).resolve()))} "
+            + f"exec {('python' if args.pool_setup else shlex.quote(sys.executable))} {shlex.quote(str(Path(__file__).resolve()))} "
               f"worker --config {shlex.quote(str(config_path))} "
               f"--generation {shlex.quote(generation)} "
               f"--workflow-dir {shlex.quote(str(workflow_dir))}\n",
@@ -330,6 +360,39 @@ def _publish_result(root, generation, task):
         export_manifest(root, [task])
 
 
+def _validate_dpnegf_result(task):
+    from negf_provenance import result_is_readable, provenance_is_valid, read_hash_file, expected_hash_path
+    leaves = sorted((Path(task["run_root"]) / "dpnegf").rglob("STRUCT.fdf"))
+    if not leaves:
+        raise RuntimeError(f"Missing DPNEGF structures: {task['run_root']}")
+    for structure in leaves:
+        leaf = structure.parent
+        if (not (leaf / "dpnegf_done.flag").is_file()
+                or (leaf / "dpnegf_failed.flag").exists()
+                or not result_is_readable(leaf)
+                or not provenance_is_valid(leaf, read_hash_file(expected_hash_path(leaf)))):
+            raise RuntimeError(f"DPNEGF not successfully completed: {leaf}")
+
+
+def _collect(root, phase, tasks, workflow_dir):
+    if phase == "dpnegf":
+        from split_workflow import load_manifest, complete_configurations, inside
+        names = complete_configurations(root, load_manifest(root))
+        configurations = [inside(root, name) for name in names]
+    else:
+        configurations = sorted({Path(t["configuration_root"]).resolve() for t in tasks})
+    if not configurations:
+        return 0
+    cmd = [sys.executable, str(workflow_dir / "stage/collect_md_conductance.py"), "--root", str(root)]
+    for configuration in configurations:
+        cmd += ["--configuration-dir", str(configuration)]
+        if phase == "all":
+            task = next(t for t in tasks if Path(t["configuration_root"]).resolve() == configuration)
+            cmd += ["--configuration-settings", json.dumps({"configuration_dir": str(configuration),
+                     "temperature": task["temperature"], "conductance_mode": task["conductance_mode"]})]
+    return subprocess.run(cmd, cwd=workflow_dir).returncode
+
+
 def _finalize(root, generation, tasks, workflow_dir):
     with _locked(root) as state:
         if state["generation"] != generation or state["finalized"]:
@@ -340,14 +403,25 @@ def _finalize(root, generation, tasks, workflow_dir):
         state["finalized"] = True
         failed = statuses.count("failed")
         array_job_id = state.get("array_job_id")
+        phase = state.get("phase", "lammps")
+        collect = phase != "lammps" and not state.get("skip_conductance", False) and not failed
+    collection_rc = 0
+    if collect:
+        try:
+            collection_rc = _collect(root, phase, tasks, workflow_dir)
+        except Exception as exc:
+            print(f"Conductance collection failed: {exc}", file=sys.stderr, flush=True)
+            collection_rc = 1
     with _locked(root) as state:
-        state["summary"] = {"phase": "lammps", "failed": failed,
+        if state["generation"] != generation:
+            return
+        state["summary"] = {"phase": phase, "failed": failed, "collection_exit_code": collection_rc,
                             "completed_at": time.time()}
     if array_job_id:
         # Cancel only pending siblings. A running worker is allowed to exit itself.
         subprocess.run(["scancel", "--state=PENDING", str(array_job_id)], check=False)
-    print(f"LAMMPS GPU pool finished: failed={failed}", flush=True)
-    return 1 if failed else 0
+    print(f"{phase} GPU pool finished: failed={failed}, collection_exit_code={collection_rc}", flush=True)
+    return 1 if failed or collection_rc else 0
 
 
 def worker(config_path, generation, workflow_dir):
@@ -356,13 +430,17 @@ def worker(config_path, generation, workflow_dir):
         raise RuntimeError("GPU pool worker must run inside its Slurm job array")
     config_path = Path(config_path).resolve()
     workflow_dir = Path(workflow_dir).resolve()
-    batch = bg.bc.load(config_path)
+    runtime = bg.bc.load_runtime_config(config_path)
+    root = Path(runtime["data_root"]).resolve()
+    with _locked(root) as state:
+        if state is None or state["generation"] != generation:
+            raise RuntimeError("GPU pool generation changed before worker startup")
+        phase = state["phase"]
+    batch = runtime if phase == "dpnegf" else bg.bc.load(config_path)
     root = Path(batch["data_root"]).resolve()
-    tasks = bg.build_tasks(batch, root)
+    tasks = imported_tasks(batch, workflow_dir) if phase == "dpnegf" else bg.build_tasks(batch, root)
     by_id = {task["task_id"]: task for task in tasks}
     with _locked(root) as state:
-        if state.get("phase") != "lammps":
-            raise ValueError("GPU pool worker requires LAMMPS-only state")
         if state["config_hash"] != _config_hash(config_path) or state["task_ids"] != list(by_id):
             raise ValueError("GPU pool task list or configuration changed")
     owner = f"{os.environ.get('SLURM_ARRAY_JOB_ID', 'local')}_{os.environ.get('SLURM_ARRAY_TASK_ID', os.getpid())}"
@@ -380,11 +458,17 @@ def worker(config_path, generation, workflow_dir):
             break
         print(f"[{owner}] claimed {task_id}", flush=True)
         try:
-            result = bg.run_single_task(by_id[task_id], batch, "local", workflow_dir, phase="lammps")
-            rc = result[1]
+            if phase == "dpnegf":
+                rc = _run_imported(by_id[task_id], batch, workflow_dir)
+            else:
+                result = bg.run_single_task(by_id[task_id], batch, "local", workflow_dir, phase=phase)
+                rc = result[1]
             if rc == 0:
-                _validate_result(by_id[task_id])
-                _publish_result(root, generation, by_id[task_id])
+                if phase == "lammps":
+                    _validate_result(by_id[task_id])
+                    _publish_result(root, generation, by_id[task_id])
+                else:
+                    _validate_dpnegf_result(by_id[task_id])
         except Exception as exc:
             print(f"[{owner}] {task_id}: {exc}", file=sys.stderr, flush=True)
             rc = 1
@@ -393,7 +477,7 @@ def worker(config_path, generation, workflow_dir):
 
 
 def wait(root, poll_interval=30):
-    """Monitor LAMMPS calculation and structure handoff completion."""
+    """Monitor the selected phase, including final collection."""
     previous = None
     while True:
         with _locked(root) as state:
@@ -407,13 +491,13 @@ def wait(root, poll_interval=30):
             print(f"GPU pool {job_id}: {counts}", flush=True)
             previous = counts
         if summary is not None:
-            return 1 if summary["failed"] else 0
+            return 1 if summary["failed"] or summary.get("collection_exit_code", 0) else 0
         if not _array_active(job_id):
             # Read again: the last worker may have finalized since our snapshot.
             with _locked(root) as state:
                 summary = state.get("summary")
             if summary is not None:
-                return 1 if summary["failed"] else 0
+                return 1 if summary["failed"] or summary.get("collection_exit_code", 0) else 0
             print("GPU pool workers exited before completion; inspect logs and resubmit.", flush=True)
             return 1
         time.sleep(poll_interval)

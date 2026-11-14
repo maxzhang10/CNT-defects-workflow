@@ -68,11 +68,25 @@ export BATCH_POOL_SETUP="$HOME/dpmd.sh"
 export CNT_LAMMPS_CMD="/实际路径/lmp"
 ```
 
-然后仍执行 `./manage.sh start`、`./manage.sh status` 和 `./manage.sh log`。manager 会等待 LAMMPS、结构转换和交付清单写入完成才报告完成；`status` 显示 pending/running/done/failed 的 replica 数。`stop` 沿用原语义，仅停止本地监控，不取消已提交的 Slurm worker；需要取消整个池时对提交日志中的 array ID 执行 `scancel <array-id>`。资源池只接受 `BATCH_PHASE="lammps"`；`all` 和 `dpnegf` 阶段使用原来的 `BATCH_SCHEDULER="slurm"`。
+然后仍执行 `./manage.sh start`、`./manage.sh status` 和 `./manage.sh log`。manager 会等待 LAMMPS、结构转换和交付清单写入完成才报告完成；`status` 显示 pending/running/done/failed 的 replica 数。`stop` 沿用原语义，仅停止本地监控，不取消已提交的 Slurm worker；需要取消整个池时对提交日志中的 array ID 执行 `scancel <array-id>`。资源池支持 `BATCH_PHASE="lammps"`、`"dpnegf"`、`"all"`；后两种阶段会等待 DPNEGF 及电导汇总完成。
+
+仅计算 DPNEGF 时，在 `manage.sh` 中改为：
+
+```bash
+export BATCH_PHASE="dpnegf"
+export BATCH_SCHEDULER="pool"
+export BATCH_PARA=4
+export BATCH_POOL_CPUS=6
+export BATCH_POOL_SETUP="$HOME/dptb.sh"
+```
+
+仍执行 `./manage.sh start`。`dpnegf` 需要有效的 `transfer_manifest.json`，只读取批配置中的运行位置和集群选择，不重新生成几何。`all` 将阶段改为 `all`，保留 `CNT_LAMMPS_CMD`，并确保计算节点环境同时支持 LAMMPS 与 DeePTB。两套 Python 分离时可用 `CNT_DPTB_PYTHON=/实际DeePTB环境/bin/python` 指定求解器解释器；该设置不代替共享库环境配置。worker 使用 `BATCH_POOL_SETUP` 加载后的 Python。pool 内部采用 local 执行入口，不再次 sbatch，也不执行 DPNEGF 模板 run.sh 中的环境加载。
+
+三种阶段都由 `BATCH_PARA` 控制单卡 worker 数，`max_parallel` 不控制 pool 并发。`dpnegf` 仅汇总已交付全部 replica 的配置。CLI 可用 `--skip-conductance` 跳过 `dpnegf` / `all` 的汇总；默认汇总失败会使 manager 报失败。
 
 修复失败任务并按原流程处理失败标记后，可运行 `BATCH_POOL_RETRY_FAILED=1 ./manage.sh start` 显式重提。已有数据目录中的 wrapper 需要补上上述配置，`WORKFLOW_DIR` 必须指向更新后的软件目录。
 
-`pool` 模式一次提交一个 Slurm job array，其中有 `--para` 个单卡 worker。先获得 GPU 的 worker 立即开始处理 replica；后续 worker 获得 GPU 后加入同一队列。每个 worker 在它的 Slurm 时限内持续领取 LAMMPS 任务，每次只运行一个 replica，距时限不足五分钟时停止领取新任务。完成后生成最终 FDF/XYZ，累计发布交付清单，不运行 DPNEGF 或电导汇总。`assemble` 模式仍使用原调度方式。
+`pool` 模式一次提交一个 Slurm job array，其中有 `--para` 个单卡 worker。先获得 GPU 的 worker 立即开始处理 replica；后续 worker 获得 GPU 后加入同一队列。每个 worker 在它的 Slurm 时限内持续领取所选阶段的任务，每次只运行一个 replica，距时限不足五分钟时停止领取新任务。`lammps` 生成最终 FDF/XYZ 并累计发布清单；`dpnegf` 从 manifest 导入结构计算；`all` 在同一 worker 上完成一个 replica 的结构生成、LAMMPS、转换和 DPNEGF。后两者在全部计算成功后统一汇总电导。`assemble` 的结构生成仍使用原调度方式，其清单可以用于 `dpnegf` pool。
 
 直接复用已有的 `~/dpmd.sh`，无需新建 `pool_env.sh`。它会在计算节点启动 worker 时加载。默认每个 worker 使用 6 个 CPU 核、8 小时时限，并由 Slurm 选择默认分区。若默认分区没有 GPU，用 `sinfo -o '%P %G'` 查看可用的 GPU 分区，再在 `manage.sh` 中设置 `export BATCH_POOL_PARTITION="实际分区名"`。也可以通过 `BATCH_POOL_CPUS`、`BATCH_WORKER_TIME`、`BATCH_POOL_MEM` 调整其他资源。
 
@@ -86,11 +100,11 @@ python batch_generate.py --config batch.py --scheduler pool --phase lammps \
 python batch_generate.py --config batch.py --pool-status
 ```
 
-每个 worker 的日志位于 `data_root/.cnt_gpu_pool/worker-<array-id>_<index>.out/.err`；每个 replica 的详细日志仍在其目录下的 `workflow.log`。每完成一个 replica，worker 会在共享锁内更新 `transfer_manifest.json`，可沿用现有流程交付集群 B。所有任务处理结束后取消尚未开始的 array 元素。任务队列和进度保存在 `data_root/.cnt_gpu_pool/state.json`；不要手动编辑它，也不要对同一 `data_root` 同时运行其他批次。旧版完整流程的 pool 状态不与此 LAMMPS 专用状态混用，遇到旧状态需使用新的 `data_root`。
+每个 worker 的日志位于 `data_root/.cnt_gpu_pool/worker-<array-id>_<index>.out/.err`；每个 replica 的详细日志仍在其目录下的 `workflow.log`。仅 `lammps` 每完成一个 replica，worker 会在共享锁内更新 `transfer_manifest.json`，可沿用现有流程交付集群 B。所有任务处理结束后取消尚未开始的 array 元素。任务队列和进度保存在 `data_root/.cnt_gpu_pool/state.json`；不要手动编辑它，也不要对同一 `data_root` 同时运行其他批次。切换阶段要求旧 array 已退出，随后建立新阶段队列；旧阶段 done 不会视作新阶段完成，已有结果由相应执行入口校验复用。同阶段恢复仍要求批配置及任务列表一致。`dpnegf` 的 replica 日志为 `workflow.dpnegf.log`。
 
 重新运行相同提交命令会跳过队列中已成功的 replica，并将上次作业中断时仍为 `running` 的任务重新排队。计算失败的任务需先按下文“失败任务重提”处理 leaf 的失败标记和原因，再加 `--pool-retry-failed` 重交。使用共享文件系统时，必须确认计算节点之间的 POSIX `flock` 可见；资源池依赖它保证任务只被一个 worker 领取。
 
-若 `transfer_manifest.json` 被删除，或缺少队列中已完成的 replica，再次 `./manage.sh start` 会根据 `state.json` 中的 `done` 记录补建清单。恢复前会核对保存的 workflow 配置、LAMMPS 完成标记、最终 FDF/XYZ 和 UC 校验值，已完成的计算不会重跑。请保留 `.cnt_gpu_pool/state.json` 和各 replica 的结果文件；若配置变化或结果缺失/损坏，会明确报错，不能仅凭 `done` 状态重新发布。已有清单的校验失败仍会报错，不会覆盖其内容。
+在 `lammps` 阶段，若 `transfer_manifest.json` 被删除，或缺少队列中已完成的 replica，再次 `./manage.sh start` 会根据 `state.json` 中的 `done` 记录补建清单。恢复前会核对保存的 workflow 配置、LAMMPS 完成标记、最终 FDF/XYZ 和 UC 校验值，已完成的计算不会重跑。请保留 `.cnt_gpu_pool/state.json` 和各 replica 的结果文件；若配置变化或结果缺失/损坏，会明确报错，不能仅凭 `done` 状态重新发布。已有清单的校验失败仍会报错，不会覆盖其内容。
 
 如果整个已完成 replica 目录（或其上层手性目录）被删除，而该任务仍在 `batch.py` 中，重新启动会将它从 `done` 改为 `pending`，移除清单中的对应旧条目，再重新生成计算。其他已完成且有效的结果继续复用。仅删除目录中的部分文件（例如 `workflow_config.json`）仍会报错，以免覆盖残留数据。这项恢复要求之前的资源池已退出；它不会将仍在批配置中的任务永久跳过。
 

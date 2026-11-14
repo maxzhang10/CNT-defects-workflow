@@ -54,10 +54,6 @@ is_running() {
 
 
 start_job() {
-    if [[ "$SCHEDULER" == "pool" && "$PHASE" != "lammps" ]]; then
-        echo "pool 模式要求 BATCH_PHASE=lammps；当前为 $PHASE"
-        return 2
-    fi
     if is_running; then
         echo "任务已经运行，PID=$(cat "$PID_FILE")"
         echo "查看状态：$CMD status"

@@ -114,6 +114,11 @@ class GpuPoolTests(unittest.TestCase):
                                        check=False)
 
  def test_worker_drains_tasks_and_marks_completion(self):
+    for phase in ("lammps", "dpnegf", "all"):
+        with self.subTest(phase=phase):
+            self._worker_drains_tasks(phase)
+
+ def _worker_drains_tasks(self, phase):
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
         config = root / "batch.json"
@@ -122,7 +127,7 @@ class GpuPoolTests(unittest.TestCase):
                   "configuration_root": root, "temperature": 100,
                   "conductance_mode": "default"} for i in range(3)]
         gp._initialize(root, {
-            "phase": "lammps",
+            "phase": phase,
             "config_hash": gp._config_hash(config),
             "generation": "g", "task_ids": ["0", "1", "2"],
             "tasks": {str(i): {"status": "pending", "owner": None} for i in range(3)},
@@ -133,7 +138,8 @@ class GpuPoolTests(unittest.TestCase):
             phases.append(phase)
             return task["task_id"], 0, "OK"
         fake_batch = SimpleNamespace(
-            bc=SimpleNamespace(load=lambda _: {"data_root": root}),
+            bc=SimpleNamespace(load=lambda _: {"data_root": root},
+                               load_runtime_config=lambda _: {"data_root": root}),
             build_tasks=lambda *_: tasks,
             run_single_task=run_task,
         )
@@ -142,11 +148,16 @@ class GpuPoolTests(unittest.TestCase):
                                         "SLURM_ARRAY_TASK_ID": "0"}), \
              patch.object(gp.platform, "node", return_value="test-node"), \
              patch.object(gp, "_validate_result"), \
+             patch.object(gp, "_validate_dpnegf_result") as validate_dpnegf, \
+             patch.object(gp, "imported_tasks", return_value=tasks), \
+             patch.object(gp, "_run_imported", return_value=0) as imported, \
              patch.object(gp, "_publish_result") as publish, \
              patch.object(gp.subprocess, "run"):
             self.assertEqual(gp.worker(config, "g", ROOT), 0)
-        self.assertEqual(phases, ["lammps"] * 3)
-        self.assertEqual(publish.call_count, 3)
+        self.assertEqual(phases, [] if phase == "dpnegf" else [phase] * 3)
+        self.assertEqual(imported.call_count, 3 if phase == "dpnegf" else 0)
+        self.assertEqual(publish.call_count, 3 if phase == "lammps" else 0)
+        self.assertEqual(validate_dpnegf.call_count, 0 if phase == "lammps" else 3)
         state = json.loads((root / ".cnt_gpu_pool" / "state.json").read_text())
         self.assertTrue(state["finalized"])
         self.assertTrue(all(entry["status"] == "done" for entry in state["tasks"].values()))
@@ -180,10 +191,80 @@ class GpuPoolTests(unittest.TestCase):
         with patch.object(gp, "_array_active", return_value=False):
             self.assertEqual(gp.wait(root, poll_interval=0), 1)
 
- def test_pool_rejects_other_phases_before_submission(self):
-    for phase in ("all", "dpnegf"):
-        with self.assertRaisesRegex(ValueError, "phase=lammps"):
-            gp.submit(SimpleNamespace(phase=phase), {}, [], ROOT, "unused")
+ def test_pool_rejects_unknown_phase_before_submission(self):
+    with self.assertRaisesRegex(ValueError, "Unsupported"):
+        gp.submit(SimpleNamespace(phase="unknown"), {}, [], ROOT, "unused")
+
+ def test_phase_switch_resets_done_and_blocks_active_pool(self):
+    for phase in ("dpnegf", "all"):
+        with self.subTest(phase=phase), tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = root / "batch.json"
+            config.write_text("{}")
+            tasks = [{"task_id": "a", "run_root": root / "a"}]
+            gp._initialize(root, {"phase": "lammps", "array_job_id": "12",
+                                 "tasks": {"a": {"status": "done"}}})
+            args = SimpleNamespace(phase=phase, para=2, pool_cpus=6, worker_time="01:00:00",
+                                   pool_partition=None, pool_mem=None, pool_setup=None,
+                                   pool_retry_failed=False, skip_conductance=False)
+            with patch.object(gp, "_array_active", return_value=True), \
+                 patch.object(gp.subprocess, "run") as submit:
+                with self.assertRaisesRegex(RuntimeError, "already active"):
+                    gp.submit(args, {"data_root": root}, tasks, ROOT, config)
+                submit.assert_not_called()
+            with patch.object(gp, "_array_active", return_value=False), \
+                 patch.object(gp.subprocess, "run", return_value=SimpleNamespace(
+                     returncode=0, stdout="123\n", stderr="")):
+                gp.submit(args, {"data_root": root}, tasks, ROOT, config)
+            with gp._locked(root) as state:
+                self.assertEqual(state["phase"], phase)
+                self.assertEqual(state["tasks"]["a"]["status"], "pending")
+                self.assertFalse(state["skip_conductance"])
+
+ def test_collection_runs_once_and_failure_reaches_wait(self):
+    for phase in ("dpnegf", "all"):
+        with self.subTest(phase=phase), tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            gp._initialize(root, {"phase": phase, "generation": "g", "array_job_id": "123",
+                                 "tasks": {"a": {"status": "done"}}, "finalized": False})
+            with patch.object(gp, "_collect", return_value=7) as collect, \
+                 patch.object(gp.subprocess, "run"):
+                self.assertEqual(gp._finalize(root, "g", [], ROOT), 1)
+                self.assertIsNone(gp._finalize(root, "g", [], ROOT))
+                collect.assert_called_once_with(root, phase, [], ROOT)
+            self.assertEqual(gp.wait(root), 1)
+
+ def test_imported_execution_uses_frozen_config_and_local_scheduler(self):
+    import split_workflow as sw
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        config = root / "workflow_config.dpnegf.json"
+        task = {"manifest_entry": {"replica": "replica_001"}}
+        with patch.object(sw, "freeze_config", return_value=config) as freeze, \
+             patch.object(gp.subprocess, "run", return_value=SimpleNamespace(returncode=0)) as run:
+            self.assertEqual(gp._run_imported(task, {"data_root": root, "lammps_device": "gpu"}, ROOT), 0)
+        freeze.assert_called_once_with(root, task["manifest_entry"], "gpu")
+        cmd = run.call_args.args[0]
+        self.assertEqual(cmd[cmd.index("--scheduler") + 1], "local")
+        self.assertEqual(cmd[cmd.index("--phase") + 1], "dpnegf")
+        self.assertIn(str(config), cmd)
+
+ def test_dpnegf_validation_checks_result_and_provenance(self):
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        leaf = root / "dpnegf/100"
+        leaf.mkdir(parents=True)
+        (leaf / "STRUCT.fdf").touch()
+        (leaf / "dpnegf_done.flag").touch()
+        (leaf / "expected_negf_config_hash.txt").write_text("abc")
+        (leaf / "output").mkdir()
+        (leaf / "output/negf.out.pth").write_bytes(b"result")
+        (leaf / "output/negf_config_hash.txt").write_text("wrong")
+        with patch("negf_provenance.result_is_readable", return_value=True):
+            with self.assertRaisesRegex(RuntimeError, "not successfully completed"):
+                gp._validate_dpnegf_result({"run_root": root})
+            (leaf / "output/negf_config_hash.txt").write_text("abc")
+            gp._validate_dpnegf_result({"run_root": root})
 
  def test_parallel_publication_keeps_every_replica(self):
     import split_workflow
