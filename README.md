@@ -80,7 +80,7 @@ export BATCH_POOL_CPUS=6
 export BATCH_POOL_SETUP="$HOME/dptb.sh"
 ```
 
-仍执行 `./manage.sh start`。`dpnegf` 需要有效的 `transfer_manifest.json`，只读取批配置中的运行位置和集群选择，不重新生成几何。`all` 将阶段改为 `all`，保留 `CNT_LAMMPS_CMD`，并确保计算节点环境同时支持 LAMMPS 与 DeePTB。两套 Python 分离时可用 `CNT_DPTB_PYTHON=/实际DeePTB环境/bin/python` 指定求解器解释器；该设置不代替共享库环境配置。worker 使用 `BATCH_POOL_SETUP` 加载后的 Python。pool 内部采用 local 执行入口，不再次 sbatch，也不执行 DPNEGF 模板 run.sh 中的环境加载。
+仍执行 `./manage.sh start`。`dpnegf` 需要有效的 `transfer_manifest.json`，只读取批配置中的运行位置和集群选择，不重新生成几何。`all` 将阶段改为 `all`，保留 `CNT_LAMMPS_CMD`；若原 LAMMPS `run.sh` 通过 `~/dpmd.sh` 加载 DeePMD 插件，应设置 `BATCH_POOL_SETUP="$HOME/dpmd.sh"`，并用 `CNT_DPTB_PYTHON=/实际DeePTB环境/bin/python` 指定求解器解释器。`BATCH_POOL_SETUP` 是 worker 启动时 source 的单个环境脚本，`CNT_DPTB_PYTHON` 只选择 DPNEGF 求解器的 Python；后者不代替求解器所需的共享库环境。pool 内部采用 local 执行入口，不再次 sbatch，也不执行两个模板 run.sh 中的环境加载。
 
 三种阶段都由 `BATCH_PARA` 控制单卡 worker 数，`max_parallel` 不控制 pool 并发。`dpnegf` 仅汇总已交付全部 replica 的配置。CLI 可用 `--skip-conductance` 跳过 `dpnegf` / `all` 的汇总；默认汇总失败会使 manager 报失败。
 
