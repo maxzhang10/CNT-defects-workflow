@@ -27,7 +27,9 @@
         },
         "rgf_options": {
             "device": "cpu",
-            "e_batch_size": 33
+            "cpu_workers": 12,
+            "cpu_threads": 4,
+            "e_batch_size": 1
         },
         "stru_options": {
             "compute_band_edges": true,
