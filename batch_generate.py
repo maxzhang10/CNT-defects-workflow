@@ -274,6 +274,7 @@ def build_tasks(batch, base_root):
                     "defect_angle_range_deg": cfg.get("defect_angle_range_deg", template.get("defect_angle_range_deg", [0, 360])),
                     "release_uc": release_uc,
                     "ele_T": ele_T,
+                    "e_fermi": cfg.get("e_fermi", template.get("e_fermi")),
                     "N_defects": n_defects,
                     "uc_file": cfg.get("uc_file"),
                     "uc_sha256": cfg.get("uc_sha256"),
@@ -364,6 +365,7 @@ def build_assemble_tasks(batch, base_root):
                     "run_root": run_root, "seed": seed, **seeds,
                     "lammps_seed": batch["base_lammps_seed"] + replica,
                     "ele_T": ele_T,
+                    "e_fermi": cfg.get("e_fermi", template.get("e_fermi")),
                     "save_self_energy": template["save_self_energy"],
                     "self_energy_cache": bc.resolve_self_energy_cache(
                         cfg["self_energy_cache"] if cfg["self_energy_cache"] is not None else template["self_energy_cache"],
@@ -389,8 +391,8 @@ def make_task_config(task, batch):
     # conductance_options.mu 只写入字符串标签（非数值）：
     #   fermi          -> ["Ef"]      （以费米能级为化学势）
     #   band_edge_bias -> ["Ev", "Ec"]（以带边为化学势）
-    # Ec/Ev/Ef 的实际能量值由 DPNEGF 计算后随 negf.out.pth 输出，
-    # 由收集器按标签从结果文件读取，不再由外部提供。
+    # Ec/Ev 由 DPNEGF 计算，Ef 可由 e_fermi 指定；实际使用值随结果输出，
+    # 由收集器按标签从结果文件读取。
     mu_labels = (
         ["Ev", "Ec"]
         if task["conductance_mode"] == "band_edge_bias"
@@ -429,6 +431,7 @@ def make_task_config(task, batch):
         # 覆盖 template 的自能缓存为按手性解析后的路径（None 表示沿用）。
         "self_energy_cache": task["self_energy_cache"],
         "conductance_mode": task["conductance_mode"],
+        "e_fermi": task.get("e_fermi"),
         "conductance_options": {
             "mu": mu_labels,
         },
@@ -447,7 +450,7 @@ def make_task_config(task, batch):
         )
 
     # ele_T 仅在显式设置时写入 config：None 表示沿用 DPNEGF input.json
-    # 模板值；不写入键可保证未设置时 provenance hash 与旧版一致。
+    # 模板值。
     if task["ele_T"] is not None:
         config["ele_T"] = float(task["ele_T"])
 
@@ -475,6 +478,7 @@ def make_assemble_task_config(task, batch):
         "save_self_energy": task["save_self_energy"],
         "self_energy_cache": task["self_energy_cache"],
         "conductance_mode": task["conductance_mode"],
+        "e_fermi": task.get("e_fermi"),
         "conductance_options": {"mu": mu}, "md_sampling": {"n_samples": 1},
     })
     if task["ele_T"] is not None:

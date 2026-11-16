@@ -21,6 +21,7 @@ template = {
     # N_defects 配置始终使用 same_count。
     "defect_count_mode": "balanced_count",
     "ele_T": 100,
+    "e_fermi": None,  # eV；数值覆写费米能级，None/缺省则删除输入键并重新计算
     "save_self_energy": False,
     # 相对路径按每个 DPNEGF leaf 解析，各 replica 使用自己的缓存。
     # 若改成跨 replica 共享的绝对路径，外部 UC 要加入

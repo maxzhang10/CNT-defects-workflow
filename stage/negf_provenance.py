@@ -57,8 +57,9 @@ NEGF_CONFIG_KEYS = (
     "self_energy_cache",
     "conductance_options",
     # DPNEGF 电极温度（K）。仅在 config 显式设置时存在于 config 中
-    # （缺省 = 沿用 input.json 模板值），因此未设置时 hash 与旧版一致。
+    # （缺省 = 沿用 input.json 模板值）。
     "ele_T",
+    "e_fermi",
 )
 
 # leaf 工作目录内期望 hash 文件名（copy_input 写入，作为本次运行的期望值）。
@@ -82,6 +83,11 @@ def compute_negf_config_hash(config: Mapping[str, Any]) -> str:
     for key in NEGF_CONFIG_KEYS:
         if key in config:
             subset[key] = config[key]
+    # Invalidate pre-policy results: templates previously controlled both fields.
+    # Missing/null Ef both mean recalculation; numeric int/float are equivalent.
+    subset["dpnegf_input_policy"] = 1
+    ef = config.get("e_fermi")
+    subset["e_fermi"] = None if ef is None else float(ef)
     payload = _canonicalize(subset)
     if config.get("structure_mode") != "assemble":
         angle_range = normalize_angle_range(config.get("defect_angle_range_deg", [0, 360]))

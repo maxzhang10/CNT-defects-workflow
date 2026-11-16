@@ -149,6 +149,9 @@ python batch_generate.py --config batch.py --pool-status
 - `lammps_mode` 为 `opt`（结构优化）或 `md`（分子动力学）；
 - 使用 `defect_density` 时，`defect_count_mode` 可设为 `same_count` 或 `balanced_count`。缺省 `same_count` 保持旧行为：所有 replica 使用同一个四舍五入后的缺陷数（至少 1 个）；推荐的 `balanced_count` 在相邻两个整数间分配，使整个 replica ensemble 的平均密度逼近目标密度，并允许短管 replica 为 0 缺陷；
 - 电导模式由手性自动判断：`(m - n) % 3 == 0` 的金属管使用 `fermi`，其余半导体管使用 `band_edge_bias`；
+- CPU/GPU 的 DPNEGF 输入同时按手性设置 `task_options.stru_options.compute_band_edges`：金属管为 `false`，半导体管为 `true`。
+- `e_fermi`（eV）支持在 `template` 或单个 `configs` 项设置，单项优先；例如 `"e_fermi": 1.6892654299736023` 会覆写生成的 `input.json` 中 `task_options.e_fermi`。单项省略时继承 `template`；两处都省略或最终为 `None`（Python）/ `null`（JSON）时，删除该键以重新计算费米能级。单项显式 `None`/`null` 可取消公共固定值。允许零和负数，但必须为有限数值。普通建模及 assemble 均支持，直接使用 workflow 配置时规则相同。
+- 新的带边/费米能级规则及 `e_fermi` 已纳入结果复用校验；旧版完成结果或费米能级不同的结果不能直接复用，应使用新的计算目录。
 - 每个配置单独设置 `replicas`，不同长度可以使用不同 replica 数；
 - 两个 base seed 分别控制缺陷结构和 LAMMPS 轨迹。相同配置的 replica 序号会得到稳定的 seed；
 - `self_energy_cache.save_path` 支持 `{m}`、`{n}`、`{chirality}`、`{data_root}` 占位符。若多个 replica 共享自能，建议使用包含 `{data_root}` 的路径。

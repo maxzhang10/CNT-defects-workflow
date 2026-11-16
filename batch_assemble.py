@@ -13,6 +13,7 @@ template = {
     "r_max": 6.5,
     "md_steps": 0,  # 0: 跳过 LAMMPS，拼接 POSCAR 直接进入 DPNEGF；正数: MD
     "ele_T": 100,
+    "e_fermi": None,  # eV；数值覆写费米能级，None/缺省则删除输入键并重新计算
     "save_self_energy": False,
     "self_energy_cache": {"use_saved": True, "save_path": "./self_energy/"},
 }

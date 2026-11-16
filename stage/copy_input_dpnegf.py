@@ -8,6 +8,7 @@ import argparse
 from pathlib import Path
 from fdf2xyz import load_config, get_chirality_from_config
 import cnt_geometry
+from negf_settings import normalize_e_fermi
 from cluster_inputs import input_directory
 
 import logkit as L
@@ -143,7 +144,9 @@ def update_input_json_for_leaf(
     uc_file=None,
     uc_sha256=None,
     assembly=None,
+    e_fermi=None,
 ):
+    e_fermi = normalize_e_fermi(e_fermi)
     leaf_dir = Path(leaf_dir).resolve()
 
     fdf_path = leaf_dir / "STRUCT.fdf"
@@ -198,6 +201,11 @@ def update_input_json_for_leaf(
 
     task_options = input_data["task_options"]
     stru_options = task_options["stru_options"]
+    stru_options["compute_band_edges"] = not cnt_geometry.is_metallic(m, n)
+    if e_fermi is None:
+        task_options.pop("e_fermi", None)
+    else:
+        task_options["e_fermi"] = e_fermi
 
     # 保留模板 input.json 中的 ele_T。工作流的 temperature 用于结构/MD，
     # 不应再隐式覆盖 DPNEGF 电极温度。
@@ -253,6 +261,8 @@ def update_input_json_for_leaf(
         f"  lead_R.id = {lead_R_id}"
         f"\n  ele_T = {ele_T if ele_T is not None else '模板值(未覆写)'}"
         f"\n  conductance_options.mu = {conductance_mu}"
+        f"\n  compute_band_edges = {stru_options['compute_band_edges']}"
+        f"\n  e_fermi = {e_fermi if e_fermi is not None else '自动计算'}"
         f"\n  self-energy cache = {self_energy_cache}"
         f"\n  AtomicData_options.r_max = {r_max}"
         f"\n  lead kmesh_lead_Ef = [1, 1, {n_kz_lead}] (T={T:.6f} A, "
@@ -338,6 +348,7 @@ def copy_inputs_to_leaf_dirs(
     uc_file=None,
     uc_sha256=None,
     assembly=None,
+    e_fermi=None,
 ):
     input_dir = Path(input_dir).resolve()
     root_dir = Path(root_dir).resolve()
@@ -408,6 +419,7 @@ def copy_inputs_to_leaf_dirs(
                 uc_file=uc_file,
                 uc_sha256=uc_sha256,
                 assembly=assembly,
+                e_fermi=e_fermi,
             )
 
             n_success += 1
@@ -503,6 +515,7 @@ def main():
 
     args = parser.parse_args()
     config = load_config(args.config)
+    e_fermi = normalize_e_fermi(config.get("e_fermi"))
     if args.input_dir is None:
         args.input_dir = input_directory(config.get('lammps_device', 'gpu'), 'dpnegf')
     l_def = int(config.get("l_def", 5))
@@ -584,6 +597,7 @@ def main():
         conductance_mu=conductance_mu,
         negf_config_hash=compute_negf_config_hash(config),
         ele_T=ele_T,
+        e_fermi=e_fermi,
         uc_file=config.get("uc_file"),
         uc_sha256=config.get("uc_sha256"),
         assembly=config.get("assembly") if config.get("structure_mode") == "assemble" else None,

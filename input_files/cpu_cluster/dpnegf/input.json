@@ -31,8 +31,9 @@
             "cpu_threads": 4,
             "e_batch_size": 1
         },
+        "e_fermi": 1.6892654299736023,
         "stru_options": {
-            "compute_band_edges": true,
+            "compute_band_edges": false,
             "gamma_center": true,
             "time_reversal_symmetry": true,
             "nel_atom": {

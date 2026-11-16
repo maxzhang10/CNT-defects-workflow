@@ -145,6 +145,7 @@ from pathlib import Path
 from uc_source import read_poscar_metadata
 import assemble
 from defect_angles import normalize_angle_range
+from negf_settings import normalize_e_fermi
 
 
 # template 层的公共物理默认值。旧版硬编码在 batch_generate.py 的
@@ -509,6 +510,8 @@ def validate_config_entry(
         entry_cache = None
 
     out = dict(entry)
+    if "e_fermi" in entry:
+        out["e_fermi"] = normalize_e_fermi(entry["e_fermi"])
     out["m"] = m
     out["n"] = n
     # 目标值保留在内部 _resolution 供任务展开和解析表使用；
@@ -688,6 +691,8 @@ def validate_assemble_entry(entry, index, path, template):
         _fail(path, f"{label}: {exc}")
     if normalized["ele_T"] is not None:
         normalized["ele_T"] = _require_ele_T(normalized["ele_T"], f"{label}.ele_T", path)
+    if "e_fermi" in entry:
+        normalized["e_fermi"] = normalize_e_fermi(entry["e_fermi"])
     if normalized["self_energy_cache"] is not None:
         normalized["self_energy_cache"] = _validate_self_energy_cache(normalized["self_energy_cache"], f"{label}.self_energy_cache", path)
     return normalized
@@ -718,6 +723,7 @@ def _validate_batch(raw, path):
     if not isinstance(template_raw, dict):
         _fail(path, f"template 必须为对象，当前值: {template_raw!r}")
     template = {**DEFAULT_TEMPLATE, **template_raw}
+    template["e_fermi"] = normalize_e_fermi(template.get("e_fermi"))
     template["defect_angle_range_deg"] = normalize_angle_range(template["defect_angle_range_deg"])
     _require_bool(template["save_self_energy"], "template.save_self_energy", path)
     template["defect_count_mode"] = _require_defect_count_mode(
