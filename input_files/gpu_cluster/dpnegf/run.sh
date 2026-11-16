@@ -1,6 +1,5 @@
 #!/bin/bash
-#SBATCH -p gpu_4090
-#SBATCH --nodes=1
+#SBATCH -p gpu
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=6
 #SBATCH --gpus=1

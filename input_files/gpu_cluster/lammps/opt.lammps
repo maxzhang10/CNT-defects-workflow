@@ -67,7 +67,7 @@ dump_modify     opt format line "%d %d %.15f %.15f %.15f"
 
 min_style       cg
 min_modify dmax 0.1 norm max
-minimize        0.0 1.0e-3 10000 100000
+minimize        0.0 1.0e-3 50000 500000
 
 undump          opt
 
