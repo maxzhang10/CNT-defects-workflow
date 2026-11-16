@@ -147,7 +147,7 @@ python batch_generate.py --config batch.py --pool-status
 - `chirality`、`structures`、`replicas` 是每个配置的必需字段；长度维度必须从 `l_def` / `length_angstrom` 中选择一个，缺陷维度必须从 `N_defects` / `defect_density` 中选择一个；
 - `buffer_pl` 是每侧缓冲层厚度，单位为 PL，可在每个 `configs` 配置中单独指定；省略时沿用按手性选择的默认值（金属管 2 PL，半导体管 4 PL）；
 - `lammps_mode` 为 `opt`（结构优化）或 `md`（分子动力学）；
-- 使用 `defect_density` 时，`defect_count_mode` 可设为 `same_count` 或 `balanced_count`。缺省 `same_count` 保持旧行为：所有 replica 使用同一个四舍五入后的缺陷数（至少 1 个）；推荐的 `balanced_count` 在相邻两个整数间分配，使整个 replica ensemble 的平均密度逼近目标密度，并允许短管 replica 为 0 缺陷；
+- `N_defects` 或 `defect_density` 可以设为 0，生成无缺陷管。使用 `defect_density` 时，`defect_count_mode` 可设为 `same_count` 或 `balanced_count`。`same_count` 在密度为正时保持至少 1 个缺陷；`balanced_count` 在相邻两个整数间分配，使 replica 的平均密度逼近目标值；
 - 电导模式由手性自动判断：`(m - n) % 3 == 0` 的金属管使用 `fermi`，其余半导体管使用 `band_edge_bias`；
 - CPU/GPU 的 DPNEGF 输入同时按手性设置 `task_options.stru_options.compute_band_edges`：金属管为 `false`，半导体管为 `true`。
 - `e_fermi`（eV）支持在 `template` 或单个 `configs` 项设置，单项优先；例如 `"e_fermi": 1.6892654299736023` 会覆写生成的 `input.json` 中 `task_options.e_fermi`。单项省略时继承 `template`；两处都省略或最终为 `None`（Python）/ `null`（JSON）时，删除该键以重新计算费米能级。单项显式 `None`/`null` 可取消公共固定值。允许零和负数，但必须为有限数值。普通建模及 assemble 均支持，直接使用 workflow 配置时规则相同。
@@ -179,6 +179,8 @@ L_actual = l_def × T
 ```text
 N_defects = max(1, floor(defect_density × L_actual + 0.5))
 ```
+
+当 `defect_density = 0` 时，`same_count` 和 `balanced_count` 均生成零缺陷。
 
 `balanced_count` 令 `λ = defect_density × L_actual = q + f`。第 `i` 个 replica（从 1 开始）的缺陷数为：
 

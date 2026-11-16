@@ -57,7 +57,7 @@ Plan B：长度 + 缺陷密度（替代手写 l_def / N_defects）
 密度到缺陷数支持两种模式：
 
     defect_count_mode = "same_count"（默认）
-        N_defects = max(1, round(defect_density · L))
+        N_defects = 0 if defect_density == 0 else max(1, round(defect_density · L))
         每个 replica 使用相同缺陷数，兼容旧行为。
 
     defect_count_mode = "balanced_count"
@@ -453,20 +453,22 @@ def validate_config_entry(
 
     actual_length = l_def * uc
     if has_density:
-        target_density = _require_positive_finite(
-            entry["defect_density"], f"configs[{index}].defect_density", path
-        )
+        target_density = entry["defect_density"]
+        if (isinstance(target_density, bool) or not isinstance(target_density, (int, float))
+                or not math.isfinite(target_density) or target_density < 0):
+            _fail(path, f"configs[{index}].defect_density 必须为有限非负数，当前值: {target_density!r}")
+        target_density = float(target_density)
         expected_defects = target_density * actual_length
         if defect_count_mode == "balanced_count":
             # balanced_count 的 N_defects 是 replica 级属性，在 build_tasks
             # 展开时按 replica 序号计算；这里不伪造单一整数值。
             n_defects = None
         else:
-            n_defects = max(1, _round_positive(expected_defects))
+            n_defects = 0 if target_density == 0 else max(1, _round_positive(expected_defects))
         resolution["defect_density"] = target_density
     else:
         n_defects = _require_int(
-            entry["N_defects"], f"configs[{index}].N_defects", path
+            entry["N_defects"], f"configs[{index}].N_defects", path, minimum=0
         )
     buffer_pl = entry.get("buffer_pl")
     if buffer_pl is not None:
@@ -927,6 +929,8 @@ def format_resolution_table(configs):
         target_length = resolution.get("length_angstrom")
         target_density = resolution.get("defect_density")
         defect_count_mode = cfg.get("defect_count_mode", "same_count")
+        def density_error(actual):
+            return "（目标密度为零）" if target_density == 0 else f"({(actual / target_density - 1) * 100:+.1f}%)"
 
         if target_density is not None and defect_count_mode == "balanced_count":
             expected = target_density * actual_length
@@ -942,7 +946,7 @@ def format_resolution_table(configs):
             density_text = (
                 f"密度 {target_density:.6f} Å^-1 -> balanced_count "
                 f"N={count_text}, ensemble 实际 {actual_density:.6f} Å^-1 "
-                f"({(actual_density / target_density - 1) * 100:+.1f}%)"
+                f"{density_error(actual_density)}"
             )
         else:
             actual_density = cfg["N_defects"] / actual_length
@@ -950,7 +954,7 @@ def format_resolution_table(configs):
                 f"密度 {target_density:.6f} Å^-1 -> "
                 f"same_count N_defects={cfg['N_defects']}, "
                 f"实际 {actual_density:.6f} Å^-1 "
-                f"({(actual_density / target_density - 1) * 100:+.1f}%)"
+                f"{density_error(actual_density)}"
                 if target_density is not None
                 else f"N_defects={cfg['N_defects']}（手写，{actual_density:.6f} Å^-1）"
             )

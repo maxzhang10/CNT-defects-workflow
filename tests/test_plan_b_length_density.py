@@ -349,9 +349,9 @@ def test_plan_b_dimension_missing(tmp_path):
 
 
 def test_plan_b_invalid_target_values(tmp_path):
-    """目标值必须为有限正数。"""
+    """长度必须为正，密度必须非负，均须为有限数。"""
     for key in ("length_angstrom", "defect_density"):
-        for bad in (0, -1.0, "abc", True):
+        for bad in ((0, -1.0, "abc", True, float("inf")) if key == "length_angstrom" else (-1.0, "abc", True, float("inf"))):
             entry = {
                 "chirality": [13, 1],
                 "structures": ["MVH"],
@@ -368,6 +368,44 @@ def test_plan_b_invalid_target_values(tmp_path):
             path = _write_batch(tmp_path, [entry])
             with pytest.raises(bc.BatchConfigError):
                 bc.load(path)
+
+
+@pytest.mark.parametrize("mode", ["same_count", "balanced_count"])
+@pytest.mark.parametrize("defect_field", ["N_defects", "defect_density"])
+def test_zero_defects_batch_to_workflow(tmp_path, mode, defect_field):
+    entry = {"chirality": [5, 5], "length_angstrom": 30,
+             "structures": ["MVH"], "replicas": 3, defect_field: 0}
+    if defect_field == "defect_density":
+        entry["defect_count_mode"] = mode
+    batch = bc.load(_write_batch(tmp_path, [entry]))
+    summary = bc.format_resolution_table(batch["configs"])
+    assert "0.000000" in summary
+    tasks = batch_generate.build_tasks(batch, tmp_path)
+    assert [task["N_defects"] for task in tasks] == [0, 0, 0]
+    for task in tasks:
+        config = batch_generate.make_task_config(task, batch)
+        assert config["N_defects"] == 0
+        assert config["actual_density_A_inv"] == 0
+
+
+@pytest.mark.parametrize("value", [-1, True, 0.5])
+def test_invalid_explicit_defect_count(tmp_path, value):
+    entry = {"chirality": [5, 5], "l_def": 3, "structures": ["MVH"],
+             "replicas": 1, "N_defects": value}
+    with pytest.raises(bc.BatchConfigError):
+        bc.load(_write_batch(tmp_path, [entry]))
+
+
+def test_zero_defects_preserves_pristine_atoms():
+    import cnt_geometry
+    import ele_multi_defects_ele as ele
+
+    tube = cnt_geometry.build_unit_cnt(5, 5)
+    coords, indices = ele.generate_defect_coords(tube, 0, 2.46, 1, 1, 5, 5)
+    result, log = ele.multi_defects_ele(tube, coords, ["MVH"], seed=1)
+    assert coords == indices == log == []
+    assert len(result) == len(tube)
+    assert (result.positions == tube.positions).all()
 
 
 def test_plan_b_equivalent_to_handwritten(tmp_path):
