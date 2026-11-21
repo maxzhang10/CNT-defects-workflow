@@ -71,6 +71,7 @@ def set_reference_cyl(tube):
     pos = tube.positions
     cx = pos[:,0].mean()
     cy = pos[:,1].mean()
+    tube.info["cnt_axis_xy"] = (cx, cy)
     r = np.sqrt((pos[:,0]-cx)**2 + (pos[:,1]-cy)**2)
     R0 = r.mean()
 

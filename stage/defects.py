@@ -93,14 +93,14 @@ def add_57(tube, ind1, ind2):
     print(r2)
     """
     center = 0.5 * (r1 + r2)
-    bond = r2 - r1
-    # CNT 轴向 z
-    z_axis = np.array([0.0, 0.0, 1.0])
-    # 法向量（与 CNT 壁垂直）
-    axis = np.cross(z_axis, bond)
+    # 从管轴指向键中点的径向即局部管壁法向。连续造缺陷时沿用初始管轴。
+    axis_xy = tube.info.get("cnt_axis_xy")
+    if axis_xy is None:
+        axis_xy = tube.positions[tube.numbers == 6, :2].mean(axis=0)
+    axis = np.zeros(3)
+    axis[:2] = center[:2] - axis_xy
     if np.linalg.norm(axis) < 1e-6:
-        raise ValueError("原子键平行于 z 轴，无法定义切面")
-    axis = axis / np.linalg.norm(axis)
+        raise ValueError("键中点位于管轴上，无法定义径向旋转轴")
     # 旋转 90°
     theta = np.pi / 2
     # 分别计算旋转后的坐标
