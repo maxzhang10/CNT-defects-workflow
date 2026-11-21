@@ -289,6 +289,7 @@ def main() -> int:
         default=0,
         help="最大重试次数；0 表示无限重试",
     )
+    parser.add_argument("--imported", action="store_true", help="Use B phase flag-based restart handling")
     args = parser.parse_args()
 
     if args.submit_retry_interval < 1:
@@ -314,9 +315,10 @@ def main() -> int:
             f"Workdir does not exist: {workdir}"
         )
 
-    cleanup_legacy_false_flags(workdir)
+    if not args.imported:
+        cleanup_legacy_false_flags(workdir)
 
-    if (workdir / 'dpnegf_input_fingerprint.json').exists():
+    if not args.imported and (workdir / 'dpnegf_input_fingerprint.json').exists():
         from split_workflow import lock_inputs
         lock_inputs(workdir)
 
@@ -324,6 +326,12 @@ def main() -> int:
     failed_flag = workdir / "dpnegf_failed.flag"
     submitted_flag = workdir / "dpnegf_submitted.flag"
     job_id_file = workdir / "job_id.txt"
+
+    if args.imported:
+        if failed_flag.exists() or (workdir / "dpnegf_submit_failed.flag").exists():
+            return EXIT_PRIOR_FAILURE
+        if done_flag.exists():
+            return 0 if result_is_readable(workdir, require_torch=True) else EXIT_PRIOR_FAILURE
 
     if done_flag.exists():
         # Fail-safe：done flag 不等于成功。必须同时验证结果文件非空且

@@ -131,7 +131,7 @@ def result_is_nonempty(leaf_dir: Path) -> bool:
     return result.is_file() and result.stat().st_size > 0
 
 
-def result_is_readable(leaf_dir: Path) -> bool:
+def result_is_readable(leaf_dir: Path, *, require_torch: bool = False) -> bool:
     """结果文件存在、非空，且能用 torch.load 真正读出（可读取）。
 
     用于把"done flag + 损坏/缺失结果"识别为失败，使其进入重试，
@@ -146,6 +146,19 @@ def result_is_readable(leaf_dir: Path) -> bool:
     try:
         import torch  # type: ignore
     except ImportError:
+        if require_torch:
+            import os
+            import subprocess
+            python = os.environ.get("CNT_DPTB_PYTHON")
+            if not python:
+                raise RuntimeError("读取 DPNEGF 结果需要 PyTorch；请设置 CNT_DPTB_PYTHON 指向求解环境。")
+            check = subprocess.run([python, "-c",
+                "import sys, torch\ntry: torch.load(sys.argv[1], map_location='cpu', weights_only=False)"
+                "\nexcept TypeError: torch.load(sys.argv[1], map_location='cpu')",
+                str(result_file_path(leaf_dir))], capture_output=True, text=True)
+            if check.returncode and "No module named 'torch'" in check.stderr:
+                raise RuntimeError(f"CNT_DPTB_PYTHON 无法导入 PyTorch: {python}")
+            return check.returncode == 0
         # orchestrator 环境无 torch：只能确认到非空，读取校验交给下游。
         return True
     try:

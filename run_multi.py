@@ -531,6 +531,7 @@ def main():
     args = parser.parse_args()
     if args.phase == 'dpnegf':
         args.skip_ele = True
+        args.skip_conductance = True
     if args.phase == 'lammps':
         args.skip_dpnegf = True
         if args.skip_ele:
@@ -579,6 +580,15 @@ def main():
         if "data_root" not in config:
             raise KeyError("config 中没有定义 data_root")
         root = Path(config["data_root"]).resolve()
+
+    if args.phase == 'dpnegf' and not args.dry_run:
+        from split_workflow import imported_status
+        status = imported_status(root)
+        if status != 'pending':
+            L.skip(f'DPNEGF {status}: {root}')
+            if status == 'failed':
+                raise SystemExit(1)
+            return
 
     ele_defects_script = stage / "ele_multi_defects_ele.py"
     sub_lammps_script = stage / "sub_lmps.py"
@@ -894,6 +904,7 @@ def main():
 
     L.info(f"DPNEGF 模型文件 = {model_file}")
 
+    resume_submitted_job = False
     for struct_dir in structure_dirs:
         dpnegf_dir = struct_dir / "dpnegf"
 
@@ -902,16 +913,9 @@ def main():
             continue
 
         if args.phase == 'dpnegf' and not args.dry_run:
-            from split_workflow import lock_inputs
-            from negf_provenance import compute_negf_config_hash
             leaf = next(dpnegf_dir.rglob('STRUCT.fdf')).parent
-            if (leaf / 'dpnegf_input_fingerprint.json').exists():
-                lock_inputs(leaf)
-            if (leaf / 'dpnegf_done.flag').exists() or (leaf / 'dpnegf_submitted.flag').exists():
-                lock_inputs(leaf)
-                expected = (leaf / 'expected_negf_config_hash.txt').read_text().strip()
-                if expected != compute_negf_config_hash(config):
-                    raise ValueError(f'Configuration changed for existing DPNEGF job/result: {leaf}')
+            if (leaf / 'dpnegf_submitted.flag').exists() and (leaf / 'job_id.txt').is_file():
+                resume_submitted_job = True
                 continue
 
         run_cmd(
@@ -951,14 +955,12 @@ def main():
             L.item(i, len(dpnegf_workdirs), w)
 
         for workdir in dpnegf_workdirs:
-            if args.phase == 'dpnegf' and not args.dry_run:
-                from split_workflow import lock_inputs
-                lock_inputs(workdir)
             run_cmd(
                 [
                     py,
                     str(sub_dpnegf_script),
                     str(workdir),
+                    *(['--imported'] if args.phase == 'dpnegf' else []),
                     "--scheduler",
                     args.scheduler,
                 ],
@@ -968,7 +970,7 @@ def main():
 
         # SLURM 屏障：等所有 DPNEGF 作业跑完并检查 flag，再统一清理缓存。
         # local 模式下每个 sub_dpnegf 已阻塞跑完，可直接进入清理。
-        if args.scheduler == "slurm":
+        if args.scheduler == "slurm" or resume_submitted_job:
             dpnegf_barrier_and_check(
                 dpnegf_workdirs, root, config,
                 poll_interval=args.poll_interval,

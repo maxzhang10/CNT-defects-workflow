@@ -68,7 +68,7 @@ export BATCH_POOL_SETUP="$HOME/dpmd.sh"
 export CNT_LAMMPS_CMD="/实际路径/lmp"
 ```
 
-然后仍执行 `./manage.sh start`、`./manage.sh status` 和 `./manage.sh log`。manager 会等待 LAMMPS、结构转换和交付清单写入完成才报告完成；`status` 显示 pending/running/done/failed 的 replica 数。`stop` 沿用原语义，仅停止本地监控，不取消已提交的 Slurm worker；需要取消整个池时对提交日志中的 array ID 执行 `scancel <array-id>`。资源池支持 `BATCH_PHASE="lammps"`、`"dpnegf"`、`"all"`；后两种阶段会等待 DPNEGF 及电导汇总完成。
+然后仍执行 `./manage.sh start`、`./manage.sh status` 和 `./manage.sh log`。manager 会等待 LAMMPS、结构转换和交付清单写入完成才报告完成；`status` 显示 pending/running/done/failed 的 replica 数。`stop` 沿用原语义，仅停止本地监控，不取消已提交的 Slurm worker；需要取消整个池时对提交日志中的 array ID 执行 `scancel <array-id>`。资源池支持 `BATCH_PHASE="lammps"`、`"dpnegf"`、`"all"`；其中 dpnegf 等待各 replica 计算结束，all 默认还会汇总电导。
 
 仅计算 DPNEGF 时，在 `manage.sh` 中改为：
 
@@ -82,11 +82,11 @@ export BATCH_POOL_SETUP="$HOME/dptb.sh"
 
 仍执行 `./manage.sh start`。`dpnegf` 需要有效的 `transfer_manifest.json`，只读取批配置中的运行位置和集群选择，不重新生成几何。`all` 将阶段改为 `all`，保留 `CNT_LAMMPS_CMD`；若原 LAMMPS `run.sh` 通过 `~/dpmd.sh` 加载 DeePMD 插件，应设置 `BATCH_POOL_SETUP="$HOME/dpmd.sh"`，并用 `CNT_DPTB_PYTHON=/实际DeePTB环境/bin/python` 指定求解器解释器。`BATCH_POOL_SETUP` 是 worker 启动时 source 的单个环境脚本，`CNT_DPTB_PYTHON` 只选择 DPNEGF 求解器的 Python；后者不代替求解器所需的共享库环境。pool 内部采用 local 执行入口，不再次 sbatch，也不执行两个模板 run.sh 中的环境加载。
 
-三种阶段都由 `BATCH_PARA` 控制单卡 worker 数，`max_parallel` 不控制 pool 并发。`dpnegf` 仅汇总已交付全部 replica 的配置。CLI 可用 `--skip-conductance` 跳过 `dpnegf` / `all` 的汇总；默认汇总失败会使 manager 报失败。
+三种阶段都由 `BATCH_PARA` 控制单卡 worker 数，`max_parallel` 不控制 pool 并发。B 阶段的结果可交给独立脚本读取。`all` 可用 `--skip-conductance` 跳过汇总。
 
 修复失败任务并按原流程处理失败标记后，可运行 `BATCH_POOL_RETRY_FAILED=1 ./manage.sh start` 显式重提。已有数据目录中的 wrapper 需要补上上述配置，`WORKFLOW_DIR` 必须指向更新后的软件目录。
 
-`pool` 模式一次提交一个 Slurm job array，其中有 `--para` 个单卡 worker。先获得 GPU 的 worker 立即开始处理 replica；后续 worker 获得 GPU 后加入同一队列。每个 worker 在它的 Slurm 时限内持续领取所选阶段的任务，每次只运行一个 replica，距时限不足五分钟时停止领取新任务。`lammps` 生成最终 FDF/XYZ 并累计发布清单；`dpnegf` 从 manifest 导入结构计算；`all` 在同一 worker 上完成一个 replica 的结构生成、LAMMPS、转换和 DPNEGF。后两者在全部计算成功后统一汇总电导。`assemble` 的结构生成仍使用原调度方式，其清单可以用于 `dpnegf` pool。
+`pool` 模式一次提交一个 Slurm job array，其中有 `--para` 个单卡 worker。先获得 GPU 的 worker 立即开始处理 replica；后续 worker 获得 GPU 后加入同一队列。每个 worker 在它的 Slurm 时限内持续领取所选阶段的任务，每次只运行一个 replica，距时限不足五分钟时停止领取新任务。`lammps` 生成最终 FDF/XYZ 并累计发布清单；`dpnegf` 从 manifest 导入结构计算；`all` 在同一 worker 上完成一个 replica 的结构生成、LAMMPS、转换和 DPNEGF。`all` 默认在全部计算成功后统一汇总电导。`assemble` 的结构生成仍使用原调度方式，其清单可以用于 `dpnegf` pool。
 
 直接复用已有的 `~/dpmd.sh`，无需新建 `pool_env.sh`。它会在计算节点启动 worker 时加载。默认每个 worker 使用 6 个 CPU 核、8 小时时限，并由 Slurm 选择默认分区。若默认分区没有 GPU，用 `sinfo -o '%P %G'` 查看可用的 GPU 分区，再在 `manage.sh` 中设置 `export BATCH_POOL_PARTITION="实际分区名"`。也可以通过 `BATCH_POOL_CPUS`、`BATCH_WORKER_TIME`、`BATCH_POOL_MEM` 调整其他资源。
 
@@ -100,7 +100,7 @@ python batch_generate.py --config batch.py --scheduler pool --phase lammps \
 python batch_generate.py --config batch.py --pool-status
 ```
 
-每个 worker 的日志位于 `data_root/.cnt_gpu_pool/worker-<array-id>_<index>.out/.err`；每个 replica 的详细日志仍在其目录下的 `workflow.log`。仅 `lammps` 每完成一个 replica，worker 会在共享锁内更新 `transfer_manifest.json`，可沿用现有流程交付集群 B。所有任务处理结束后取消尚未开始的 array 元素。任务队列和进度保存在 `data_root/.cnt_gpu_pool/state.json`；不要手动编辑它，也不要对同一 `data_root` 同时运行其他批次。切换阶段要求旧 array 已退出，随后建立新阶段队列；旧阶段 done 不会视作新阶段完成，已有结果由相应执行入口校验复用。同阶段恢复仍要求批配置及任务列表一致。`dpnegf` 的 replica 日志为 `workflow.dpnegf.log`。
+每个 worker 的日志位于 `data_root/.cnt_gpu_pool/worker-<array-id>_<index>.out/.err`；每个 replica 的详细日志仍在其目录下的 `workflow.log`。仅 `lammps` 每完成一个 replica，worker 会在共享锁内更新 `transfer_manifest.json`，可沿用现有流程交付集群 B。所有任务处理结束后取消尚未开始的 array 元素。任务队列和进度保存在 `data_root/.cnt_gpu_pool/state.json`；不要手动编辑它，也不要对同一 `data_root` 同时运行其他批次。切换阶段要求旧 array 已退出，随后建立新阶段队列；旧阶段 done 不会视作新阶段完成，已有结果由相应执行入口校验复用。lammps 和 all 同阶段恢复要求批配置及任务列表一致。dpnegf 在每次启动时根据清单和磁盘 flag 重建队列。`dpnegf` 的 replica 日志为 `workflow.dpnegf.log`。
 
 重新运行相同提交命令会跳过队列中已成功的 replica，并将上次作业中断时仍为 `running` 的任务重新排队。计算失败的任务需先按下文“失败任务重提”处理 leaf 的失败标记和原因，再加 `--pool-retry-failed` 重交。使用共享文件系统时，必须确认计算节点之间的 POSIX `flock` 可见；资源池依赖它保证任务只被一个 worker 领取。
 
@@ -296,35 +296,22 @@ export BATCH_PHASE="dpnegf"
 
 自能缓存路径直接沿用 A 生成的 `workflow_config.json` 中的
 `self_energy_cache.save_path`。使用者应在 A 的输入配置中预先填写 B 上的自能
-位置；B 导入时原样保留该配置。使用已有自能时须先在 B 准备匹配的缓存。
+位置，也可以在 B 提交前修正收到的配置。使用已有自能时须先在 B 准备匹配的缓存。
 B 的 `input_files/<device>_cluster/dpnegf` 应配置本集群的模型、环境和 Slurm
 脚本。随后仍然执行 `./manage.sh start`。并发沿用批配置中的 `max_parallel`
 （未设置时默认 16）；直接运行时可用下方 `--max-parallel` 调整。
 
 分批交接时，先上传当前快照，上传成功后在 B 执行 `./manage.sh start`。
 B 每次启动只处理这一份清单，不自动监听新任务。等 B 本轮进程结束，再补传
-下一份累计清单并再次执行 `./manage.sh start`；已完成结果通过原有哈希校验后复用。
-若传输中断，先重跑上传命令并确认成功，再启动 B。不要在 B 运行期间向同一目录补传。
-某个配置收到的 replica 尚未达到其 `lammps_repeats` 时，B 输出 `[WAIT]` 并延后
-该配置的电导汇总，本轮 DPNEGF 计算仍可正常结束。全部 replica 到齐且计算成功后自动汇总。
-单集群的 `BATCH_PHASE="all"` 流程不变。
+下一份累计清单并再次执行 `./manage.sh start`。等上传完成后再启动 B。
 
-B 先校验整批文件 SHA-256，再为每个 replica 保存
-`workflow_config.dpnegf.json`，保留 A 的 `workflow_config.json`。自能缓存配置
-在两份配置中保持一致；后续重交时若冻结配置与交付配置不一致，会报错。
-各配置目录中的 replica 集合必须与交付清单一致，混入旧 replica 会在提交前
-报错。缺少 B 的输入模板或模型时，也会在写入冻结配置前报错。
-B 的 `lammps_device` 按 B 批配置写入冻结配置，用于选择 DPNEGF 模板；A 的
-原配置保留原有模式。B 首次准备输入后，重交也须保持集群模式一致。
-每个 leaf 还保存 `dpnegf_input_fingerprint.json`，校验 FDF、XYZ、模型内容、
-输入 JSON、求解脚本和期望配置哈希。已有结果仍须通过原有 provenance 校验。
-结构或模型发生变化时应使用新的计算目录，不要删除指纹来复用旧结果。
+B 的普通批调度和 GPU pool 均按每个 replica 的 flag 决定是否运行：
 
-修复失败原因、确认该 leaf 的 Slurm 作业已结束后，删除该 leaf 的
-`dpnegf_failed.flag`、`dpnegf_submitted.flag` 和 `job_id.txt`，再运行
-`./manage.sh start`。保留冻结配置和输入指纹用于重交校验。
-已提交任务接续等待，已成功且校验一致的结果跳过。`stop` 仅停止本地调度器，
-不会取消 Slurm 作业。B 的每个 replica 运行日志追加到 `workflow.dpnegf.log`。
+- 有 `dpnegf_failed.flag` 或 `dpnegf_submit_failed.flag` 时保留现场并跳过。其余待算任务继续执行，批次最终报告失败数或非零退出码。
+- 有 `dpnegf_done.flag` 时实际读取 `output/negf.out.pth`。可读则跳过；缺失、空文件或读取失败则报告失败，等待手动处理。调度环境未安装 PyTorch 时，可将 `CNT_DPTB_PYTHON` 指向装有 PyTorch 的 Python。
+- 等待已提交的 Slurm 作业。待算任务根据 B 收到的 `workflow_config.json` 和本机集群模式生成 `workflow_config.dpnegf.json`。可以在启动前修正收到的配置（例如自能路径）。B 不比较清单文件哈希、旧配置、输入指纹或结果配置哈希。
+- 需要重算时，确认作业已结束，手动清除该 leaf 的终态 flag 和旧提交记录（如 `dpnegf_submitted.flag`、`job_id.txt`），再启动。GPU pool 会从当前磁盘状态重建 B 队列。
+- B 将各 replica 的结果留在其输出目录供独立脚本读取。单集群 `all` 保留原有结果校验和汇总行为。
 
 对应的直接调用命令为：
 

@@ -158,20 +158,21 @@ def _restore_done_manifest(root, tasks, batch, state, published):
 
 
 def imported_tasks(batch, workflow_dir):
-    """Use the same immutable handoff and runtime-only config as DPNEGF import."""
-    from split_workflow import load_manifest, inside
+    """Discover B replicas from the delivered manifest."""
+    from split_workflow import load_manifest, inside, imported_terminal_leaf
     from cluster_inputs import validate_templates
     root = Path(batch["data_root"]).resolve()
-    manifest = load_manifest(root)
-    validate_templates(batch["lammps_device"], "dpnegf", workflow_dir)
+    manifest = load_manifest(root, imported=True)
+    if any(imported_terminal_leaf(inside(root, e["replica"])) is None for e in manifest["replicas"]):
+        validate_templates(batch["lammps_device"], "dpnegf", workflow_dir)
     return [{"task_id": entry["replica"], "run_root": inside(root, entry["replica"]),
              "configuration_root": inside(root, entry["configuration"]),
              "manifest_entry": entry} for entry in manifest["replicas"]]
 
 
 def _run_imported(task, batch, workflow_dir):
-    from split_workflow import freeze_config
-    config = freeze_config(Path(batch["data_root"]), task["manifest_entry"], batch["lammps_device"])
+    from split_workflow import prepare_imported_config
+    config = prepare_imported_config(Path(batch["data_root"]), task["manifest_entry"], batch["lammps_device"])
     with (config.parent / "workflow.dpnegf.log").open("a", encoding="utf-8") as log:
         return subprocess.run([sys.executable, str(workflow_dir / "run_multi.py"),
                                "--phase", "dpnegf", "--root", str(config.parent),
@@ -191,7 +192,7 @@ def submit(args, batch, tasks, workflow_dir, config_path):
         raise ValueError("Duplicate task IDs in GPU pool")
     initial = {
         "phase": args.phase,
-        "config_hash": _config_hash(config_path), "task_ids": ids,
+        "config_hash": None if args.phase == "dpnegf" else _config_hash(config_path), "task_ids": ids,
         "tasks": {task_id: {"status": "pending", "owner": None} for task_id in ids},
         "array_job_id": None, "generation": uuid.uuid4().hex,
         "finalized": False,
@@ -202,10 +203,22 @@ def submit(args, batch, tasks, workflow_dir, config_path):
             raise RuntimeError("Another GPU pool submission is in progress")
         if _array_active(state.get("array_job_id")):
             raise RuntimeError(f"GPU pool already active: {state['array_job_id']}")
-        if state.get("phase") != args.phase:
+        if args.phase == "dpnegf" or state.get("phase") != args.phase:
             state.clear()
             state.update(initial)
-        if state is not None:
+        if args.phase == "dpnegf":
+            from split_workflow import imported_status
+            for task in tasks:
+                status = imported_status(task["run_root"])
+                state["tasks"][task["task_id"]]["status"] = status
+                if status != "pending":
+                    print(f"[SKIP] {status}: {task['run_root']}", flush=True)
+            statuses = [entry["status"] for entry in state["tasks"].values()]
+            if "pending" not in statuses:
+                state["finalized"] = True
+                state["summary"] = {"phase": args.phase, "failed": statuses.count("failed")}
+                return int("failed" in statuses)
+        else:
             if state["config_hash"] != _config_hash(config_path) or state["task_ids"] != ids:
                 raise ValueError("GPU pool configuration changed; use a new data_root")
             deleted = set()
@@ -251,10 +264,10 @@ def submit(args, batch, tasks, workflow_dir, config_path):
             state.pop("summary", None)
             state["array_job_id"] = None
             state["generation"] = uuid.uuid4().hex
-        state["skip_conductance"] = args.phase == "lammps" or getattr(args, "skip_conductance", False)
+        state["skip_conductance"] = args.phase in ("lammps", "dpnegf") or getattr(args, "skip_conductance", False)
         state["submitting"] = True
     with _locked(root) as state:
-        if state["config_hash"] != _config_hash(config_path):
+        if args.phase != "dpnegf" and state["config_hash"] != _config_hash(config_path):
             raise ValueError("GPU pool configuration changed during submission")
         generation = state["generation"]
     try:
@@ -360,7 +373,12 @@ def _publish_result(root, generation, task):
         export_manifest(root, [task])
 
 
-def _validate_dpnegf_result(task):
+def _validate_dpnegf_result(task, *, imported=False):
+    if imported:
+        from split_workflow import imported_status
+        if imported_status(task["run_root"]) != "done":
+            raise RuntimeError(f"DPNEGF not successfully completed: {task['run_root']}")
+        return
     from negf_provenance import result_is_readable, provenance_is_valid, read_hash_file, expected_hash_path
     leaves = sorted((Path(task["run_root"]) / "dpnegf").rglob("STRUCT.fdf"))
     if not leaves:
@@ -441,7 +459,7 @@ def worker(config_path, generation, workflow_dir):
     tasks = imported_tasks(batch, workflow_dir) if phase == "dpnegf" else bg.build_tasks(batch, root)
     by_id = {task["task_id"]: task for task in tasks}
     with _locked(root) as state:
-        if state["config_hash"] != _config_hash(config_path) or state["task_ids"] != list(by_id):
+        if (phase != "dpnegf" and state["config_hash"] != _config_hash(config_path)) or state["task_ids"] != list(by_id):
             raise ValueError("GPU pool task list or configuration changed")
     owner = f"{os.environ.get('SLURM_ARRAY_JOB_ID', 'local')}_{os.environ.get('SLURM_ARRAY_TASK_ID', os.getpid())}"
     print(f"GPU pool worker {owner} on {platform.node()}, CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES')}", flush=True)
@@ -468,7 +486,7 @@ def worker(config_path, generation, workflow_dir):
                     _validate_result(by_id[task_id])
                     _publish_result(root, generation, by_id[task_id])
                 else:
-                    _validate_dpnegf_result(by_id[task_id])
+                    _validate_dpnegf_result(by_id[task_id], imported=phase == "dpnegf")
         except Exception as exc:
             print(f"[{owner}] {task_id}: {exc}", file=sys.stderr, flush=True)
             rc = 1
@@ -481,7 +499,7 @@ def wait(root, poll_interval=30):
     previous = None
     while True:
         with _locked(root) as state:
-            if state is None or not state.get("array_job_id"):
+            if state is None or (not state.get("array_job_id") and not state.get("summary")):
                 raise RuntimeError("No submitted GPU pool to wait for")
             job_id = state["array_job_id"]
             counts = {name: sum(e["status"] == name for e in state["tasks"].values())

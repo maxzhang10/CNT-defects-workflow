@@ -109,14 +109,15 @@ def export_manifest(root, tasks):
     print(f'[OK] Transfer ready: {len(entries)} replicas; {root / "transfer_manifest.json"}', flush=True)
 
 
-def load_manifest(root, *, check_replica_directories=True, manifest=None):
+def load_manifest(root, *, check_replica_directories=True, manifest=None, imported=False):
     # A supplied snapshot can be validated before an atomic recovery write.
     if manifest is None:
         manifest = json.loads((root / 'transfer_manifest.json').read_text(encoding='utf-8'))
     if manifest.get('version') != 1 or not manifest.get('replicas'):
         raise ValueError('Invalid or empty transfer manifest')
     for name, sha in manifest['files'].items():
-        if digest(inside(root, name)) != sha:
+        path = inside(root, name)
+        if not imported and digest(path) != sha:
             raise ValueError(f'Transfer checksum mismatch: {name}')
     seen = set()
     configurations = {}
@@ -129,6 +130,8 @@ def load_manifest(root, *, check_replica_directories=True, manifest=None):
         if run.parent != configuration:
             raise ValueError(f'Replica is outside its declared configuration: {run}')
         configurations.setdefault(configuration, set()).add(run)
+        if imported and imported_terminal_leaf(run) is not None:
+            continue
         config_path = run / 'workflow_config.json'
         config = json.loads(config_path.read_text(encoding='utf-8'))
         required = [config_path, *validate_structures(run, config)]
@@ -173,7 +176,30 @@ def complete_configurations(root, manifest):
     return complete
 
 
-def freeze_config(root, entry, lammps_device=None):
+def imported_terminal_leaf(run):
+    """A split-phase replica has one final leaf. Locate its terminal marker."""
+    directory = Path(run) / 'dpnegf'
+    leaves = {flag.parent for name in ('dpnegf_failed.flag', 'dpnegf_submit_failed.flag', 'dpnegf_done.flag')
+              for flag in directory.rglob(name)}
+    if len(leaves) > 1:
+        raise ValueError(f'Multiple terminal leaves in imported replica: {run}')
+    return next(iter(leaves), None)
+
+
+def imported_status(run):
+    from negf_provenance import result_is_readable
+    leaf = imported_terminal_leaf(run)
+    if leaf is None:
+        return 'pending'
+    if any((leaf / name).is_file() for name in ('dpnegf_failed.flag', 'dpnegf_submit_failed.flag')):
+        return 'failed'
+    if result_is_readable(leaf, require_torch=True):
+        return 'done'
+    print(f'[FAIL] Done flag with unreadable DPNEGF result: {leaf}', flush=True)
+    return 'failed'
+
+
+def prepare_imported_config(root, entry, lammps_device=None):
     run = inside(root, entry['replica'])
     target = run / 'workflow_config.dpnegf.json'
     config = json.loads((run / 'workflow_config.json').read_text(encoding='utf-8'))
@@ -185,14 +211,7 @@ def freeze_config(root, entry, lammps_device=None):
         config['lammps_device'] = lammps_device
     if entry.get('uc_file'):
         config['uc_file'] = str(inside(root, entry['uc_file']))
-    if target.exists():
-        saved = json.loads(target.read_text(encoding='utf-8'))
-        if saved != config:
-            raise ValueError(f'Frozen B configuration changed; use a new calculation directory: {target}')
-    else:
-        if list(run.rglob('dpnegf_done.flag')) or list(run.rglob('dpnegf_submitted.flag')):
-            raise ValueError(f'Existing DPNEGF state without frozen B configuration: {run}')
-        write_json(target, config)
+    write_json(target, config)
     return target
 
 
@@ -214,15 +233,26 @@ def lock_inputs(leaf):
 
 def run_imported_batch(args, workflow_dir, root, lammps_device=None):
     root = Path(root).resolve()
-    manifest = load_manifest(root)  # Check the entire batch before submitting anything.
+    manifest = load_manifest(root, imported=True)
+    pending_entries = []
+    prior_failures = 0
+    for entry in manifest['replicas']:
+        run = inside(root, entry['replica'])
+        status = imported_status(run)
+        if status == 'pending':
+            pending_entries.append(entry)
+        else:
+            print(f'[SKIP] {status}: {run}', flush=True)
+            prior_failures += status == 'failed'
+    if not pending_entries:
+        return int(bool(prior_failures))
     from cluster_inputs import validate_templates
     device = lammps_device
     if device is None:
-        source = inside(root, manifest['replicas'][0]['replica']) / 'workflow_config.json'
+        source = inside(root, pending_entries[0]['replica']) / 'workflow_config.json'
         device = json.loads(source.read_text(encoding='utf-8')).get('lammps_device', 'gpu')
     validate_templates(device, 'dpnegf', workflow_dir)
-    collect_names = complete_configurations(root, manifest) if not args.skip_conductance else []
-    configs = [freeze_config(root, entry, lammps_device) for entry in manifest['replicas']]
+    configs = [prepare_imported_config(root, entry, lammps_device) for entry in pending_entries]
     def run_one(config):
         with (config.parent / 'workflow.dpnegf.log').open('a', encoding='utf-8') as log:
             return subprocess.run([sys.executable, str(workflow_dir / 'run_multi.py'),
@@ -245,11 +275,4 @@ def run_imported_batch(args, workflow_dir, root, lammps_device=None):
             print(message, flush=True)
             with (root / 'record.dpnegf.log').open('a', encoding='utf-8') as log:
                 log.write(message + '\n')
-    if any(results):
-        return 1
-    if collect_names:
-        cmd = [sys.executable, str(workflow_dir / 'stage/collect_md_conductance.py'), '--root', str(root)]
-        for name in collect_names:
-            cmd += ['--configuration-dir', str(inside(root, name))]
-        return subprocess.run(cmd).returncode
-    return 0
+    return int(bool(prior_failures or any(results)))

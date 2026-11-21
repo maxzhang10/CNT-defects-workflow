@@ -219,7 +219,30 @@ class GpuPoolTests(unittest.TestCase):
             with gp._locked(root) as state:
                 self.assertEqual(state["phase"], phase)
                 self.assertEqual(state["tasks"]["a"]["status"], "pending")
-                self.assertFalse(state["skip_conductance"])
+                self.assertEqual(state["skip_conductance"], phase == "dpnegf")
+
+ def test_b_pool_rebuilds_queue_from_flags_after_manual_cleanup(self):
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        leaf = root / "a/dpnegf/100"
+        leaf.mkdir(parents=True)
+        flag = leaf / "dpnegf_failed.flag"
+        flag.touch()
+        config = root / "batch.json"
+        config.write_text("{}")
+        tasks = [{"task_id": "a", "run_root": root / "a"}]
+        args = SimpleNamespace(phase="dpnegf", para=1, pool_cpus=2, worker_time="01:00:00",
+                               pool_partition=None, pool_mem=None, pool_setup=None)
+        with patch.object(gp.subprocess, "run", return_value=SimpleNamespace(
+                returncode=0, stdout="123", stderr="")) as submit:
+            self.assertEqual(gp.submit(args, {"data_root": root}, tasks, ROOT, config), 1)
+            self.assertEqual(gp.wait(root), 1)
+            submit.assert_not_called()
+            flag.unlink()
+            config.write_text('{"updated": true}')
+            self.assertEqual(gp.submit(args, {"data_root": root}, tasks, ROOT, config), 0)
+            with gp._locked(root) as state:
+                self.assertEqual(state["tasks"]["a"]["status"], "pending")
 
  def test_collection_runs_once_and_failure_reaches_wait(self):
     for phase in ("dpnegf", "all"):
@@ -240,7 +263,7 @@ class GpuPoolTests(unittest.TestCase):
         root = Path(directory)
         config = root / "workflow_config.dpnegf.json"
         task = {"manifest_entry": {"replica": "replica_001"}}
-        with patch.object(sw, "freeze_config", return_value=config) as freeze, \
+        with patch.object(sw, "prepare_imported_config", return_value=config) as freeze, \
              patch.object(gp.subprocess, "run", return_value=SimpleNamespace(returncode=0)) as run:
             self.assertEqual(gp._run_imported(task, {"data_root": root, "lammps_device": "gpu"}, ROOT), 0)
         freeze.assert_called_once_with(root, task["manifest_entry"], "gpu")

@@ -51,7 +51,7 @@ class SplitWorkflowTests(unittest.TestCase):
             dest.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(self.root / name, dest)
         imported = split.load_manifest(other)
-        path = split.freeze_config(other, imported['replicas'][0])
+        path = split.prepare_imported_config(other, imported['replicas'][0])
         config = json.loads(path.read_text())
         self.assertEqual(config['self_energy_cache'], self.config['self_energy_cache'])
         self.assertEqual(config['structure_root'], str(path.parent))
@@ -136,7 +136,7 @@ class SplitWorkflowTests(unittest.TestCase):
             self.assertEqual(batch.main(), 0)
         self.assertEqual(len(split.load_manifest(self.root)['replicas']), 2)
 
-    def test_partial_delivery_defers_collection_until_all_replicas_arrive(self):
+    def test_partial_and_complete_deliveries_only_run_replicas(self):
         self.config['lammps_repeats'] = 2
         split.write_json(self.run / 'workflow_config.json', self.config)
         self.export()
@@ -152,8 +152,8 @@ class SplitWorkflowTests(unittest.TestCase):
             split.export_manifest(self.root, [second])
             run.reset_mock()
             self.assertEqual(split.run_imported_batch(args, ROOT, self.root), 0)
-            self.assertEqual(run.call_count, 3)
-            self.assertIn('collect_md_conductance.py', run.call_args.args[0][1])
+            self.assertEqual(run.call_count, 2)
+            self.assertTrue(all('run_multi.py' in c.args[0][1] for c in run.call_args_list))
 
     def test_collection_requires_consistent_counts_and_exact_replica_numbers(self):
         manifest = self.export()
@@ -197,18 +197,46 @@ class SplitWorkflowTests(unittest.TestCase):
                     self.assertEqual((staging / 'transfer_manifest.json').read_bytes(), snapshot)
                     split.load_manifest(staging)
 
-    def test_source_cache_is_preserved_and_changes_are_rejected(self):
+    def test_b_can_correct_delivered_settings_without_rehashing(self):
         entry = self.export()['replicas'][0]
-        target = split.freeze_config(self.root, entry)
-        before = target.read_bytes()
-        split.freeze_config(self.root, entry)
-        self.assertEqual(before, target.read_bytes())
-        self.assertEqual(json.loads(before)['self_energy_cache'], self.config['self_energy_cache'])
-        saved = json.loads(before)
-        saved['self_energy_cache']['save_path'] = '/different/cache'
-        split.write_json(target, saved)
-        with self.assertRaises(ValueError):
-            split.freeze_config(self.root, entry)
+        target = split.prepare_imported_config(self.root, entry)
+        self.config['self_energy_cache']['save_path'] = '/corrected/cache'
+        split.write_json(self.run / 'workflow_config.json', self.config)
+        split.load_manifest(self.root, imported=True)
+        split.prepare_imported_config(self.root, entry)
+        self.assertEqual(json.loads(target.read_text())['self_energy_cache'], self.config['self_energy_cache'])
+
+    def test_failed_replica_is_skipped_until_flags_cleared(self):
+        self.export()
+        second = self.second_replica()
+        split.export_manifest(self.root, [second])
+        flag = self.leaf / 'dpnegf_failed.flag'
+        flag.touch()
+        args = SimpleNamespace(scheduler='slurm', max_parallel=1, skip_conductance=True)
+        with patch.object(split.subprocess, 'run', return_value=SimpleNamespace(returncode=0)) as run, \
+                patch('cluster_inputs.validate_templates'):
+            self.assertEqual(split.run_imported_batch(args, ROOT, self.root), 1)
+            self.assertEqual(run.call_count, 1)
+            self.assertIn(str(second['run_root']), run.call_args.args[0])
+            self.assertTrue(flag.exists())
+            flag.unlink()
+            run.reset_mock()
+            self.assertEqual(split.run_imported_batch(args, ROOT, self.root), 0)
+            self.assertEqual(run.call_count, 2)
+
+    def test_done_requires_readable_result_and_failed_flag_takes_precedence(self):
+        self.export()
+        (self.leaf / 'dpnegf_done.flag').touch()
+        args = SimpleNamespace(scheduler='local', max_parallel=1)
+        with patch.object(split.subprocess, 'run') as run:
+            self.assertEqual(split.run_imported_batch(args, ROOT, self.root), 1)
+            with patch('negf_provenance.result_is_readable', return_value=True) as read:
+                self.assertEqual(split.run_imported_batch(args, ROOT, self.root), 0)
+                read.assert_called_once_with(self.leaf, require_torch=True)
+                (self.leaf / 'dpnegf_failed.flag').touch()
+                self.assertEqual(split.run_imported_batch(args, ROOT, self.root), 1)
+                self.assertEqual(read.call_count, 1)
+            run.assert_not_called()
 
     def test_model_change_cannot_reuse_done_result(self):
         for name in ('input.json', 'run.py', 'expected_negf_config_hash.txt', 'model.pth'):
@@ -236,7 +264,7 @@ class SplitWorkflowTests(unittest.TestCase):
         (self.leaf / 'STRUCT.fdf').unlink()
         args = SimpleNamespace()
         with patch.object(split.subprocess, 'run') as run:
-            with self.assertRaises(FileNotFoundError):
+            with self.assertRaisesRegex(ValueError, "Expected one final structure"):
                 split.run_imported_batch(args, ROOT, self.root)
             run.assert_not_called()
 
@@ -290,6 +318,14 @@ class SplitWorkflowTests(unittest.TestCase):
         args = SimpleNamespace(scheduler='local', max_parallel=1, skip_conductance=True)
         # Resolve PYTHONPATH before the solver changes cwd into its leaf directory.
         paths = [str(Path(p).resolve()) for p in sys.path if p]
+        # The fake solver emits a fixture payload when torch is unavailable.
+        try:
+            import torch
+        except ImportError:
+            fake_torch = SimpleNamespace(load=lambda path, **kwargs: Path(path).read_bytes())
+            torch_patch = patch.dict(sys.modules, {'torch': fake_torch})
+            torch_patch.start()
+            self.addCleanup(torch_patch.stop)
         with patch.dict(os.environ, {'PYTHONPATH': os.pathsep.join(paths), 'PYTHONIOENCODING': 'utf-8'}):
             for _ in range(2):
                 rc = split.run_imported_batch(args, software, self.root, 'cpu')
@@ -299,7 +335,7 @@ class SplitWorkflowTests(unittest.TestCase):
         self.assertEqual((self.leaf / 'expected_negf_config_hash.txt').read_text(),
                          (self.leaf / 'output/negf_config_hash.txt').read_text())
         frozen = (self.run / 'workflow_config.dpnegf.json').read_bytes()
-        fingerprint = (self.leaf / 'dpnegf_input_fingerprint.json').read_bytes()
+        (self.leaf / 'dpnegf_input_fingerprint.json').write_text('stale legacy fingerprint')
         # Deliver another replica into the same B root while preserving the old result.
         second = self.run.with_name('replica_002')
         second_leaf = second / 'dpnegf/40000'
@@ -317,7 +353,7 @@ class SplitWorkflowTests(unittest.TestCase):
         self.assertEqual((self.leaf / 'solver_count.txt').read_text(), '1')
         self.assertEqual((second_leaf / 'solver_count.txt').read_text(), '1')
         self.assertEqual((self.run / 'workflow_config.dpnegf.json').read_bytes(), frozen)
-        self.assertEqual((self.leaf / 'dpnegf_input_fingerprint.json').read_bytes(), fingerprint)
+        self.assertEqual((self.leaf / 'dpnegf_input_fingerprint.json').read_text(), 'stale legacy fingerprint')
 
     def test_b_reads_data_root_from_batch_py_and_json(self):
         import batch_generate
@@ -400,7 +436,7 @@ class SplitWorkflowTests(unittest.TestCase):
         self.assertIn('sub_dpnegf.py', text)
         for forbidden in ('sub_lmps.py', 'dump2fdf_batch.py', 'fdf2xyz.py', 'ele_multi_defects_ele.py'):
             self.assertNotIn(forbidden, text)
-        self.assertTrue((self.leaf / 'dpnegf_input_fingerprint.json').is_file())
+        self.assertFalse((self.leaf / 'dpnegf_input_fingerprint.json').exists())
 
     def test_external_uc_is_materialized_and_relocated(self):
         uc = self.root / 'original_POSCAR'
@@ -409,7 +445,7 @@ class SplitWorkflowTests(unittest.TestCase):
         split.write_json(self.run / 'workflow_config.json', self.config)
         entry = self.export()['replicas'][0]
         uc.unlink()
-        path = split.freeze_config(self.root, entry)
+        path = split.prepare_imported_config(self.root, entry)
         relocated = Path(json.loads(path.read_text())['uc_file'])
         self.assertEqual(relocated.read_text(), 'external unit cell')
 

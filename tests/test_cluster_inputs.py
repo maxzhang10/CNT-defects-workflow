@@ -60,14 +60,14 @@ class ClusterInputTests(unittest.TestCase):
         original = {'lammps_device': 'gpu', 'self_energy_cache': {'save_path': '/B/cache', 'use_saved': True}}
         split_workflow.write_json(run / 'workflow_config.json', original)
         entry = {'replica': 'replica_001', 'configuration': '.'}
-        target = split_workflow.freeze_config(self.root, entry, 'cpu')
+        target = split_workflow.prepare_imported_config(self.root, entry, 'cpu')
         saved = json.loads(target.read_text())
         self.assertEqual(saved['lammps_device'], 'cpu')
         self.assertEqual(saved['self_energy_cache'], original['self_energy_cache'])
         self.assertEqual(json.loads((run / 'workflow_config.json').read_text()), original)
-        split_workflow.freeze_config(self.root, entry, 'cpu')
-        with self.assertRaises(ValueError):
-            split_workflow.freeze_config(self.root, entry, 'gpu')
+        split_workflow.prepare_imported_config(self.root, entry, 'cpu')
+        split_workflow.prepare_imported_config(self.root, entry, 'gpu')
+        self.assertEqual(json.loads(target.read_text())['lammps_device'], 'gpu')
 
     def test_invalid_cluster_cannot_fall_back_to_another_template(self):
         with self.assertRaises(ValueError):
