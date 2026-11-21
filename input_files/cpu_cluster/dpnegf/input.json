@@ -16,9 +16,12 @@
             "max_iter": 100
         },
         "self_energy_options": {
-            "solver": "Sancho-Rubio",
+            "solver": "Boundary-Schur",
+            "numba_jit": true,
             "parallel": {
-                "cpu_budget": 48
+                "n_workers": 12,
+                "cpu_budget": 48,
+                "blas_threads": 4
             },
             "cache": {
                 "use_saved": false,
