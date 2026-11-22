@@ -909,7 +909,17 @@ def load_runtime_config(path):
     lammps_device = raw.get('lammps_device', 'gpu')
     if lammps_device not in ('cpu', 'gpu'):
         _fail(path, 'lammps_device 必须为 cpu / gpu')
-    return {'data_root': root.resolve(), 'max_parallel': max_parallel, 'lammps_device': lammps_device}
+    template = raw.get('template', {})
+    if not isinstance(template, dict):
+        _fail(path, 'template 必须为对象')
+    overrides = {}
+    if 'e_fermi' in template:
+        overrides['e_fermi'] = normalize_e_fermi(template['e_fermi'])
+    if 'self_energy_cache' in template:
+        overrides['self_energy_cache'] = _validate_self_energy_cache(
+            template['self_energy_cache'], 'template.self_energy_cache', path)
+    return {'data_root': root.resolve(), 'max_parallel': max_parallel, 'lammps_device': lammps_device,
+            'dpnegf_overrides': overrides}
 
 
 def format_resolution_table(configs):

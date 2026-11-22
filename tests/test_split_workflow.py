@@ -206,6 +206,14 @@ class SplitWorkflowTests(unittest.TestCase):
         split.prepare_imported_config(self.root, entry)
         self.assertEqual(json.loads(target.read_text())['self_energy_cache'], self.config['self_energy_cache'])
 
+    def test_b_overrides_do_not_relabel_a_submitted_job(self):
+        entry = self.export()['replicas'][0]
+        target = split.prepare_imported_config(self.root, entry, overrides={'e_fermi': 1.0})
+        (self.leaf / 'dpnegf_submitted.flag').touch()
+        (self.leaf / 'job_id.txt').write_text('123')
+        split.prepare_imported_config(self.root, entry, overrides={'e_fermi': None})
+        self.assertEqual(json.loads(target.read_text())['e_fermi'], 1.0)
+
     def test_failed_replica_is_skipped_until_flags_cleared(self):
         self.export()
         second = self.second_replica()
@@ -306,6 +314,7 @@ class SplitWorkflowTests(unittest.TestCase):
             ' Path("output/negf.out.pth").write_bytes(b"fake result")\n'
             'else:\n torch.save({"fake": True}, "output/negf.out.pth")\n')
         self.config.update(lammps_device='gpu', r_max=6.5, l_def=1, structure_mode='assemble', lammps_repeats=2,
+            e_fermi=-1.0, ele_T=300,
             conductance_options={'mu': ['Ef']}, save_self_energy=True,
             assembly={'scatter_uc_count': 4, 'buffer_pl': 2, 'defect_counts': {},
                       'layout': {'l_PL_uc': 1, 'atoms_per_pl': 1, 'atoms_per_uc': 1, 'uc_length_angstrom': 2.46}})
@@ -327,9 +336,16 @@ class SplitWorkflowTests(unittest.TestCase):
             torch_patch.start()
             self.addCleanup(torch_patch.stop)
         with patch.dict(os.environ, {'PYTHONPATH': os.pathsep.join(paths), 'PYTHONIOENCODING': 'utf-8'}):
-            for _ in range(2):
-                rc = split.run_imported_batch(args, software, self.root, 'cpu')
+            cache = {'use_saved': False, 'save_path': './cache/{chirality}/{ele_T}'}
+            for ef in (0.0, None):
+                rc = split.run_imported_batch(args, software, self.root, 'cpu',
+                                              {'e_fermi': ef, 'self_energy_cache': cache})
                 self.assertEqual(rc, 0, (self.run / 'workflow.dpnegf.log').read_text(encoding='utf-8'))
+        effective = json.loads((self.leaf / 'input.json').read_text())['task_options']
+        self.assertEqual(effective['e_fermi'], 0.0)
+        self.assertEqual(effective['self_energy_options']['cache'],
+                         {'use_saved': False, 'save_path': './cache/5_5/300'})
+        self.assertEqual(json.loads((self.run / 'workflow_config.json').read_text()), self.config)
         self.assertEqual((self.leaf / 'solver_count.txt').read_text(), '1')
         self.assertTrue((self.leaf / 'dpnegf_done.flag').exists())
         self.assertEqual((self.leaf / 'expected_negf_config_hash.txt').read_text(),
@@ -348,8 +364,11 @@ class SplitWorkflowTests(unittest.TestCase):
         split.export_manifest(self.root, [{'run_root': second, 'configuration_root': second.parent}])
         shutil.rmtree(second / 'lammps')
         with patch.dict(os.environ, {'PYTHONPATH': os.pathsep.join(paths), 'PYTHONIOENCODING': 'utf-8'}):
-            rc = split.run_imported_batch(args, software, self.root, 'cpu')
+            rc = split.run_imported_batch(args, software, self.root, 'cpu', {'e_fermi': None})
             self.assertEqual(rc, 0, (second / 'workflow.dpnegf.log').read_text(encoding='utf-8'))
+        effective = json.loads((second_leaf / 'input.json').read_text())['task_options']
+        self.assertNotIn('e_fermi', effective)
+        self.assertEqual(effective['self_energy_options']['cache'], self.config['self_energy_cache'])
         self.assertEqual((self.leaf / 'solver_count.txt').read_text(), '1')
         self.assertEqual((second_leaf / 'solver_count.txt').read_text(), '1')
         self.assertEqual((self.run / 'workflow_config.dpnegf.json').read_bytes(), frozen)
@@ -362,6 +381,7 @@ class SplitWorkflowTests(unittest.TestCase):
             with self.subTest(suffix=suffix):
                 path = self.root / ('batch.' + suffix)
                 raw = {'data_root': 'imported data', 'max_parallel': 3, 'lammps_device': 'cpu',
+                       'template': {'e_fermi': None, 'self_energy_cache': {'use_saved': True, 'save_path': '/B'}},
                        'structure_mode': 'assemble', 'configs': [{'module': '/A/not-copied/POSCAR'}]}
                 if suffix == 'json':
                     split.write_json(path, raw)
@@ -375,6 +395,7 @@ class SplitWorkflowTests(unittest.TestCase):
                     self.assertEqual(imported.call_args.args[2], (self.root / 'imported data').resolve())
                     self.assertEqual(imported.call_args.args[0].max_parallel, 3)
                     self.assertEqual(imported.call_args.args[3], 'cpu')
+                    self.assertEqual(imported.call_args.args[4], raw['template'])
                     build.assert_not_called()
                     validate.assert_not_called()
                 argv += ['--max-parallel', '7']

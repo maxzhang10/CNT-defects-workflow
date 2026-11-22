@@ -80,7 +80,7 @@ export BATCH_POOL_CPUS=6
 export BATCH_POOL_SETUP="$HOME/dptb.sh"
 ```
 
-仍执行 `./manage.sh start`。`dpnegf` 需要有效的 `transfer_manifest.json`，只读取批配置中的运行位置和集群选择，不重新生成几何。`all` 将阶段改为 `all`，保留 `CNT_LAMMPS_CMD`；若原 LAMMPS `run.sh` 通过 `~/dpmd.sh` 加载 DeePMD 插件，应设置 `BATCH_POOL_SETUP="$HOME/dpmd.sh"`，并用 `CNT_DPTB_PYTHON=/实际DeePTB环境/bin/python` 指定求解器解释器。`BATCH_POOL_SETUP` 是 worker 启动时 source 的单个环境脚本，`CNT_DPTB_PYTHON` 只选择 DPNEGF 求解器的 Python；后者不代替求解器所需的共享库环境。pool 内部采用 local 执行入口，不再次 sbatch，也不执行两个模板 run.sh 中的环境加载。
+仍执行 `./manage.sh start`。`dpnegf` 需要有效的 `transfer_manifest.json`，从 B 的批配置读取运行位置、集群选择及 template 中的 e_fermi 和 self_energy_cache。`all` 将阶段改为 `all`，保留 `CNT_LAMMPS_CMD`；若原 LAMMPS `run.sh` 通过 `~/dpmd.sh` 加载 DeePMD 插件，应设置 `BATCH_POOL_SETUP="$HOME/dpmd.sh"`，并用 `CNT_DPTB_PYTHON=/实际DeePTB环境/bin/python` 指定求解器解释器。`BATCH_POOL_SETUP` 是 worker 启动时 source 的单个环境脚本，`CNT_DPTB_PYTHON` 只选择 DPNEGF 求解器的 Python；后者不代替求解器所需的共享库环境。pool 内部采用 local 执行入口，不再次 sbatch，也不执行两个模板 run.sh 中的环境加载。
 
 三种阶段都由 `BATCH_PARA` 控制单卡 worker 数，`max_parallel` 不控制 pool 并发。B 阶段的结果可交给独立脚本读取。`all` 可用 `--skip-conductance` 跳过汇总。
 
@@ -291,12 +291,20 @@ export BATCH_PHASE="dpnegf"
 在 B 的数据目录中放置 `batch.py` 或 `batch.json`，确保其中的 `data_root`
 指向传输后的批次根目录（包含 `transfer_manifest.json`）。相对路径按批配置
 文件所在目录解析。B 从该配置读取 `data_root`、`max_parallel` 和
-`lammps_device`（B 所在集群的模式），任务及物理
-参数仍以交付清单和各 replica 的 `workflow_config.json` 为准。
+`lammps_device`。在 B 的 `template` 中设置以下字段即可统一覆盖待计算 replica：
 
-自能缓存路径直接沿用 A 生成的 `workflow_config.json` 中的
-`self_energy_cache.save_path`。使用者应在 A 的输入配置中预先填写 B 上的自能
-位置，也可以在 B 提交前修正收到的配置。使用已有自能时须先在 B 准备匹配的缓存。
+```python
+template = {
+    "e_fermi": None,
+    "self_energy_cache": {"use_saved": True, "save_path": "{data_root}/cache/{chirality}/{ele_T}"},
+}
+```
+
+`e_fermi` 填数值表示固定费米能级（eV），显式填 `None`（JSON 中为 `null`）表示由求解器重新计算。
+`self_energy_cache` 整体覆盖，包含 `use_saved` 和 `save_path`。路径中的 `{data_root}` 使用 B 的目录，
+手性、UC 和电极温度占位符按每个 replica 展开，相对路径按求解工作目录解析。
+省略其中一个字段时，该字段沿用此 replica 的交付值。有效值写入 `workflow_config.dpnegf.json`。
+使用已有自能时须先在 B 准备匹配的缓存。
 B 的 `input_files/<device>_cluster/dpnegf` 应配置本集群的模型、环境和 Slurm
 脚本。随后仍然执行 `./manage.sh start`。并发沿用批配置中的 `max_parallel`
 （未设置时默认 16）；直接运行时可用下方 `--max-parallel` 调整。
@@ -309,7 +317,7 @@ B 的普通批调度和 GPU pool 均按每个 replica 的 flag 决定是否运�
 
 - 有 `dpnegf_failed.flag` 或 `dpnegf_submit_failed.flag` 时保留现场并跳过。其余待算任务继续执行，批次最终报告失败数或非零退出码。
 - 有 `dpnegf_done.flag` 时实际读取 `output/negf.out.pth`。可读则跳过；缺失、空文件或读取失败则报告失败，等待手动处理。调度环境未安装 PyTorch 时，可将 `CNT_DPTB_PYTHON` 指向装有 PyTorch 的 Python。
-- 等待已提交的 Slurm 作业。待算任务根据 B 收到的 `workflow_config.json` 和本机集群模式生成 `workflow_config.dpnegf.json`。可以在启动前修正收到的配置（例如自能路径）。B 不比较清单文件哈希、旧配置、输入指纹或结果配置哈希。
+- 等待已提交的 Slurm 作业。待算任务根据 B 收到的 `workflow_config.json` 和本机集群模式生成 `workflow_config.dpnegf.json`。自能缓存和费米能级优先采用 B 的 template 设置。B 不比较清单文件哈希、旧配置、输入指纹或结果配置哈希。
 - 需要重算时，确认作业已结束，手动清除该 leaf 的终态 flag 和旧提交记录（如 `dpnegf_submitted.flag`、`job_id.txt`），再启动。GPU pool 会从当前磁盘状态重建 B 队列。
 - B 将各 replica 的结果留在其输出目录供独立脚本读取。单集群 `all` 保留原有结果校验和汇总行为。
 

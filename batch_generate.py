@@ -830,7 +830,8 @@ def main():
         runtime = bc.load_runtime_config(config_arg)
         if args.max_parallel is None:
             args.max_parallel = runtime['max_parallel'] or 16
-        return run_imported_batch(args, workflow_dir, runtime['data_root'], runtime['lammps_device'])
+        return run_imported_batch(args, workflow_dir, runtime['data_root'], runtime['lammps_device'],
+                                  runtime['dpnegf_overrides'])
 
     batch = bc.load(config_arg)
     base_root = batch["data_root"]

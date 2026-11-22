@@ -199,9 +199,13 @@ def imported_status(run):
     return 'failed'
 
 
-def prepare_imported_config(root, entry, lammps_device=None):
+def prepare_imported_config(root, entry, lammps_device=None, overrides=None):
     run = inside(root, entry['replica'])
     target = run / 'workflow_config.dpnegf.json'
+    if target.is_file() and any(flag.with_name('job_id.txt').is_file()
+                                for flag in (run / 'dpnegf').rglob('dpnegf_submitted.flag')):
+        # A resumed Slurm job still uses the inputs prepared at submission.
+        return target
     config = json.loads((run / 'workflow_config.json').read_text(encoding='utf-8'))
     config.update(data_root=str(root), structure_root=str(run),
                   configuration_root=str(inside(root, entry['configuration'])))
@@ -211,6 +215,19 @@ def prepare_imported_config(root, entry, lammps_device=None):
         config['lammps_device'] = lammps_device
     if entry.get('uc_file'):
         config['uc_file'] = str(inside(root, entry['uc_file']))
+    overrides = overrides or {}
+    if 'e_fermi' in overrides:
+        config['e_fermi'] = overrides['e_fermi']
+    if 'self_energy_cache' in overrides:
+        from batch_config import resolve_self_energy_cache
+        m, n = config['chirality']
+        uc_sha = config.get('uc_sha256')
+        if config.get('structure_mode') == 'assemble':
+            perfect = config['assembly'].get('modules', {}).get('perfect', {})
+            uc_sha = perfect.get('sha256', uc_sha)
+        config['self_energy_cache'] = resolve_self_energy_cache(
+            overrides['self_energy_cache'], m=m, n=n, data_root=root,
+            uc_sha256=uc_sha, ele_T=config.get('ele_T'))
     write_json(target, config)
     return target
 
@@ -231,7 +248,7 @@ def lock_inputs(leaf):
         write_json(lock, fingerprint)
 
 
-def run_imported_batch(args, workflow_dir, root, lammps_device=None):
+def run_imported_batch(args, workflow_dir, root, lammps_device=None, overrides=None):
     root = Path(root).resolve()
     manifest = load_manifest(root, imported=True)
     pending_entries = []
@@ -252,7 +269,7 @@ def run_imported_batch(args, workflow_dir, root, lammps_device=None):
         source = inside(root, pending_entries[0]['replica']) / 'workflow_config.json'
         device = json.loads(source.read_text(encoding='utf-8')).get('lammps_device', 'gpu')
     validate_templates(device, 'dpnegf', workflow_dir)
-    configs = [prepare_imported_config(root, entry, lammps_device) for entry in pending_entries]
+    configs = [prepare_imported_config(root, entry, lammps_device, overrides) for entry in pending_entries]
     def run_one(config):
         with (config.parent / 'workflow.dpnegf.log').open('a', encoding='utf-8') as log:
             return subprocess.run([sys.executable, str(workflow_dir / 'run_multi.py'),

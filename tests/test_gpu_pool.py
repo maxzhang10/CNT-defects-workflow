@@ -265,8 +265,10 @@ class GpuPoolTests(unittest.TestCase):
         task = {"manifest_entry": {"replica": "replica_001"}}
         with patch.object(sw, "prepare_imported_config", return_value=config) as freeze, \
              patch.object(gp.subprocess, "run", return_value=SimpleNamespace(returncode=0)) as run:
-            self.assertEqual(gp._run_imported(task, {"data_root": root, "lammps_device": "gpu"}, ROOT), 0)
-        freeze.assert_called_once_with(root, task["manifest_entry"], "gpu")
+            overrides = {"e_fermi": None, "self_energy_cache": {"use_saved": True, "save_path": "/B/cache"}}
+            self.assertEqual(gp._run_imported(task, {"data_root": root, "lammps_device": "gpu",
+                                                    "dpnegf_overrides": overrides}, ROOT), 0)
+        freeze.assert_called_once_with(root, task["manifest_entry"], "gpu", overrides)
         cmd = run.call_args.args[0]
         self.assertEqual(cmd[cmd.index("--scheduler") + 1], "local")
         self.assertEqual(cmd[cmd.index("--phase") + 1], "dpnegf")

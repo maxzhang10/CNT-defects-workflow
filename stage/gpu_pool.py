@@ -172,7 +172,8 @@ def imported_tasks(batch, workflow_dir):
 
 def _run_imported(task, batch, workflow_dir):
     from split_workflow import prepare_imported_config
-    config = prepare_imported_config(Path(batch["data_root"]), task["manifest_entry"], batch["lammps_device"])
+    config = prepare_imported_config(Path(batch["data_root"]), task["manifest_entry"],
+                                     batch["lammps_device"], batch["dpnegf_overrides"])
     with (config.parent / "workflow.dpnegf.log").open("a", encoding="utf-8") as log:
         return subprocess.run([sys.executable, str(workflow_dir / "run_multi.py"),
                                "--phase", "dpnegf", "--root", str(config.parent),
