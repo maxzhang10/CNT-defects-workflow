@@ -216,6 +216,9 @@ def prepare_imported_config(root, entry, lammps_device=None, overrides=None):
     if entry.get('uc_file'):
         config['uc_file'] = str(inside(root, entry['uc_file']))
     overrides = overrides or {}
+    if overrides.get('by_chirality'):
+        m, n = config['chirality']
+        overrides = {**overrides, **overrides['by_chirality'].get(f'{m}_{n}', {})}
     if 'e_fermi' in overrides:
         config['e_fermi'] = overrides['e_fermi']
     if 'self_energy_cache' in overrides:

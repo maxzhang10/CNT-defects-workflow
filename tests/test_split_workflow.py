@@ -403,6 +403,75 @@ class SplitWorkflowTests(unittest.TestCase):
                     self.assertEqual(batch_generate.main(), 0)
                     self.assertEqual(imported.call_args.args[0].max_parallel, 7)
 
+    def test_b_chiral_configs_override_each_imported_chirality(self):
+        import batch_config
+        path = self.root / 'batch.py'
+        path.write_text(
+            "lengths = [20, 50, 100, 150, 200, 300, 400, 500]\n"
+            "counts = [20, 20, 40, 60, 60, 100, 100, 100]\n"
+            "root = '/B/opt/'\n"
+            "template = {'e_fermi': -2.0}\n"
+            "specs = [(16, 7, '16_7/cli/', 1.693987786769867), "
+            "(13, 7, '13_7/dpnegf/', 1.689246952533722), "
+            "(19, 4, '19_4/cli/', 1.6933382153511047)]\n"
+            "CHIRAL_CONFIGS = [dict(m=m, n=n, length_angstrom=l, replicas=r, "
+            "e_fermi=ef, self_energy_cache=dict(use_saved=True, save_path=root+cache)) "
+            "for m,n,cache,ef in specs for l,r in zip(lengths, counts)]\n")
+        overrides = batch_config.load_runtime_config(path)['dpnegf_overrides']
+        entry = {'replica': self.run.relative_to(self.root).as_posix(),
+                 'configuration': self.run.parent.relative_to(self.root).as_posix()}
+        for pair, ef, cache in [([16, 7], 1.693987786769867, '/B/opt/16_7/cli/'),
+                                ([13, 7], 1.689246952533722, '/B/opt/13_7/dpnegf/'),
+                                ([19, 4], 1.6933382153511047, '/B/opt/19_4/cli/'),
+                                ([5, 5], -2.0, self.config['self_energy_cache']['save_path'])]:
+            split.write_json(self.run / 'workflow_config.json', dict(self.config, chirality=pair))
+            target = split.prepare_imported_config(self.root, entry, overrides=overrides)
+            cfg = json.loads(target.read_text())
+            self.assertEqual(cfg['e_fermi'], ef)
+            self.assertEqual(cfg['self_energy_cache'], {'use_saved': True, 'save_path': cache})
+
+    def test_conflicting_b_electrode_values_identify_the_chirality(self):
+        import batch_config
+        path = self.root / 'batch.json'
+        split.write_json(path, {'configs': [{'chirality': [16, 7], 'e_fermi': None},
+                                            {'m': 16, 'n': 7, 'e_fermi': 0.0}]})
+        with self.assertRaisesRegex(ValueError, '16_7.*e_fermi'):
+            batch_config.load_runtime_config(path)
+
+    def test_b_finds_top_level_and_nested_electrode_fields(self):
+        import batch_config
+        entry = {'replica': self.run.relative_to(self.root).as_posix(),
+                 'configuration': self.run.parent.relative_to(self.root).as_posix()}
+        cache = {'use_saved': True, 'save_path': '/B/{chirality}'}
+        settings = {'e_fermi': 2.0, 'options': {'solver': [{'self_energy_cache': cache}]},
+                    'table': {'16_7': [{'nested': {'e_fermi': None}}]}}
+        for suffix in ('py', 'json'):
+            path = self.root / ('batch.' + suffix)
+            for has_template in (False, True):
+                raw = dict(settings)
+                if has_template:
+                    raw['template'] = {'e_fermi': 0.0}
+                if suffix == 'py':
+                    path.write_text('\n'.join(f'{key} = {value!r}' for key, value in raw.items()))
+                else:
+                    split.write_json(path, raw)
+                overrides = batch_config.load_runtime_config(path)['dpnegf_overrides']
+                for pair, expected in [([16, 7], None), ([19, 4], 0.0 if has_template else 2.0)]:
+                    split.write_json(self.run / 'workflow_config.json',
+                                     dict(self.config, chirality=pair, e_fermi=-4.0))
+                    target = split.prepare_imported_config(self.root, entry, overrides=overrides)
+                    cfg = json.loads(target.read_text())
+                    self.assertEqual(cfg['e_fermi'], expected)
+                    self.assertEqual(cfg['self_energy_cache'],
+                                     {'use_saved': True, 'save_path': '/B/%s_%s' % tuple(pair)})
+
+    def test_b_conflicting_unscoped_values_name_both_locations(self):
+        import batch_config
+        path = self.root / 'batch.py'
+        path.write_text("one = {'e_fermi': 0.0}\ntwo = [{'e_fermi': None}]")
+        with self.assertRaisesRegex(ValueError, r'global.*e_fermi.*batch.one.*batch.two\[0\]'):
+            batch_config.load_runtime_config(path)
+
     def test_regular_batch_loaders_still_validate(self):
         import batch_config
         for suffix in ('py', 'json'):

@@ -140,6 +140,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 from pathlib import Path
 
 from uc_source import read_poscar_metadata
@@ -857,7 +858,7 @@ def load_batch_py(path):
     return _validate_batch(_read_batch_py(path), Path(path).resolve())
 
 
-def _read_batch_py(path):
+def _read_batch_py(path, *, runtime=False):
     path = Path(path).resolve()
     if not path.is_file():
         raise FileNotFoundError(f"batch 配置文件不存在: {path}")
@@ -881,6 +882,10 @@ def _read_batch_py(path):
     except Exception as exc:
         _fail(path, f"配置脚本执行失败: {type(exc).__name__}: {exc}")
 
+    if runtime:
+        # Inspect evaluated user data, including helpers outside the A-phase schema.
+        return {k: v for k, v in safe_globals.items() if k not in ('__name__', '__builtins__')}
+
     raw = {
         key: safe_globals[key]
         for key in _BATCH_PY_KEYS
@@ -891,10 +896,70 @@ def _read_batch_py(path):
     return raw
 
 
+def _electrode_overrides(settings, label, path):
+    values = {}
+    if 'e_fermi' in settings:
+        values['e_fermi'] = normalize_e_fermi(settings['e_fermi'])
+    if 'self_energy_cache' in settings:
+        values['self_energy_cache'] = _validate_self_energy_cache(
+            settings['self_energy_cache'], f'{label}.self_energy_cache', path)
+    return values
+
+
+def _runtime_electrode_overrides(raw, path):
+    general, template, by_chirality = {}, {}, {}
+    sources = {}
+    active = set()
+
+    def visit(node, label, pair=None, in_template=False):
+        if not isinstance(node, (dict, list, tuple)) or id(node) in active:
+            return
+        active.add(id(node))
+        if isinstance(node, dict):
+            if node is not raw:
+                if 'chirality' in node:
+                    pair = node['chirality']
+                elif 'm' in node and 'n' in node:
+                    pair = (node['m'], node['n'])
+            fields = _electrode_overrides(node, label, path)
+            if fields:
+                scope = 'template' if in_template else 'global'
+                values = template if in_template else general
+                if pair is not None:
+                    if not isinstance(pair, (tuple, list)) or len(pair) != 2:
+                        _fail(path, f'{label}: 无效手性 {pair!r}')
+                    m = _require_int(pair[0], f'{label}.m', path)
+                    n = _require_int(pair[1], f'{label}.n', path, minimum=0)
+                    scope = f'{m}_{n}'
+                    values = by_chirality.setdefault(scope, {})
+                for field, value in fields.items():
+                    if field in values and values[field] != value:
+                        _fail(path, f'{scope} 的 {field} 取值冲突: {sources[scope, field]} 与 {label}')
+                    values[field] = value
+                    sources[scope, field] = label
+            for key, child in node.items():
+                child_pair = pair
+                if isinstance(key, str) and re.fullmatch(r'[0-9]+_[0-9]+', key):
+                    child_pair = tuple(map(int, key.split('_')))
+                elif isinstance(key, tuple) and len(key) == 2 and all(type(x) is int for x in key):
+                    child_pair = key
+                visit(child, f'{label}.{key}', child_pair, in_template or (node is raw and key == 'template'))
+        else:
+            for index, child in enumerate(node):
+                visit(child, f'{label}[{index}]', pair, in_template)
+        active.remove(id(node))
+
+    visit(raw, 'batch')
+    overrides = {**general, **template}
+    if by_chirality:
+        overrides['by_chirality'] = by_chirality
+    return overrides
+
+
 def load_runtime_config(path):
     """Read B's data location/concurrency without validating A's geometry sources."""
     path = Path(path).resolve()
-    raw = _read_batch_py(path) if path.suffix == '.py' else _read_batch_json(path)
+    raw = _read_batch_py(path, runtime=True) if path.suffix == '.py' else _read_batch_json(path)
     if not isinstance(raw, dict):
         _fail(path, '批配置必须为对象')
     data_root = raw.get('data_root', '.')
@@ -912,12 +977,7 @@ def load_runtime_config(path):
     template = raw.get('template', {})
     if not isinstance(template, dict):
         _fail(path, 'template 必须为对象')
-    overrides = {}
-    if 'e_fermi' in template:
-        overrides['e_fermi'] = normalize_e_fermi(template['e_fermi'])
-    if 'self_energy_cache' in template:
-        overrides['self_energy_cache'] = _validate_self_energy_cache(
-            template['self_energy_cache'], 'template.self_energy_cache', path)
+    overrides = _runtime_electrode_overrides(raw, path)
     return {'data_root': root.resolve(), 'max_parallel': max_parallel, 'lammps_device': lammps_device,
             'dpnegf_overrides': overrides}
 
