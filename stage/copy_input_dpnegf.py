@@ -10,6 +10,7 @@ from fdf2xyz import load_config, get_chirality_from_config
 import cnt_geometry
 from negf_settings import normalize_e_fermi
 from cluster_inputs import input_directory
+from geometry_mode import geometry_mode
 
 import logkit as L
 from negf_provenance import (
@@ -515,6 +516,7 @@ def main():
 
     args = parser.parse_args()
     config = load_config(args.config)
+    geometry_mode(config, "dpnegf")
     e_fermi = normalize_e_fermi(config.get("e_fermi"))
     if args.input_dir is None:
         args.input_dir = input_directory(config.get('lammps_device', 'gpu'), 'dpnegf')

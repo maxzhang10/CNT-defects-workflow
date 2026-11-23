@@ -146,6 +146,7 @@ from pathlib import Path
 from uc_source import read_poscar_metadata
 import assemble
 from defect_angles import normalize_angle_range
+from geometry_mode import geometry_mode
 from negf_settings import normalize_e_fermi
 
 
@@ -558,6 +559,7 @@ _PY_BUILTINS_ALLOW = (
 # 见仓库 batch.py 模板），二选一。
 _BATCH_PY_KEYS = (
     "structure_mode",
+    "geometry_mode",
     "template",
     "temperatures",
     "lammps_mode",
@@ -726,6 +728,9 @@ def _validate_batch(raw, path):
     if not isinstance(template_raw, dict):
         _fail(path, f"template 必须为对象，当前值: {template_raw!r}")
     template = {**DEFAULT_TEMPLATE, **template_raw}
+    # 批次几何统一保存在顶层，显式旧模式与历史 replica 的配置保持相等。
+    mode = geometry_mode({**template, **raw})
+    template.pop("geometry_mode", None)
     template["e_fermi"] = normalize_e_fermi(template.get("e_fermi"))
     template["defect_angle_range_deg"] = normalize_angle_range(template["defect_angle_range_deg"])
     _require_bool(template["save_self_energy"], "template.save_self_energy", path)
@@ -817,6 +822,7 @@ def _validate_batch(raw, path):
 
     return {
         "structure_mode": structure_mode,
+        "geometry_mode": mode,
         "template": template,
         "temperatures": list(temperatures),
         "lammps_mode": lammps_mode,
@@ -979,6 +985,7 @@ def load_runtime_config(path):
         _fail(path, 'template 必须为对象')
     overrides = _runtime_electrode_overrides(raw, path)
     return {'data_root': root.resolve(), 'max_parallel': max_parallel, 'lammps_device': lammps_device,
+            'geometry_mode': geometry_mode({**template, **raw}),
             'dpnegf_overrides': overrides}
 
 

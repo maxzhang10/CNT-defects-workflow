@@ -20,6 +20,7 @@ pair_coeff      * * C
 variable nfix equal 240
 
 # 计算右端固定区的起始原子 ID
+if "${nfix} == 0" then "group mobile id > 0" "jump SELF mobile_ready"
 variable natoms equal atoms
 variable istart equal v_natoms-v_nfix+1
 
@@ -56,6 +57,7 @@ fix_modify radial energy yes
 
 
 # --- 1. 能量最小化 ---
+label mobile_ready
 thermo_style    custom step pe etotal press fnorm fmax
 thermo          10
 
@@ -72,7 +74,7 @@ reset_timestep  0
 velocity mobile create 50.0 23456789 mom yes rot yes dist gaussian
 
 # 再次确保固定原子速度为零
-velocity fixed set 0.0 0.0 0.0
+if "${nfix} > 0" then "velocity fixed set 0.0 0.0 0.0"
 
 # 对散射区进行 NVT 控温
 fix 1 mobile nvt temp 50.0 50.0 0.1

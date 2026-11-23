@@ -167,6 +167,8 @@ def build_tasks(batch, base_root):
             )
 
             actual_length = l_def * T
+            if batch.get("geometry_mode") == "scattering_only":
+                length = l_def
             target_density = (cfg.get("_resolution") or {}).get("defect_density")
 
             if defect_count_mode == "balanced_count":
@@ -387,6 +389,10 @@ def make_task_config(task, batch):
     if batch.get("structure_mode") == "assemble":
         return make_assemble_task_config(task, batch)
     config = copy.deepcopy(batch["template"])
+
+    # 缺省模式沿用旧配置格式，历史 replica 可以继续断点续跑。
+    if batch.get("geometry_mode") == "scattering_only":
+        config["geometry_mode"] = "scattering_only"
 
     # conductance_options.mu 只写入字符串标签（非数值）：
     #   fermi          -> ["Ef"]      （以费米能级为化学势）
@@ -813,6 +819,7 @@ def main():
             raise FileNotFoundError(args.pool_setup)
         batch = (bc.load_runtime_config(config_arg) if args.phase == "dpnegf"
                  else bc.load(config_arg))
+        bc.geometry_mode(batch, args.phase)
         if batch["lammps_device"] != "gpu":
             raise ValueError("pool 模式需要 lammps_device='gpu'")
         if batch.get("structure_mode") == "assemble":
@@ -828,12 +835,14 @@ def main():
     if args.phase == "dpnegf":
         from split_workflow import run_imported_batch
         runtime = bc.load_runtime_config(config_arg)
+        bc.geometry_mode(runtime, args.phase)
         if args.max_parallel is None:
             args.max_parallel = runtime['max_parallel'] or 16
         return run_imported_batch(args, workflow_dir, runtime['data_root'], runtime['lammps_device'],
                                   runtime['dpnegf_overrides'])
 
     batch = bc.load(config_arg)
+    bc.geometry_mode(batch, args.phase)
     base_root = batch["data_root"]
     if args.phase == "lammps":
         args.skip_conductance = True

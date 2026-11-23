@@ -4,6 +4,7 @@
 # batch_config 会校验 56 个 C 原子、轴向周期并记录文件 SHA-256。
 
 temperatures = [100]
+# geometry_mode = "scattering_only"  # 纯散射区，仅配合 BATCH_PHASE="lammps" 使用
 lammps_mode = "md"             # "md" NVT 退火 / "opt" 几何优化
 lammps_device = "gpu"          # "cpu": CH.airebo-m / "gpu": *.pth
 base_structure_seed = 20260705

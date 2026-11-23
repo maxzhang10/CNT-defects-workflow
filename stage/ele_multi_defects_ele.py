@@ -12,6 +12,7 @@ import exporters
 import lammps_io
 import logkit as L
 from defect_angles import normalize_angle_range
+from geometry_mode import geometry_mode
 
 
 def multi_defects_ele(tube, coords, type_list, seed=None):
@@ -64,6 +65,7 @@ def generate_defect_coords(
     max_trials=20000,
     buffer_pl=None,
     defect_angle_range_deg=(0, 360),
+    scattering_only=False,
 ):
     """
     在缺陷区内随机生成 N 个缺陷坐标。
@@ -93,7 +95,7 @@ def generate_defect_coords(
     # 名义 defects 区域：
     # 金属管 2PL-2PL-defects-2PL-2PL（左侧 4PL 后开始）；
     # 半导体管 2PL-4PL-defects-4PL-2PL（左侧 6PL 后开始）。
-    n_fix_pl = cnt_geometry.fixed_pl_per_side(m, n, buffer_pl)
+    n_fix_pl = 0 if scattering_only else cnt_geometry.fixed_pl_per_side(m, n, buffer_pl)
     z_def_low = n_fix_pl * l_PL * T
     z_def_high = (n_fix_pl * l_PL + l_def) * T
 
@@ -240,6 +242,7 @@ def main_assemble(config):
 
 def main():
     config = load_config()
+    scattering_only = geometry_mode(config) == "scattering_only"
     if config.get("structure_mode") == "assemble":
         main_assemble(config)
         return
@@ -297,8 +300,10 @@ def main():
         config.get("uc_sha256"),
     )
 
+    if scattering_only:
+        length = l_def
     tube_unit = cnt_geometry.build_unit_cnt(
-        m, n, vacuum=50.0,
+        m, n, vacuum=10.0 if scattering_only else 50.0,
         uc_file=config.get("uc_file"),
         uc_sha256=config.get("uc_sha256"),
     )
@@ -325,6 +330,7 @@ def main():
         seed=seed,
         buffer_pl=buffer_pl,
         defect_angle_range_deg=config.get("defect_angle_range_deg", [0, 360]),
+        scattering_only=scattering_only,
     )
 
     density = len(defects_coord_ind) / (l_def * T)
@@ -429,6 +435,8 @@ def main():
         "uc_sha256": config.get("uc_sha256"),
     }
     defects_json_path = structure_root / "defects.json"
+    if scattering_only:
+        defects_meta["geometry_mode"] = "scattering_only"
     with open(defects_json_path, "w", encoding="utf-8") as f:
         json.dump(defects_meta, f, indent=2, ensure_ascii=False)
     L.info(f"defects.json -> {defects_json_path}")
@@ -438,7 +446,7 @@ def main():
         # 含氢结构（如 MVH）的 H 由 Atoms.append() 加在数组末尾，若不重排，
         # md_steps=0 路径会直接从 POSCAR 生成 STRUCT.fdf，右电极范围将包含 H
         # 而少含等量 C，破坏同质碳电极假设。POSCAR 和 data.lmp 用同一份重排后的结构。
-        atoms_repositioned = exporters.reposition_hydrogens(
+        atoms_repositioned = atoms if scattering_only else exporters.reposition_hydrogens(
             atoms,
             cnt_geometry.fixed_pl_per_side(m, n, buffer_pl) * l_PL * N_uc,
         )
@@ -456,6 +464,8 @@ def main():
         L.info(f"  POSCAR   -> {poscar_path}")
         L.info(f"  data.lmp -> {lammps_path}")
 
+    if scattering_only and lammps_mode == "md" and md_steps == 0:
+        return
     lammps_io.prepare_lammps_inputs(
         temperature=temperature,
         chirality=(m, n),
@@ -470,6 +480,7 @@ def main():
         lammps_device=config.get("lammps_device", "gpu"),
         buffer_pl=buffer_pl,
         release_uc=release_uc,
+        fixed_atoms_per_side=0 if scattering_only else None,
     )
 
 

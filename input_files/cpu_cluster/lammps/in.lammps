@@ -19,6 +19,7 @@ pair_coeff * * ./CH.airebo-m  C
 variable nfix equal N  
 
 # 计算后端起始原子 ID
+if "${nfix} == 0" then "group mobile id > 0" "jump SELF mobile_ready"
 variable natoms equal atoms
 variable istart equal v_natoms-v_nfix+1
 
@@ -37,12 +38,13 @@ velocity fixed set 0.0 0.0 0.0
 
 
 # --- 1. 能量最小化 (防止原子重叠) ---
+label mobile_ready
 thermo          10
 minimize        1.0e-6 1.0e-8 1000 10000
 reset_timestep  0
 # --- 2. 热弛豫 MD ---
 velocity mobile create 50 23456789 mom yes rot yes dist gaussian
-velocity fixed set 0.0 0.0 0.0
+if "${nfix} > 0" then "velocity fixed set 0.0 0.0 0.0"
 fix 1 mobile nvt temp 50.0 50.0 0.1
 timestep        0.001
 

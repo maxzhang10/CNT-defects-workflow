@@ -86,6 +86,8 @@ def compute_negf_config_hash(config: Mapping[str, Any]) -> str:
     # Invalidate pre-policy results: templates previously controlled both fields.
     # Missing/null Ef both mean recalculation; numeric int/float are equivalent.
     subset["dpnegf_input_policy"] = 1
+    if config.get("geometry_mode") == "scattering_only":
+        subset["geometry_mode"] = "scattering_only"
     ef = config.get("e_fermi")
     subset["e_fermi"] = None if ef is None else float(ef)
     payload = _canonicalize(subset)

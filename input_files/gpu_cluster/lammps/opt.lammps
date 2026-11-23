@@ -21,6 +21,7 @@ pair_coeff      * * C
 variable nfix equal 240
 
 # 计算右端固定区的起始原子 ID
+if "${nfix} == 0" then "group mobile id > 0" "jump SELF mobile_ready"
 variable natoms equal atoms
 variable istart equal v_natoms-v_nfix+1
 
@@ -57,6 +58,7 @@ fix_modify radial energy yes
 
 
 # --- 1. 能量最小化 ---
+label mobile_ready
 thermo_style custom step pe etotal press fnorm fmax
 thermo       10
 

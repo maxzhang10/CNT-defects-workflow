@@ -7,6 +7,7 @@ import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+from geometry_mode import geometry_mode
 
 
 def digest(path):
@@ -81,6 +82,8 @@ def export_manifest(root, tasks):
                 raise ValueError(f'LAMMPS not successfully completed: {run}')
         entry = {'replica': run.relative_to(root).as_posix(),
                  'configuration': Path(task['configuration_root']).resolve().relative_to(root).as_posix()}
+        if geometry_mode(config) == 'scattering_only':
+            entry['geometry_mode'] = 'scattering_only'
         if config.get('uc_file'):
             source = Path(config['uc_file']).resolve()
             sha = digest(source)
@@ -130,10 +133,14 @@ def load_manifest(root, *, check_replica_directories=True, manifest=None, import
         if run.parent != configuration:
             raise ValueError(f'Replica is outside its declared configuration: {run}')
         configurations.setdefault(configuration, set()).add(run)
+        if imported:
+            geometry_mode(entry, 'dpnegf')
         if imported and imported_terminal_leaf(run) is not None:
             continue
         config_path = run / 'workflow_config.json'
         config = json.loads(config_path.read_text(encoding='utf-8'))
+        if imported:
+            geometry_mode(config, 'dpnegf')
         required = [config_path, *validate_structures(run, config)]
         if config.get('uc_file'):
             required.append(inside(root, entry['uc_file']))

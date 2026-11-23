@@ -6,6 +6,10 @@
 
 ## 1. 运行前准备
 
+在数据目录的 `batch.py` 顶层设置 `geometry_mode = "scattering_only"`，并在 `manage.sh` 中设置 `BATCH_PHASE="lammps"`，即可生成纯散射区。直接调用批入口时使用 `python batch_generate.py --config batch.py --phase lammps`。省略 `geometry_mode` 或设为 `"with_electrodes"` 会使用原有带电极结构。
+
+纯散射管包含 `l_def` 个原胞，缺陷在整段内按原有边距与间距采样。MD 或优化时所有原子均可运动，末帧 FDF 和 XYZ 保留相同原子顺序。该模式支持常规缺陷生成，不与 `structure_mode="assemble"`、`phase=all` 或 `phase=dpnegf` 组合。
+
 计算节点需要具备：
 
 - Python 环境及仓库依赖（DPNEGF、DeePTB、PyTorch 等）；

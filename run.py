@@ -13,6 +13,7 @@ if str(_STAGE_DIR) not in sys.path:
     sys.path.insert(0, str(_STAGE_DIR))
 import logkit as L
 from cluster_inputs import input_directory
+from geometry_mode import geometry_mode
 
 def run_cmd(cmd, dry_run=False, env=None):
     L.run(" ".join(map(str, cmd)))
@@ -319,6 +320,7 @@ def main():
 
     with open(config_path, "r", encoding="utf-8") as f:
         config = json.load(f)
+    geometry_mode(config, "all")
 
     # MD 步数：dump2fdf 用它作为 --every，保证只抽出最后一帧。
     # 必须与 in.lammps 里 `run <N>` 一致（同由 config.md_steps 驱动）。

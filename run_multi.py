@@ -15,6 +15,7 @@ import logkit as L
 from slurm_utils import SlurmQueryError, wait_for_jobs, check_flags, get_stage_state
 from negf_provenance import result_is_readable
 import cnt_geometry
+from geometry_mode import geometry_mode
 from cluster_inputs import input_directory, validate_templates
 
 def run_cmd(cmd, dry_run=False, env=None, cwd=None):
@@ -550,6 +551,7 @@ def main():
 
     with open(config_path, "r", encoding="utf-8") as f:
         config = json.load(f)
+    scattering_only = geometry_mode(config, args.phase) == "scattering_only"
 
     # MD 步数：dump2fdf 用它作为 --every，保证只抽出最后一帧。
     # 必须与 in.lammps 里 `run <N>` 一致（同由 config.md_steps 驱动）。
@@ -581,6 +583,9 @@ def main():
             raise KeyError("config 中没有定义 data_root")
         root = Path(config["data_root"]).resolve()
 
+    delivered_config = root / "workflow_config.json"
+    if args.phase == 'dpnegf' and delivered_config.is_file() and delivered_config != config_path:
+        geometry_mode(json.loads(delivered_config.read_text(encoding="utf-8")), "dpnegf")
     if args.phase == 'dpnegf' and not args.dry_run:
         from split_workflow import imported_status
         status = imported_status(root)
@@ -641,7 +646,7 @@ def main():
     # 输出到每个 replica 自己的 workflow.log（batch_generate 把
     # run_multi 的 stdout 重定向到 run_root/workflow.log）。
     m, n = int(config["chirality"][0]), int(config["chirality"][1])
-    info = None if config.get("structure_mode") == "assemble" else cnt_geometry.describe_structure(
+    info = None if scattering_only or config.get("structure_mode") == "assemble" else cnt_geometry.describe_structure(
         m, n,
         float(config["r_max"]),
         int(config["l_def"]),
@@ -653,7 +658,9 @@ def main():
         uc_sha256=config.get("uc_sha256"),
     )
     L.phase(0, 7, "结构构成摘要")
-    if info is None:
+    if scattering_only:
+        L.info(f"  纯散射区 ({m},{n})，长度 {config['l_def']} UC，所有原子自由")
+    elif info is None:
         assembly = config["assembly"]
         L.info(f"  模式             : 搭积木 ({m},{n})")
         L.info(f"  散射区长度       : {assembly['scatter_uc_count']} UC")
@@ -689,6 +696,10 @@ def main():
     if not args.skip_ele:
         L.phase(1, 7, "生成缺陷几何 (eledefects)")
         if args.phase in ('lammps', 'all') and (root / 'lammps/data.lmp').exists():
+            metadata = root / "defects.json"
+            saved = json.loads(metadata.read_text(encoding="utf-8")) if metadata.is_file() else {}
+            if geometry_mode(saved) != geometry_mode(config):
+                raise ValueError(f"已有 LAMMPS 结构的 geometry_mode 与配置不符: {root}")
             L.skip('Resume existing LAMMPS inputs')
         else:
             if run_lammps:
@@ -826,12 +837,13 @@ def main():
             ]
         # 两种结构模式都可能有左电极的近零 z 被 LAMMPS 包裹到盒子上边界。
         # dump2fdf 只在首个 PL 内还原该周期像，保持电极按 ID 的轴向连续性。
-        left_pl_atoms = (
-            config["assembly"]["layout"]["atoms_per_pl"]
-            if config.get("structure_mode") == "assemble"
-            else info["l_PL_uc"] * info["N_uc"]
-        )
-        cmd.extend(["--unwrap-left-pl-atoms", str(left_pl_atoms)])
+        if not scattering_only:
+            left_pl_atoms = (
+                config["assembly"]["layout"]["atoms_per_pl"]
+                if config.get("structure_mode") == "assemble"
+                else info["l_PL_uc"] * info["N_uc"]
+            )
+            cmd.extend(["--unwrap-left-pl-atoms", str(left_pl_atoms)])
         if args.phase == 'lammps':
             cmd.append('--require-frames')
             if lammps_mode == 'md':
@@ -862,6 +874,7 @@ def main():
                 str(dpnegf_dir),
                 "--config",
                 str(config_path),
+                *(["--no-swap-left-pl"] if scattering_only else []),
             ],
             dry_run=args.dry_run,
             env=env,
