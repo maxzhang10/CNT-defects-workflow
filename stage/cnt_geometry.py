@@ -6,44 +6,30 @@ from math import gcd
 
 import logkit as L
 
-def clean_cnt_by_shift_wrap_anchor(tube, z_shift=0.1, anchor_index=0):
+def clean_cnt_by_shift_wrap_anchor(tube):
     """
-    对完整 CNT 做 z 方向 clean：
-
-    1. 所有原子 z 坐标加一个小量 z_shift；
-    2. wrap 回周期盒子；
-    3. 取 anchor_index 号原子的 z 坐标作为参考；
-    4. 所有原子 z 减去这个参考值，使该原子 z = 0；
-    5. 再按 z, y, x 排序。
-
-    参数
-    ----
-    tube : ase.Atoms
-    z_shift : float
-        z 方向平移量，默认 0.1 Å。
-    anchor_index : int
-        作为 z 归零参考的原子编号，Python 从 0 开始。
-        anchor_index=0 对应“一号原子”。
+    将 CNT 单胞按 z, y, x 排序，以最小 z 为原点，再整理周期边界。
     """
 
     tube = tube.copy()
+    # 先排序，再以真正的最小 z 为原点；不依赖 wrap 后可能改变的锚点编号。
+    p = tube.positions
+    order = np.lexsort((p[:, 0], p[:, 1], p[:, 2]))
+    tube = tube[order]
+    tube.positions[:, 2] -= tube.positions[0, 2]
 
-    # 1. z 方向整体平移
-    tube.positions[:, 2] += z_shift
-
-    # 2. wrap 回 cell
+    # 外部 UC 的坐标可能超出一个周期，仍需包裹一次。
     tube.wrap()
 
-    # 3. 取一号原子的 z 作为参考
-    z0 = tube.positions[anchor_index, 2]
+    # wrap 的浮点运算仍可能留下约 1e-13 Å 的边界舍入误差。
+    # 将与 z=0 等价的近零/近盒长坐标归到同一侧，避免 LAMMPS
+    # 把左电极的原子包裹到整个结构的右端。
+    z = tube.positions[:, 2]
+    cell_z = float(tube.cell[2, 2])
+    boundary = (np.abs(z) < 1e-10) | (np.abs(z - cell_z) < 1e-10)
+    z[boundary] = 0.0
 
-    # 4. z 归零
-    tube.positions[:, 2] -= z0
-
-    # 5. 再 wrap 一次，避免出现负 z
-    tube.wrap()
-
-    # 6. 排序：z, y, x
+    # wrap 可能将单胞末端的原子移到开头，需恢复轴向顺序。
     p = tube.positions
     order = np.lexsort((p[:, 0], p[:, 1], p[:, 2]))
     tube = tube[order]

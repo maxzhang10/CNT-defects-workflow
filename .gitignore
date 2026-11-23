@@ -58,6 +58,11 @@ local_run.stdout
 local_run.stderr
 slurm-*.out
 slurm-*.err
+.manage_batch.lock
+batch_generate.pid
+batch_generate.status
+batch_generate.status.tmp
+batch_generate.log.prev
 
 # Archives
 *.tar

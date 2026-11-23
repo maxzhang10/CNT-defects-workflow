@@ -5,72 +5,13 @@ import copy
 import importlib
 import json
 import math
+import runpy
 import subprocess
 import sys
 import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-
-
-CHIRAL_CONFIGS = [
-       {"m": 7,  "n": 0, "l_def": 2, "N_defects": 0, "structures": ["P"]},
-    {"m": 9,  "n": 0, "l_def": 2, "N_defects": 0, "structures": ["P"]},
-    {"m": 11, "n": 0, "l_def": 2, "N_defects": 0, "structures": ["P"]},
-    {"m": 8,  "n": 2, "l_def":2, "N_defects": 0, "structures": ["P"]},
-    {"m": 12, "n": 3, "l_def": 1, "N_defects": 0, "structures": ["P"]},
-    {"m": 6,  "n": 3, "l_def": 1, "N_defects": 0, "structures": ["P"]},
-    {"m": 8,  "n": 4, "l_def": 1, "N_defects": 0, "structures": ["P"]},
-    {"m": 7,  "n": 4, "l_def": 1, "N_defects": 0, "structures": ["P"]},
-    {"m": 4,  "n": 4, "l_def": 4, "N_defects": 0, "structures": ["P"]},
-    {"m": 6,  "n": 6, "l_def": 3, "N_defects": 0, "structures": ["P"]},
-    {"m": 8,  "n": 8, "l_def": 2, "N_defects": 0, "structures": ["P"]}
-
-]
-
-
-TEMPERATURES = [500]
-
-
-# 每个物理配置独立运行的 LAMMPS 轨迹数。
-# 可由命令行 --lammps-repeats 覆盖。
-DEFAULT_LAMMPS_REPEATS = 2
-
-# 两类随机种子分开管理：
-# seed 控制缺陷结构；同一物理配置的多个 replica 共用同一个 seed。
-# lammps_seed 控制热运动轨迹；每个 replica 使用不同的 seed。
-BASE_STRUCTURE_SEED = 20260705
-BASE_LAMMPS_SEED = 23456789
-
-
-TEMPLATE = {
-    "temperature": 300,
-    "chirality": [5, 5],
-    "r_max": 6.50,
-    "data_root": (
-        "./"
-        
-    ),
-    "structures": ["5775"],
-    "N_defects": 3,
-    "l_def": 5,
-    "md_steps": 50000,
-    # 每条独立 LAMMPS 轨迹只取最后一帧做 DPNEGF。
-    "md_sampling": {
-        "n_samples": 1,
-    },
-    # DPNEGF 透射谱能量网格步长（eV）。
-    "espacing": 0.1,
-    # DPNEGF 透射谱的计算范围 [emin, emax]（eV）。
-    "negf_energy_window": [-0.5, 0.5],
-    # False 保持既有行为：DPNEGF 成功后清理 output/self_energy。
-    "save_self_energy": False,
-    # 覆盖 DPNEGF input.json 的 self_energy_options.cache 配置。
-    "self_energy_cache": {
-        "use_saved": True,
-        "save_path": "./self_energy/",
-    },
-}
 
 
 def load_cnt_geometry(workflow_dir):
@@ -126,6 +67,7 @@ def build_tasks(
     base_root,
     cnt_geometry,
     lammps_repeats,
+    settings,
 ):
     """
     将每个物理配置展开为 lammps_repeats 条独立 LAMMPS 轨迹。
@@ -135,12 +77,13 @@ def build_tasks(
     - 使用独立的 lammps_seed（每个 replica 热运动轨迹不同）；
     - 写入同一配置目录下相互独立的 replica_XXX 子目录。
     """
+    template = settings["TEMPLATE"]
     tasks = []
     used_roots = {}
     physical_index = 0
     task_index = 0
 
-    for cfg in CHIRAL_CONFIGS:
+    for cfg in settings["CHIRAL_CONFIGS"]:
         conductance_mode = cfg.get("conductance_mode", "fermi")
         if conductance_mode not in {"fermi", "band_edge_bias"}:
             raise ValueError("conductance_mode must be 'fermi' or 'band_edge_bias'")
@@ -164,7 +107,7 @@ def build_tasks(
                 "fermi_difference_threshold": threshold,
             }
         raw_negf_window = cfg.get(
-            "negf_energy_window", TEMPLATE["negf_energy_window"]
+            "negf_energy_window", template["negf_energy_window"]
         )
         if (
             not isinstance(raw_negf_window, (list, tuple))
@@ -183,17 +126,17 @@ def build_tasks(
         ):
             raise ValueError("negf_energy_window requires finite emin < emax")
         save_self_energy = cfg.get(
-            "save_self_energy", TEMPLATE["save_self_energy"]
+            "save_self_energy", template["save_self_energy"]
         )
         if not isinstance(save_self_energy, bool):
             raise ValueError("save_self_energy must be a boolean")
         try:
-            espacing = float(cfg.get("espacing", TEMPLATE["espacing"]))
+            espacing = float(cfg.get("espacing", template["espacing"]))
         except (TypeError, ValueError) as exc:
             raise ValueError("espacing must be a positive numeric value in eV") from exc
         if not math.isfinite(espacing) or espacing <= 0.0:
             raise ValueError("espacing must be a finite positive value in eV")
-        for temperature in TEMPERATURES:
+        for temperature in settings["TEMPERATURES"]:
             physical_index += 1
 
             m = int(cfg["m"])
@@ -207,7 +150,7 @@ def build_tasks(
             T, N_uc, l_PL, length = cnt_geometry.geo_info(
                 m,
                 n,
-                float(TEMPLATE["r_max"]),
+                float(template["r_max"]),
                 l_def,
             )
 
@@ -229,9 +172,9 @@ def build_tasks(
             for replica in range(1, lammps_repeats + 1):
                 task_index += 1
                 # structure_seed: 控制缺陷位置和类型，每个 replica 独立
-                structure_seed = BASE_STRUCTURE_SEED + task_index
+                structure_seed = settings["BASE_STRUCTURE_SEED"] + task_index
                 # lammps_seed: 控制 LAMMPS 热运动轨迹，每个 replica 独立
-                lammps_seed = BASE_LAMMPS_SEED + task_index
+                lammps_seed = settings["BASE_LAMMPS_SEED"] + task_index
 
                 # 目录层级：
                 # data_root/温度/手性/缺陷配置/replica_XXX
@@ -301,14 +244,14 @@ def build_tasks(
     return tasks
 
 
-def make_task_config(task):
+def make_task_config(task, template):
     """
     创建当前 replica 的独立配置。
 
     data_root 保留整个批次的数据根目录；
     structure_root 和 run_multi.py 的 --root 都指向具体 replica 目录。
     """
-    config = copy.deepcopy(TEMPLATE)
+    config = copy.deepcopy(template)
 
     config.update({
         "temperature": task["temperature"],
@@ -345,11 +288,12 @@ def run_single_task(
     task,
     scheduler,
     workflow_dir,
+    template,
 ):
     task_id = task["task_id"]
     run_root = task["run_root"]
 
-    config = make_task_config(task)
+    config = make_task_config(task, template)
 
     config_path = None
     start = time.time()
@@ -567,10 +511,9 @@ def main():
     parser.add_argument(
         "--max-parallel",
         type=int,
-        default=50,
         help=(
-            "同时启动的独立 workflow 数。默认不限制，"
-            "即一次启动全部展开任务；例如 3 个配置 × 5 次重复 = 15。"
+            "同时启动的独立 workflow 数，默认读取批配置的 MAX_PARALLEL。"
+            "设为 None 时一次启动全部展开任务。"
             "需要限制提交并发时再显式指定该参数。"
         ),
     )
@@ -578,7 +521,6 @@ def main():
     parser.add_argument(
         "--lammps-repeats",
         type=int,
-        default=DEFAULT_LAMMPS_REPEATS,
         help=(
             "每个温度/手性/缺陷配置独立运行的 LAMMPS 次数。"
             "每次使用不同 lammps_seed，并且只取最后一帧做 DPNEGF。"
@@ -597,7 +539,7 @@ def main():
 
     parser.add_argument(
         "--data-root",
-        default=TEMPLATE["data_root"],
+        help="覆盖批配置的数据根目录，相对路径按调用目录解析。",
     )
 
     parser.add_argument(
@@ -630,7 +572,21 @@ def main():
         help="任务失败后的最大重试次数，默认 2 次。",
     )
 
+    parser.add_argument(
+        "--batch-config", type=Path,
+        help="批参数文件，默认读取工作流目录中的 batch.py。",
+    )
     args = parser.parse_args()
+    workflow_dir = Path(args.workflow_dir).resolve()
+    config_path = (args.batch_config or workflow_dir / "batch.py").resolve()
+    settings = runpy.run_path(str(config_path))
+    if args.max_parallel is None:
+        args.max_parallel = settings["MAX_PARALLEL"]
+    if args.lammps_repeats is None:
+        args.lammps_repeats = settings["DEFAULT_LAMMPS_REPEATS"]
+    if args.data_root is None:
+        root_dir = config_path.parent if args.batch_config else Path.cwd()
+        args.data_root = root_dir / settings["TEMPLATE"]["data_root"]
 
     if args.max_parallel is not None and args.max_parallel < 1:
         raise ValueError(
@@ -649,10 +605,6 @@ def main():
         raise ValueError(
             "--transport-temperature-k 必须大于等于 0"
         )
-
-    workflow_dir = Path(
-        args.workflow_dir
-    ).resolve()
 
     base_root = Path(
         args.data_root
@@ -690,6 +642,7 @@ def main():
         base_root=base_root,
         cnt_geometry=cnt_geometry,
         lammps_repeats=args.lammps_repeats,
+        settings=settings,
     )
 
     if not tasks:
@@ -744,6 +697,7 @@ def main():
                     task,
                     args.scheduler,
                     workflow_dir,
+                    settings["TEMPLATE"],
                 ): task
                 for task in pending_tasks
             }
