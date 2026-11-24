@@ -1,32 +1,28 @@
-"""Python-API tour of the band-gap calculator on a (7,0) carbon nanotube.
+"""Compute and report the band gap of this replica via the Python API."""
 
-Runs the same task as ``input.json`` but through the library interface.  When
-the CLI example has been run first, the H/S block cache and matching per-k
-spectra are reused: no model build and no re-solve happens for cached points.
-"""
-
+import json
 from pathlib import Path
 
 from dpnegf.runner.cal_bandgap import BandGapCalculator
 
 HERE = Path(__file__).resolve().parent
-CHECKPOINT = HERE / "nnenv.cnt.pth"
-STRUCTURE = HERE / "cnt7_0_len6.xyz"
-# Point the two-level cache at the CLI run's results directory; falls back to
-# a cold model inference when the files do not exist yet.
-CACHE = HERE / "output_cli/results/hs_blocks.npz"
+CHECKPOINT = HERE / "model.pth"
+STRUCTURE = HERE / "structure.xyz"
+RESULTS = HERE / "output/results"
+NEL_ATOM = {"C": 4.0}  # Generated per replica from the XYZ and input template.
+
+settings = json.loads((HERE / "input.json").read_text(encoding="utf-8"))
+task_options = settings["task_options"]
+task_options.pop("task", None)
+task_options["occupation_options"]["nel_atom"] = NEL_ATOM
+task_options.setdefault("cache_options", {}).setdefault("path", str(RESULTS / "hs_blocks.npz"))
 
 calculator = BandGapCalculator(
     structure=str(STRUCTURE),
     checkpoint=str(CHECKPOINT),
-    dtype="float32",
-    task_options={
-        "structure_options": {"mode": "periodic", "pbc": [False, False, True]},
-        "occupation_options": {"nel_atom": {"C": 4.0}},
-        "solver_options": {"method": "shift-invert", "energy_shift": None},
-        "cache_options": {"path": str(CACHE)},
-    },
-    results_path=str(HERE / "output_api/results"),
+    dtype=settings["dtype"],
+    task_options=task_options,
+    results_path=str(RESULTS),
 )
 result = calculator.compute()
 

@@ -3,6 +3,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import shutil
 import subprocess
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -20,12 +21,19 @@ def prepare_inputs(leaf, xyz, templates):
     model, = templates.glob("*.pth")
     options = json.loads((templates / "input.json").read_text(encoding="utf-8"))
     atoms = read(xyz, format="extxyz")
+    nel_atom = options["task_options"]["occupation_options"]["nel_atom"]
     if "H" in atoms.get_chemical_symbols():
-        options["task_options"]["occupation_options"]["nel_atom"]["H"] = 1.0
+        nel_atom["H"] = 1.0
+    script = (templates / "run.py").read_text(encoding="utf-8")
+    script, count = re.subn(r"^NEL_ATOM[ \t]*=.*$", lambda _: f"NEL_ATOM = {nel_atom!r}",
+                            script, flags=re.MULTILINE)
+    if count != 1:
+        raise ValueError(f"Expected one NEL_ATOM assignment in {templates / 'run.py'}")
     config = json.dumps(options, ensure_ascii=False, indent=2).encode("utf-8")
     files = {"structure.xyz": xyz, "model.pth": model, "run.sh": templates / "run.sh"}
     fingerprint = {name: digest(src) for name, src in files.items()}
-    fingerprint["input.json"] = hashlib.sha256(config).hexdigest()
+    generated = {"input.json": config, "run.py": script.encode("utf-8")}
+    fingerprint.update({name: hashlib.sha256(data).hexdigest() for name, data in generated.items()})
     if leaf.exists():
         previous = json.loads((leaf / "band_gap_inputs.json").read_text(encoding="utf-8"))
         if previous != fingerprint or any(digest(leaf / name) != sha for name, sha in fingerprint.items()):
@@ -37,7 +45,8 @@ def prepare_inputs(leaf, xyz, templates):
         staged.mkdir()
         for name, src in files.items():
             shutil.copyfile(src, staged / name)
-        (staged / "input.json").write_bytes(config)
+        for name, data in generated.items():
+            (staged / name).write_bytes(data)
         (staged / "band_gap_inputs.json").write_text(json.dumps(fingerprint), encoding="utf-8")
         staged.rename(leaf)
 

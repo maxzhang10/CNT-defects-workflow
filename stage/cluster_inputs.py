@@ -19,9 +19,6 @@ def validate_templates(device, solver, project_root=None, mode='md'):
     if solver == 'lammps':
         required = ['opt.lammps' if mode == 'opt' else 'in.lammps', 'run.sh']
         pattern = 'CH.airebo-m' if device == 'cpu' else '*.pth'
-    elif solver == 'band_gap':
-        required = ['input.json', 'run.sh']
-        pattern = '*.pth'
     else:
         required = ['input.json', 'run.py', 'run.sh']
         pattern = '*.pth'

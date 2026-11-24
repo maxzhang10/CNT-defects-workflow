@@ -13,6 +13,6 @@ if [[ -n "${CNT_BAND_GAP_SETUP:-}" ]]; then
 fi
 export OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK:-${OMP_NUM_THREADS:-1}}"
 export OPENBLAS_NUM_THREADS="$OMP_NUM_THREADS"
-dpnegf run input.json -i model.pth -stu structure.xyz -o output
+python -u run.py
 test -s output/results/gap.json
 touch band_gap_done.flag

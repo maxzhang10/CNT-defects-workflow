@@ -13,10 +13,10 @@
 ### 在 CPU 集群计算纯散射区能带
 
 1. A 集群使用 `geometry_mode="scattering_only"` 和 `BATCH_PHASE="lammps"`。按现有方式传输 `transfer_manifest.json` 及其列出的文件。
-2. 在 B 集群软件目录的 `input_files/cpu_cluster/band_gap/` 放一个电子结构 `.pth` 模型。计算节点需要可运行模板中 `dpnegf run` 的环境，可在 B 的 `manage.sh` 设置 `CNT_BAND_GAP_SETUP` 为激活脚本的绝对路径并导出。CPU 数和分区等作业参数在该模板的 `run.sh` 中设置。
+2. 在 B 集群软件目录的 `input_files/cpu_cluster/band_gap/` 放一个电子结构 `.pth` 模型。计算节点的 Python 环境须能导入 `dpnegf.runner.cal_bandgap.BandGapCalculator`，可在 B 的 `manage.sh` 设置 `CNT_BAND_GAP_SETUP` 为激活脚本的绝对路径并导出。CPU 数和分区等作业参数在该模板的 `run.sh` 中设置。
 3. B 的 `batch.py` 设置 `lammps_device="cpu"` 和指向交付目录的 `data_root`。在 B 的 `manage.sh` 设置 `BATCH_PHASE="band_gap"`、`BATCH_SCHEDULER="slurm"` 后执行 `./manage.sh start`。直接调用入口的等价命令是 `python batch_generate.py --config batch.py --phase band_gap --scheduler slurm`。已分配的 CPU 节点也支持 `--scheduler local`。
 
-每个 replica 的工作目录为 `band_gap/<末帧步号>/`，无步号时使用 `band_gap/final/`。该目录内的 `structure.xyz` 和 `model.pth` 分别来自交付末帧和 B 端模板。工作流根据 XYZ 的实际元素为含氢样本写入 `nel_atom.H = 1.0`，电荷及其余求解参数沿用 `input.json`。含 H 的结构需要模型支持 H，当前模板求解器要求偶数电子。结果见 `output/results/gap.json` 和 `bands.csv`（同一 results 目录）。重启会接续已提交的 Slurm 作业并校验已完成结果。如需更换输入或重算失败样本，先确认旧作业已退出，再将相应的能带工作目录移出原位置并重新启动。
+每个 replica 的工作目录为 `band_gap/<末帧步号>/`，无步号时使用 `band_gap/final/`。该目录内的 `structure.xyz` 和 `model.pth` 分别来自交付末帧和 B 端模板。工作流根据 XYZ 的实际元素生成 `run.py` 中的 `NEL_ATOM` 和 `input.json` 中的 `nel_atom`，含 H 时写入 `"H": 1.0`。`run.sh` 执行 `python -u run.py`，电荷及其余求解参数沿用 `input.json`。脚本打印的带隙、VBM、CBM 和 k 点收敛信息可在 Slurm 标准输出或本地 `band_gap.log` 查看。含 H 的结构需要模型支持 H，当前模板求解器要求偶数电子。结果见 `output/results/gap.json` 和 `bands.csv`（同一 results 目录）。重启会接续已提交的 Slurm 作业并校验已完成结果。如需更换输入或重算失败样本，先确认旧作业已退出，再将相应的能带工作目录移出原位置并重新启动。
 
 计算节点需要具备：
 

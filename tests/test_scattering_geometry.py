@@ -1,6 +1,8 @@
 import json
+import runpy
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -75,7 +77,7 @@ def test_scattering_replica_generation_and_handoff(tmp_path, monkeypatch):
     templates = tmp_path / "software/input_files/cpu_cluster/band_gap"
     templates.mkdir(parents=True)
     template = ROOT / "input_files/cpu_cluster/band_gap"
-    for name in ("run.sh", "input.json"):
+    for name in ("run.sh", "run.py", "input.json"):
         (templates / name).write_bytes((template / name).read_bytes())
     (templates / "electronic.pth").write_bytes(b"test checkpoint")
     jobs = []
@@ -106,6 +108,7 @@ def test_band_gap_pure_carbon_keeps_template(tmp_path):
     templates.mkdir()
     options = {"task_options": {"occupation_options": {"nel_atom": {"C": 4.0}, "charge": 2}}}
     (templates / "input.json").write_text(json.dumps(options))
+    (templates / "run.py").write_bytes((ROOT / "input_files/cpu_cluster/band_gap/run.py").read_bytes())
     (templates / "run.sh").touch()
     (templates / "test.pth").touch()
     xyz = tmp_path / "5_5.xyz"
@@ -113,6 +116,40 @@ def test_band_gap_pure_carbon_keeps_template(tmp_path):
     leaf = tmp_path / "final"
     band_gap.prepare_inputs(leaf, xyz, templates)
     assert json.loads((leaf / "input.json").read_bytes()) == options
+    assert "NEL_ATOM = {'C': 4.0}\n" in (leaf / "run.py").read_text()
+
+
+def test_band_gap_python_api_receives_replica_options(tmp_path, monkeypatch, capsys):
+    template = ROOT / "input_files/cpu_cluster/band_gap"
+    for name in ("run.py", "run.sh", "input.json"):
+        (tmp_path / name).write_bytes((template / name).read_bytes())
+    (tmp_path / "electronic.pth").touch()
+    xyz = tmp_path / "source.xyz"
+    xyz.write_text("2\n\nC 0 0 0\nH 0 0 1\n")
+    leaf = tmp_path / "replica"
+    band_gap.prepare_inputs(leaf, xyz, tmp_path)
+    assert "python -u run.py" in (leaf / "run.sh").read_text()
+    assert "NEL_ATOM = {'C': 4.0, 'H': 1.0}\n" in (leaf / "run.py").read_text()
+
+    def calculator(**kwargs):
+        assert Path(kwargs["checkpoint"]) == leaf / "model.pth"
+        assert Path(kwargs["structure"]) == leaf / "structure.xyz"
+        assert Path(kwargs["results_path"]) == leaf / "output/results"
+        expected = json.loads((leaf / "input.json").read_bytes())["task_options"]
+        expected.pop("task")
+        expected["cache_options"]["path"] = str(leaf / "output/results/hs_blocks.npz")
+        assert kwargs["task_options"] == expected
+        result = dict(gap_status="positive_gap", signed_gap_eV=1, band_gap_eV=1,
+                      minimum_direct_gap_eV=1, vbm_eV=0, cbm_eV=1, vbm_k_fractional=[0],
+                      cbm_k_fractional=[0], converged=True, requested_resolution_eV=0.01,
+                      solver="shift-invert", cache=dict(hit=False, spectrum_hits=0, spectrum_misses=0),
+                      k_convergence=[])
+        return SimpleNamespace(compute=lambda: result)
+
+    monkeypatch.setitem(sys.modules, "dpnegf.runner.cal_bandgap",
+                        SimpleNamespace(BandGapCalculator=calculator))
+    runpy.run_path(str(leaf / "run.py"))
+    assert "signed gap       : 1.0000 eV" in capsys.readouterr().out
 
 
 @pytest.mark.parametrize("phase", ["all", "dpnegf"])
