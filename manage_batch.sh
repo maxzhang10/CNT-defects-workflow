@@ -27,7 +27,7 @@ case "$SCHEDULER" in
     *) echo "无效 BATCH_SCHEDULER: $SCHEDULER"; exit 2 ;;
 esac
 case "$PHASE" in
-    all|lammps|dpnegf) ;;
+    all|lammps|dpnegf|band_gap) ;;
     *) echo "无效 BATCH_PHASE: $PHASE"; exit 2 ;;
 esac
 

@@ -528,7 +528,7 @@ def main():
         default=30,
         help="slurm 模式下 squeue 轮询间隔（秒）",
     )
-    parser.add_argument('--phase', choices=('all', 'lammps', 'dpnegf'), default='all')
+    parser.add_argument('--phase', choices=('all', 'lammps', 'dpnegf', 'band_gap'), default='all')
     args = parser.parse_args()
     if args.phase == 'dpnegf':
         args.skip_ele = True
@@ -552,6 +552,16 @@ def main():
     with open(config_path, "r", encoding="utf-8") as f:
         config = json.load(f)
     scattering_only = geometry_mode(config, args.phase) == "scattering_only"
+
+    if args.phase == 'band_gap':
+        from band_gap import run_replica
+        run = Path(args.root).resolve() if args.root else config_path.parent
+        if args.dry_run:
+            L.info(f"band_gap ({args.scheduler}): {run}")
+            return
+        templates = validate_templates("cpu", "band_gap", stage.parent)
+        run_replica(run, templates, args.scheduler, args.poll_interval)
+        return
 
     # MD 步数：dump2fdf 用它作为 --every，保证只抽出最后一帧。
     # 必须与 in.lammps 里 `run <N>` 一致（同由 config.md_steps 驱动）。

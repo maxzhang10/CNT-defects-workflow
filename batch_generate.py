@@ -778,7 +778,7 @@ def parse_args():
         help="跳过批次结束后的跨 replica 电导汇总。",
     )
 
-    parser.add_argument('--phase', choices=('all', 'lammps', 'dpnegf'), default='all')
+    parser.add_argument('--phase', choices=('all', 'lammps', 'dpnegf', 'band_gap'), default='all')
     args = parser.parse_args()
 
     if args.max_parallel is not None and args.max_parallel < 1:
@@ -805,6 +805,16 @@ def main():
                 "未指定 --config，且当前目录下找不到 batch.py / batch.json"
             )
     print(f"[INFO] 批配置文件: {Path(config_arg).resolve()}")
+
+    if args.phase == "band_gap":
+        from band_gap import run_batch
+        from cluster_inputs import validate_templates
+        if args.scheduler == "pool" or args.pool_status:
+            raise ValueError("CPU band_gap 支持 slurm 或 local 调度")
+        runtime = bc.load_runtime_config(config_arg, electrode_overrides=False)
+        templates = validate_templates(runtime["lammps_device"], "band_gap", workflow_dir)
+        return run_batch(runtime["data_root"], templates, args.scheduler,
+                         args.max_parallel or runtime["max_parallel"] or 16)
 
     if args.scheduler == "pool" or args.pool_status:
         import gpu_pool

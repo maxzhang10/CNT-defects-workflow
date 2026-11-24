@@ -8,6 +8,8 @@ def geometry_mode(config, phase=None):
     if mode == "scattering_only":
         if config.get("structure_mode", "defects") != "defects":
             raise ValueError("scattering_only 只支持缺陷生成模式，不能与 assemble 组合")
-        if phase is not None and phase != "lammps":
-            raise ValueError("geometry_mode=scattering_only 仅支持 --phase lammps")
+        if phase not in (None, "lammps", "band_gap"):
+            raise ValueError("geometry_mode=scattering_only 仅支持 --phase lammps 或 band_gap")
+    elif phase == "band_gap":
+        raise ValueError("--phase band_gap 需要 geometry_mode=scattering_only 的交付结构")
     return mode

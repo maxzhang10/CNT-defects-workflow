@@ -355,6 +355,7 @@ def FDF_to_xyz(
     uc_file=None,
     uc_sha256=None,
     atoms_per_pl=None,
+    scattering_only=False,
 ):
     """
     读取 leaf 文件夹中的 STRUCT.fdf，
@@ -410,7 +411,7 @@ def FDF_to_xyz(
     xyz_header = (
         f'Lattice="{lattice}" '
         'Properties=species:S:1:pos:R:3 '
-        'Generation=T from=T NanoTCAD-ViDES=T pbc="F F F"'
+        + ('pbc="F F T"' if scattering_only else 'Generation=T from=T NanoTCAD-ViDES=T pbc="F F F"')
     )
 
     with open(xyz_path, "r", encoding="utf-8") as f:
@@ -509,6 +510,7 @@ def main():
                 output_dir=str(output_dir),
                 r_max=r_max,
                 swap_left_pl=(not args.no_swap_left_pl),
+                scattering_only=(config.get("geometry_mode") == "scattering_only"),
                 chirality=chirality,
                 l_def=l_def,
                 buffer_pl=buffer_pl,

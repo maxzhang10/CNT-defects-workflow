@@ -5,7 +5,9 @@ from pathlib import Path
 def input_directory(device, solver, project_root=None):
     if device not in ('cpu', 'gpu'):
         raise ValueError(f'lammps_device 必须为 cpu / gpu，当前值: {device!r}')
-    if solver not in ('lammps', 'dpnegf'):
+    if solver == 'band_gap' and device != 'cpu':
+        raise ValueError("band_gap requires lammps_device='cpu' on cluster B")
+    if solver not in ('lammps', 'dpnegf', 'band_gap'):
         raise ValueError(f'Unknown solver: {solver}')
     root = Path(project_root) if project_root is not None else Path(__file__).resolve().parents[1]
     return root / 'input_files' / f'{device}_cluster' / solver
@@ -17,6 +19,9 @@ def validate_templates(device, solver, project_root=None, mode='md'):
     if solver == 'lammps':
         required = ['opt.lammps' if mode == 'opt' else 'in.lammps', 'run.sh']
         pattern = 'CH.airebo-m' if device == 'cpu' else '*.pth'
+    elif solver == 'band_gap':
+        required = ['input.json', 'run.sh']
+        pattern = '*.pth'
     else:
         required = ['input.json', 'run.py', 'run.sh']
         pattern = '*.pth'

@@ -962,7 +962,7 @@ def _runtime_electrode_overrides(raw, path):
     return overrides
 
 
-def load_runtime_config(path):
+def load_runtime_config(path, *, electrode_overrides=True):
     """Read B's data location/concurrency without validating A's geometry sources."""
     path = Path(path).resolve()
     raw = _read_batch_py(path, runtime=True) if path.suffix == '.py' else _read_batch_json(path)
@@ -983,7 +983,7 @@ def load_runtime_config(path):
     template = raw.get('template', {})
     if not isinstance(template, dict):
         _fail(path, 'template 必须为对象')
-    overrides = _runtime_electrode_overrides(raw, path)
+    overrides = _runtime_electrode_overrides(raw, path) if electrode_overrides else {}
     return {'data_root': root.resolve(), 'max_parallel': max_parallel, 'lammps_device': lammps_device,
             'geometry_mode': geometry_mode({**template, **raw}),
             'dpnegf_overrides': overrides}

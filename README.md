@@ -8,7 +8,15 @@
 
 在数据目录的 `batch.py` 顶层设置 `geometry_mode = "scattering_only"`，并在 `manage.sh` 中设置 `BATCH_PHASE="lammps"`，即可生成纯散射区。直接调用批入口时使用 `python batch_generate.py --config batch.py --phase lammps`。省略 `geometry_mode` 或设为 `"with_electrodes"` 会使用原有带电极结构。
 
-纯散射管包含 `l_def` 个原胞，缺陷在整段内按原有边距与间距采样。MD 或优化时所有原子均可运动，末帧 FDF 和 XYZ 保留相同原子顺序。该模式支持常规缺陷生成，不与 `structure_mode="assemble"`、`phase=all` 或 `phase=dpnegf` 组合。
+纯散射管包含 `l_def` 个原胞，缺陷在整段内按原有边距与间距采样。MD 或优化时所有原子均可运动，末帧 FDF 和 XYZ 保留相同原子顺序。XYZ 的晶格后写入 `Properties=species:S:1:pos:R:3 pbc="F F T"`。该模式支持常规缺陷生成，末帧可以交给 CPU 集群的 `band_gap` 阶段。
+
+### 在 CPU 集群计算纯散射区能带
+
+1. A 集群使用 `geometry_mode="scattering_only"` 和 `BATCH_PHASE="lammps"`。按现有方式传输 `transfer_manifest.json` 及其列出的文件。
+2. 在 B 集群软件目录的 `input_files/cpu_cluster/band_gap/` 放一个电子结构 `.pth` 模型。计算节点需要可运行模板中 `dpnegf run` 的环境，可在 B 的 `manage.sh` 设置 `CNT_BAND_GAP_SETUP` 为激活脚本的绝对路径并导出。CPU 数和分区等作业参数在该模板的 `run.sh` 中设置。
+3. B 的 `batch.py` 设置 `lammps_device="cpu"` 和指向交付目录的 `data_root`。在 B 的 `manage.sh` 设置 `BATCH_PHASE="band_gap"`、`BATCH_SCHEDULER="slurm"` 后执行 `./manage.sh start`。直接调用入口的等价命令是 `python batch_generate.py --config batch.py --phase band_gap --scheduler slurm`。已分配的 CPU 节点也支持 `--scheduler local`。
+
+每个 replica 的工作目录为 `band_gap/<末帧步号>/`，无步号时使用 `band_gap/final/`。该目录内的 `structure.xyz` 和 `model.pth` 分别来自交付末帧和 B 端模板。工作流根据 XYZ 的实际元素为含氢样本写入 `nel_atom.H = 1.0`，电荷及其余求解参数沿用 `input.json`。含 H 的结构需要模型支持 H，当前模板求解器要求偶数电子。结果见 `output/results/gap.json` 和 `bands.csv`（同一 results 目录）。重启会接续已提交的 Slurm 作业并校验已完成结果。如需更换输入或重算失败样本，先确认旧作业已退出，再将相应的能带工作目录移出原位置并重新启动。
 
 计算节点需要具备：
 

@@ -11,6 +11,7 @@ sys.path.insert(0, str(ROOT / "stage"))
 sys.path.insert(0, str(ROOT))
 import batch_config
 import batch_generate
+import band_gap
 import ele_multi_defects_ele as generator
 import run_multi
 import split_workflow
@@ -61,11 +62,57 @@ def test_scattering_replica_generation_and_handoff(tmp_path, monkeypatch):
     run_multi.main()
     fdf = parse_struct_fdf(run / "dpnegf/STRUCT.fdf")
     xyz = read(run / "dpnegf/5_5.xyz")
+    assert xyz.pbc.tolist() == [False, False, True]
+    header = (run / "dpnegf/5_5.xyz").read_text().splitlines()[1]
+    assert header.split('"', 2)[2] == ' Properties=species:S:1:pos:R:3 pbc="F F T"'
     np.testing.assert_array_equal(xyz.numbers, fdf.numbers)
     np.testing.assert_allclose(xyz.positions, fdf.positions, atol=1e-7)
     split_workflow.export_manifest(tmp_path, [task])
     with pytest.raises(ValueError, match="--phase lammps"):
         split_workflow.load_manifest(tmp_path, imported=True)
+
+    # Run the B batch entry twice with a stand-in for the CPU Slurm job.
+    templates = tmp_path / "software/input_files/cpu_cluster/band_gap"
+    templates.mkdir(parents=True)
+    template = ROOT / "input_files/cpu_cluster/band_gap"
+    for name in ("run.sh", "input.json"):
+        (templates / name).write_bytes((template / name).read_bytes())
+    (templates / "electronic.pth").write_bytes(b"test checkpoint")
+    jobs = []
+    def submit(leaf, **kwargs):
+        jobs.append(leaf)
+        assert (leaf / "model.pth").read_bytes() == b"test checkpoint"
+        assert (leaf / "structure.xyz").read_bytes() == (run / "dpnegf/5_5.xyz").read_bytes()
+        expected = json.loads((template / "input.json").read_bytes())
+        expected["task_options"]["occupation_options"]["nel_atom"]["H"] = 1.0
+        assert json.loads((leaf / "input.json").read_bytes()) == expected
+        (leaf / "output/results").mkdir(parents=True)
+        (leaf / "output/results/gap.json").write_text('{"band_gap_eV": 0.0}')
+        (leaf / "band_gap_done.flag").touch()
+        return "123"
+    monkeypatch.setattr(band_gap, "sbatch_submit_with_retry", submit)
+    monkeypatch.setattr(band_gap, "wait_for_jobs", lambda *args, **kwargs: None)
+    monkeypatch.setattr(sys, "argv", ["batch_generate.py", "--config", str(batch_path),
+                                      "--workflow-dir", str(tmp_path / "software"),
+                                      "--phase", "band_gap", "--scheduler", "slurm"])
+    assert batch_generate.main() == batch_generate.main() == 0
+    assert jobs == [run / "band_gap/final"]
+    (templates / "electronic.pth").write_bytes(b"changed checkpoint")
+    assert batch_generate.main() == 1
+
+
+def test_band_gap_pure_carbon_keeps_template(tmp_path):
+    templates = tmp_path / "templates"
+    templates.mkdir()
+    options = {"task_options": {"occupation_options": {"nel_atom": {"C": 4.0}, "charge": 2}}}
+    (templates / "input.json").write_text(json.dumps(options))
+    (templates / "run.sh").touch()
+    (templates / "test.pth").touch()
+    xyz = tmp_path / "5_5.xyz"
+    xyz.write_text('1\nProperties=species:S:1:pos:R:3\nC 0 0 0\n')
+    leaf = tmp_path / "final"
+    band_gap.prepare_inputs(leaf, xyz, templates)
+    assert json.loads((leaf / "input.json").read_bytes()) == options
 
 
 @pytest.mark.parametrize("phase", ["all", "dpnegf"])
