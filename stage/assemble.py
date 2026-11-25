@@ -241,7 +241,14 @@ def build(config, seed, *, placement_seed=None, rotation_seed=None):
     result.cell[2, 2] = z
     n_electrode = layout["electrode_atoms_per_side"]
     defect_total = sum(config["defect_counts"].values())
-    return result, {"seed": seed, **seeds, "module_sequence": sequence,
+    targets = {}
+    resolution = config.get("_resolution", {})
+    if "length_angstrom" in resolution:
+        targets["target_length_angstrom"] = resolution["length_angstrom"]
+    if "defect_density" in resolution:
+        targets["target_defect_density_A_inv"] = resolution["defect_density"]
+        targets["defect_count_mode"] = config["defect_count_mode"]
+    return result, {"seed": seed, **seeds, **targets, "module_sequence": sequence,
                     "placements": placement, "scatter_uc_count": config["scatter_uc_count"],
                     "scatter_length_angstrom": scatter_length,
                     "electrode_length_angstrom": layout["electrode_length_angstrom"],

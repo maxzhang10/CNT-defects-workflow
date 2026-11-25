@@ -10,6 +10,9 @@ data_root = "./assemble_data"
 max_parallel = 4
 
 template = {
+    # 含 defect_density 的条目继承此设置，也可在 configs 的单个条目覆盖。
+    # balanced_count：按 replica 编号平衡取整；same_count：每根取相同整数。
+    "defect_count_mode": "balanced_count",
     "r_max": 6.5,
     "md_steps": 0,  # 0: 跳过 LAMMPS，拼接 POSCAR 直接进入 DPNEGF；正数: MD
     "ele_T": 100,
@@ -23,18 +26,19 @@ configs = [
         "chirality": [8, 2],
         "perfect_module": "./input_files/uc_POSCAR/8_2/POSCAR",
         "defect_modules": {"MVH": ("./modules/8_2/MVH_POSCAR", 1)},
-        "defect_counts": {"MVH": 2},
-        # 两种或更多模块等比例混合时，用以下三项替换上面 defect_modules / defect_counts：
-        # "defect_modules": {"MVH1": ("./modules/8_2/MVH1_POSCAR", 1),
-        #                    "MVH2": ("./modules/8_2/MVH2_POSCAR", 1),
-        #                    "MVH3": ("./modules/8_2/MVH3_POSCAR", 1)},
+        "length_angstrom": 78.0,   # 散射区目标长度（Å），也可替换为 "scatter_uc_count": 12
+        "defect_density": 0.03,    # 总缺陷数 / 散射区实际长度（Å⁻¹）；允许 0
+        # 多类型等比例：将上面的 defect_modules 替换为下一字典，并启用 defect_mix_mode。
+        # "defect_modules": {"A": ("./modules/8_2/A_POSCAR", 1),
+        #                    "B": ("./modules/8_2/B_POSCAR", 1)},
         # "defect_mix_mode": "balanced_count",
-        # "total_defects": 4,  # replica 依次为 (2,1,1)、(1,2,1)、(1,1,2)
-        "scatter_uc_count": 6,
+        # 此时先按密度确定每根的总数，再按 A/B 轮换分配；各类型须占相同 UC 数。
+        # 固定数量：用 "defect_counts": {"MVH": 2} 替换 defect_density。
+        # 多类型均分固定总数：启用上述 A/B 两行配置，用 "total_defects": 4 替换 defect_density。
         "buffer_pl": 2,  # (8,2) 旧规则：每侧 2PL 电极 + 2PL 缓冲
         "rotation_angles_deg": [0, 180],  # 只填经接口原子配准检验可用的离散角度
         "replicas": 20,
-        # "module_sequence": ["perfect", "MVH", "perfect", "MVH", ...],
+        # 固定数量和类型时可选 module_sequence，序列的缺陷数和总 UC 数须匹配。
     },
 ]
 

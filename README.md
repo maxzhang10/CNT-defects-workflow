@@ -402,7 +402,33 @@ squeue -u "$USER"
 
 独立批配置入口是 [`batch_assemble.py`](batch_assemble.py)。先把其中的完美模块和各缺陷模块路径改为自己准备的 POSCAR，然后在集群环境运行 `python batch_assemble.py --scheduler slurm`；本地预检可运行 `python -m unittest tests.test_assemble`。它调用现有 `batch_generate.py` / `run_multi.py` 调度和下游流程；原 `batch.py`、ASE 缺陷生成和外部单 UC 模式保持原样。配置中的 `md_steps = 0` 表示跳过 LAMMPS，直接从拼接 POSCAR 经 `sgeom` 进入 DPNEGF；设为正数则运行原有 LAMMPS MD 流程。
 
-每个 `configs` 条目填写 `perfect_module`（严格一个 UC）、`defect_modules`（名称到 `(POSCAR 路径, 占用 UC 数)`，例如 `{"MVH": ("./modules/MVH/POSCAR", 2)}`）、`defect_counts`（同名键到非负整数）、`scatter_uc_count`（散射区 UC 总数）、`buffer_pl`、`rotation_angles_deg`、`replicas`，可选 `module_sequence`。每出现一次缺陷模块计为一个缺陷，因此请准备每模块一个缺陷的 POSCAR。手动序列中用 `"perfect"` 表示完美模块，其余名称对应 `defect_modules`；不填时先以完美模块补足散射区 UC 数，再随机排列所有模块。缺陷模块的轴向晶胞长度必须等于声明的 UC 数乘完美 UC 的晶胞长度（容差 1e-5 Å）；长度取 POSCAR 晶胞向量，不取原子坐标跨度。缺陷模块占用的 UC 总数超过散射区时直接报错。
+每个 `configs` 条目指定手性、完美模块 `perfect_module`（一个 UC）、缺陷模块 `defect_modules`（名称映射到 POSCAR 路径和占用 UC 数）、旋转角度 `rotation_angles_deg`、`replicas`，并分别选择长度和缺陷输入。每次放入一个缺陷模块计作一个缺陷。模块的轴向晶胞长度须等于声明的 UC 数乘以完美模块的轴向周期（容差 1e-5 Å）。
+
+| 配置位置 | 字段 | 含义 |
+|---|---|---|
+| `configs[i]` | `length_angstrom` 或 `scatter_uc_count` | 二选一。目标长度单位为 Å，仅覆盖散射区。按完美模块周期取最近整数 UC，半个向上取整，最少 1 UC。 |
+| `configs[i]` | `defect_density`、`defect_counts` 或 `total_defects` | 三选一。密度单位为 Å⁻¹，允许 0。也可显式给各类整数数量，或在类型均分模式下给固定总数。 |
+| `template` 或 `configs[i]` | `defect_count_mode` | 作用于密度输入，条目优先。默认 `same_count` 对每根取相同整数，正密度至少 1 个。`balanced_count` 在相邻整数间分配，单根可为 0。 |
+| `configs[i]` | `defect_mix_mode="balanced_count"` | 使用密度并提供多种模块时须开启。至少两种模块，占用 UC 数相同；单类型省略此字段。 |
+
+**可复制的多类型配置**（POSCAR 路径按实际文件替换）：
+
+```python
+template = {"defect_count_mode": "balanced_count", "md_steps": 0}
+configs = [{
+    "chirality": [8, 2],
+    "perfect_module": "./input_files/uc_POSCAR/8_2/POSCAR",
+    "defect_modules": {"A": ("./modules/8_2/A_POSCAR", 1),
+                       "B": ("./modules/8_2/B_POSCAR", 1)},
+    "length_angstrom": 78.0,
+    "defect_density": 0.03,
+    "defect_mix_mode": "balanced_count",
+    "rotation_angles_deg": [0],
+    "replicas": 20,
+}]
+```
+
+每根的期望总数为 `defect_density × 实际散射区 UC 数 × 完美模块周期`。开启两层平衡后，先按 replica 编号取整得到本根总数，再按模块名称排序，接着前一根轮换分配余数。以期望值 2.4 为例，前五根的总数为 2、3、2、3、2，两种模块各出现 6 次。增加 replicas 时，原编号的分配保持一致。预检会检查这批 replica 中缺陷模块占用的最大 UC 数。固定数量和类型时可选 `module_sequence`（`"perfect"` 表示完美模块）；跨 replica 平衡取整或启用类型均分时须省略手动序列。
 
 两种或更多缺陷模块等比例混合时，可用 `"defect_mix_mode": "balanced_count"` 和 `"total_defects": 5` **替换** `defect_counts`。要求至少两种缺陷模块、占用 UC 数相同，且不能设置 `module_sequence`。按模块名称排序后均分，余数跨 replica 轮流分配。例如四种模块、总数 5 时，依次为 `(2,1,1,1)`、`(1,2,1,1)`、`(1,1,2,1)`、`(1,1,1,2)`；两种模块仍为 `(3,2)`、`(2,3)` 交替。每根总缺陷数固定，各种数量及任意 replica 前缀中的累计数量最多差 1，增加 replicas 不改变已有任务。总数允许为 0，也可以少于模块种类数。各 replica 的实际 `defect_counts` 写入 `workflow_config.json` 和 `assembly.json`。不设置该模式时，仍按原有 `defect_counts` 固定数量拼接。
 

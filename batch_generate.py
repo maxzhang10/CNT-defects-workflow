@@ -332,19 +332,23 @@ def build_assemble_tasks(batch, base_root):
         physical = {key: cfg[key] for key in (
             "modules", "defect_counts", "scatter_uc_count",
             "layout", "rotation_angles_deg", "module_sequence")}
-        if cfg.get("defect_mix_mode") == "balanced_count":
-            physical.update(defect_mix_mode="balanced_count", total_defects=cfg["total_defects"])
+        for key in ("defect_mix_mode", "total_defects", "_resolution", "defect_count_mode"):
+            if key in cfg:
+                physical[key] = cfg[key]
+        resolution = cfg.get("_resolution", {})
+        target_density = resolution.get("defect_density")
+        count_label = f"D{sum(cfg['defect_counts'].values())}"
+        if target_density is not None:
+            count_label = f"rho{target_density:g}"
         fingerprint = hashlib.sha256(json.dumps(physical, sort_keys=True).encode()).hexdigest()[:12]
         for temperature in batch["temperatures"]:
-            name = f"assemble_UC{cfg['scatter_uc_count']}_D{sum(cfg['defect_counts'].values())}_{fingerprint}"
+            name = f"assemble_UC{cfg['scatter_uc_count']}_{count_label}_{fingerprint}"
             configuration_root = base_root / f"{temperature}K" / f"{cfg['m']}_{cfg['n']}" / name
             for replica in range(1, cfg["replicas"] + 1):
-                replica_cfg = cfg
-                if cfg.get("defect_mix_mode") == "balanced_count":
-                    replica_cfg = copy.deepcopy(cfg)
-                    replica_cfg["defect_counts"] = bc.balanced_module_counts(
-                        cfg["defect_counts"], cfg["total_defects"], replica,
-                    )
+                replica_cfg = dict(cfg, defect_counts=bc.assemble_replica_counts(cfg, replica))
+                if resolution:
+                    # Ensemble size is recorded outside the per-structure provenance hash.
+                    replica_cfg.pop("replicas")
                 seed = batch["base_structure_seed"] + replica
                 seeds = assemble.derive_seeds(
                     batch["base_structure_seed"], cfg["scatter_uc_count"], replica)
@@ -353,7 +357,7 @@ def build_assemble_tasks(batch, base_root):
                 if run_root in used_roots:
                     raise ValueError(f"two assembly tasks target the same directory: {run_root}")
                 used_roots.add(run_root)
-                count = sum(cfg["defect_counts"].values())
+                count = sum(replica_cfg["defect_counts"].values())
                 ele_T = cfg["ele_T"] if cfg["ele_T"] is not None else template.get("ele_T")
                 task = {
                     "task_id": f"{temperature}K_{cfg['m']}_{cfg['n']}_{name}_rep{replica:03d}",
@@ -361,7 +365,8 @@ def build_assemble_tasks(batch, base_root):
                     "temperature": temperature, "m": cfg["m"], "n": cfg["n"],
                     "assembly": replica_cfg, "sequence": sequence,
                     "N_defects": count, "actual_density": count / actual,
-                    "density": count / actual, "folder_name": name,
+                    "density": target_density if cfg.get("defect_count_mode") == "balanced_count" else count / actual,
+                    "folder_name": name,
                     "replica": replica, "replicas": cfg["replicas"],
                     "data_root": base_root, "configuration_root": configuration_root,
                     "run_root": run_root, "seed": seed, **seeds,
@@ -487,6 +492,19 @@ def make_assemble_task_config(task, batch):
         "e_fermi": task.get("e_fermi"),
         "conductance_options": {"mu": mu}, "md_sampling": {"n_samples": 1},
     })
+    resolution = cfg.get("_resolution", {})
+    config["defect_count_mode"] = cfg.get("defect_count_mode", "same_count")
+    if "length_angstrom" in resolution:
+        config["target_length_angstrom"] = resolution["length_angstrom"]
+    if "defect_density" in resolution:
+        expected = cfg["expected_defects_per_replica"]
+        replicas = task["replicas"]
+        total = (bc.balanced_total_defects(expected, replicas)
+                 if cfg["defect_count_mode"] == "balanced_count" else replicas * task["N_defects"])
+        length = cfg["scatter_uc_count"] * cfg["modules"]["perfect"]["length_angstrom"]
+        config.update(target_defect_density_A_inv=resolution["defect_density"],
+                      expected_defects_per_replica=expected, ensemble_total_defects=total,
+                      ensemble_actual_density_A_inv=total / (replicas * length))
     if task["ele_T"] is not None:
         config["ele_T"] = float(task["ele_T"])
     return config

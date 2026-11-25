@@ -200,6 +200,76 @@ class AssemblyTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "at least two"):
             tasks()
 
+    def test_density_length_and_balanced_prefixes(self):
+        import batch_generate
+        import negf_provenance
+        source = STAGE.parent / "input_files" / "uc_POSCAR" / "8_2" / "POSCAR"
+        period = assemble.module_metadata(source)["length_angstrom"]
+        density = 2.4 / (4 * period)
+        entry = {"chirality": [8, 2], "perfect_module": str(source),
+                 "defect_modules": {k: [str(source), 1] for k in ("B", "A")},
+                 "defect_mix_mode": "balanced_count", "length_angstrom": 3.6 * period,
+                 "defect_density": density, "rotation_angles_deg": [0], "replicas": 5}
+        raw = {"structure_mode": "assemble", "temperatures": [100], "configs": [entry],
+               "template": {"defect_count_mode": "balanced_count", "md_steps": 0}}
+        path = self.root / "batch.json"
+
+        def configs():
+            path.write_text(json.dumps(raw), encoding="utf-8")
+            batch = batch_config.load(path)
+            table = batch_config.format_resolution_table(batch["configs"])
+            self.assertIn("scatter_uc_count=4", table)
+            tasks = batch_generate.build_tasks(batch, self.root)
+            return [batch_generate.make_task_config(task, batch) for task in tasks]
+
+        original = configs()
+        self.assertEqual([c["N_defects"] for c in original], [2, 3, 2, 3, 2])
+        expected = [(1, 1), (2, 1), (1, 1), (1, 2), (1, 1)]
+        for cfg, (a, b) in zip(original, expected):
+            assembly = cfg["assembly"]
+            self.assertEqual(assembly["scatter_uc_count"], 4)
+            self.assertEqual(assembly["defect_counts"], {"A": a, "B": b})
+            self.assertEqual(cfg["target_length_angstrom"], entry["length_angstrom"])
+            self.assertEqual(cfg["density_A_inv"], density)
+            self.assertEqual(cfg["ensemble_total_defects"], 12)
+            self.assertAlmostEqual(cfg["actual_density_A_inv"], (a + b) / (4 * period))
+        from ele_multi_defects_ele import main_assemble
+        config = original[1]
+        main_assemble(config)
+        saved = json.loads((Path(config["structure_root"]) / "assembly.json").read_text())
+        self.assertEqual(saved["defect_counts"], {"A": 2, "B": 1})
+        self.assertEqual(saved["target_defect_density_A_inv"], density)
+        self.assertAlmostEqual(saved["scatter_length_angstrom"], 4 * period)
+        entry["replicas"] = 12
+        for old, new in zip(original, configs()):
+            self.assertEqual(old["structure_root"], new["structure_root"])
+            self.assertEqual(negf_provenance.compute_negf_config_hash(old),
+                             negf_provenance.compute_negf_config_hash(new))
+        # The first fits, but a later replica would need five UC.
+        entry["defect_density"] = 4.2 / (4 * period)
+        entry["replicas"] = 1
+        self.assertEqual(configs()[0]["N_defects"], 4)
+        entry["replicas"] = 5
+        with self.assertRaisesRegex(ValueError, "exceeding scatter_uc_count"):
+            configs()
+        del entry["defect_modules"]["B"], entry["defect_mix_mode"], entry["length_angstrom"]
+        entry["scatter_uc_count"] = 4
+        entry["defect_density"] = 0.1 / (4 * period)
+        self.assertEqual([c["N_defects"] for c in configs()], [0, 0, 0, 0, 1])
+        entry["defect_count_mode"] = "same_count"
+        self.assertEqual([c["N_defects"] for c in configs()], [1] * 5)
+        entry["defect_density"] = 0
+        self.assertEqual([c["N_defects"] for c in configs()], [0] * 5)
+        for key, value in (("length_angstrom", period), ("total_defects", 1),
+                           ("defect_counts", {"A": 1}), ("defect_density", -1)):
+            with self.subTest(key=key), self.assertRaisesRegex(ValueError, key):
+                entry[key] = value
+                configs()
+            del entry[key]
+        del entry["scatter_uc_count"], entry["defect_count_mode"]
+        entry.update(length_angstrom=3.6 * period, defect_counts={"A": 2})
+        self.assertEqual([c["N_defects"] for c in configs()], [2] * 5)
+
     def test_multi_module_balanced_mixture(self):
         import batch_generate
         source = STAGE.parent / "input_files" / "uc_POSCAR" / "8_2" / "POSCAR"

@@ -205,6 +205,11 @@ def _round_positive(x):
     return int(x + 0.5)
 
 
+def _prefix_defects(expected, replicas):
+    base = math.floor(expected)
+    return replicas * base + _round_positive(replicas * (expected - base))
+
+
 def balanced_defect_count(expected_per_replica, replica):
     """返回 balanced_count 模式下指定 replica（从 1 开始）的缺陷数。
 
@@ -218,18 +223,25 @@ def balanced_defect_count(expected_per_replica, replica):
     if isinstance(replica, bool) or not isinstance(replica, int) or replica < 1:
         raise ValueError("replica 必须为从 1 开始的正整数")
 
-    base = math.floor(expected)
-    fraction = expected - base
-    extras_before = _round_positive((replica - 1) * fraction)
-    extras_after = _round_positive(replica * fraction)
-    return base + (extras_after - extras_before)
+    return _prefix_defects(expected, replica) - _prefix_defects(expected, replica - 1)
 
 
 def balanced_total_defects(expected_per_replica, replicas):
     """返回 balanced_count 模式下前 replicas 个任务的缺陷总数。"""
     if isinstance(replicas, bool) or not isinstance(replicas, int) or replicas < 1:
         raise ValueError("replicas 必须为正整数")
-    return _round_positive(float(expected_per_replica) * replicas)
+    return _prefix_defects(float(expected_per_replica), replicas)
+
+
+def _target_density(value, label, path):
+    if (isinstance(value, bool) or not isinstance(value, (int, float))
+            or not math.isfinite(value) or value < 0):
+        _fail(path, f"{label} 必须为有限非负数，当前值: {value!r}")
+    return float(value)
+
+
+def _same_count(density, expected):
+    return 0 if density == 0 else max(1, _round_positive(expected))
 
 
 def _require_positive_finite(value, name, path):
@@ -455,18 +467,14 @@ def validate_config_entry(
 
     actual_length = l_def * uc
     if has_density:
-        target_density = entry["defect_density"]
-        if (isinstance(target_density, bool) or not isinstance(target_density, (int, float))
-                or not math.isfinite(target_density) or target_density < 0):
-            _fail(path, f"configs[{index}].defect_density 必须为有限非负数，当前值: {target_density!r}")
-        target_density = float(target_density)
+        target_density = _target_density(entry["defect_density"], f"configs[{index}].defect_density", path)
         expected_defects = target_density * actual_length
         if defect_count_mode == "balanced_count":
             # balanced_count 的 N_defects 是 replica 级属性，在 build_tasks
             # 展开时按 replica 序号计算；这里不伪造单一整数值。
             n_defects = None
         else:
-            n_defects = 0 if target_density == 0 else max(1, _round_positive(expected_defects))
+            n_defects = _same_count(target_density, expected_defects)
         resolution["defect_density"] = target_density
     else:
         n_defects = _require_int(
@@ -573,53 +581,74 @@ _BATCH_PY_KEYS = (
 )
 
 
-def balanced_module_counts(names, total, replica):
+def balanced_module_counts(names, total, replica, *, previous_total=None):
     """Equal mixture with prefix-stable, round-robin remainder allocation."""
     names = sorted(names)
     if len(names) < 2:
         raise ValueError("balanced mixture requires at least two defect modules")
     base, remainder = divmod(total, len(names))
     counts = dict.fromkeys(names, base)
-    start = ((replica - 1) * remainder) % len(names)
+    start = (replica - 1) * remainder if previous_total is None else previous_total
     for offset in range(remainder):
         counts[names[(start + offset) % len(names)]] += 1
     return counts
 
 
 def validate_assemble_entry(entry, index, path, template):
-    """Validate a separate module-assembly configuration without UC rounding."""
+    """Resolve assembly targets against the supplied perfect-module cell."""
     label = f"configs[{index}]"
     if not isinstance(entry, dict):
         _fail(path, f"{label} must be an object")
-    if any(key in entry for key in ("uc_file", "l_def", "N_defects", "structures", "defect_density", "electrode_length_angstrom", "scatter_length_angstrom", "perfect_uc_count")):
+    if any(key in entry for key in ("uc_file", "l_def", "N_defects", "structures", "electrode_length_angstrom", "scatter_length_angstrom", "perfect_uc_count")):
         _fail(path, f"{label}: UC/ASE defect fields cannot be mixed with assembly mode")
     chirality = entry.get("chirality", [entry.get("m"), entry.get("n")])
     if (not isinstance(chirality, (list, tuple)) or len(chirality) != 2
             or any(type(x) is not int for x in chirality)
             or chirality[0] < 1 or chirality[1] < 0):
         _fail(path, f"{label}.chirality must be [m, n]")
+    if ("length_angstrom" in entry) == ("scatter_uc_count" in entry):
+        _fail(path, f"{label}: specify exactly one of length_angstrom and scatter_uc_count")
+    resolution = {}
+    has_density = "defect_density" in entry
+    count_mode = _require_defect_count_mode(
+        entry.get("defect_count_mode", template["defect_count_mode"] if has_density else "same_count"),
+        f"{label}.defect_count_mode", path)
+    if not has_density and count_mode == "balanced_count":
+        _fail(path, f"{label}: defect_count_mode=balanced_count requires defect_density")
     try:
         perfect_path = Path(entry["perfect_module"])
         defect_paths = entry["defect_modules"]
         mix_mode = entry.get("defect_mix_mode", "fixed_count")
         if mix_mode not in ("fixed_count", "balanced_count"):
             _fail(path, f"{label}.defect_mix_mode must be fixed_count or balanced_count")
+        if has_density:
+            if "defect_counts" in entry or "total_defects" in entry:
+                _fail(path, f"{label}: defect_density cannot specify defect_counts or total_defects")
+            density = _target_density(entry["defect_density"], f"{label}.defect_density", path)
+            resolution["defect_density"] = density
+            if not isinstance(defect_paths, dict) or (density > 0 and not defect_paths):
+                _fail(path, f"{label}: positive defect_density requires defect_modules")
+            if len(defect_paths) > 1 and mix_mode != "balanced_count":
+                _fail(path, f"{label}: multiple modules with defect_density require defect_mix_mode=balanced_count")
+            if count_mode == "balanced_count" and entry.get("module_sequence") is not None:
+                _fail(path, f"{label}: balanced defect count cannot specify module_sequence")
+            counts = dict.fromkeys(defect_paths, 0)
         if mix_mode == "balanced_count":
             if "defect_counts" in entry:
                 _fail(path, f"{label}: balanced mixture cannot specify defect_counts")
-            total = _require_int(entry["total_defects"], f"{label}.total_defects", path, minimum=0)
             if not isinstance(defect_paths, dict) or len(defect_paths) < 2:
                 _fail(path, f"{label}: balanced mixture requires at least two defect modules")
             if any(not isinstance(k, str) or not k for k in defect_paths):
                 _fail(path, f"{label}: invalid defect names")
-            counts = balanced_module_counts(defect_paths, total, 1)
+            if not has_density:
+                total = _require_int(entry["total_defects"], f"{label}.total_defects", path, minimum=0)
+                counts = balanced_module_counts(defect_paths, total, 1)
             if entry.get("module_sequence") is not None:
                 _fail(path, f"{label}: balanced mixture cannot specify module_sequence")
-        else:
+        elif not has_density:
             if "total_defects" in entry:
                 _fail(path, f"{label}: total_defects requires defect_mix_mode=balanced_count")
             counts = entry["defect_counts"]
-        scatter_uc = _require_int(entry["scatter_uc_count"], f"{label}.scatter_uc_count", path)
         angles = entry["rotation_angles_deg"]
     except (KeyError, TypeError, ValueError) as exc:
         _fail(path, f"{label}: missing or invalid assembly field: {exc}")
@@ -640,6 +669,13 @@ def validate_assemble_entry(entry, index, path, template):
         return assemble.module_metadata(p)
     try:
         perfect = metadata(perfect_path)
+        uc = perfect["length_angstrom"]
+        if "length_angstrom" in entry:
+            length = _require_positive_finite(entry["length_angstrom"], f"{label}.length_angstrom", path)
+            resolution["length_angstrom"] = length
+            scatter_uc = max(1, _round_positive(length / uc))
+        else:
+            scatter_uc = _require_int(entry["scatter_uc_count"], f"{label}.scatter_uc_count", path)
         if perfect["symbols"] != ["C"]:
             raise ValueError("perfect module must contain only C")
         defects = {}
@@ -690,7 +726,25 @@ def validate_assemble_entry(entry, index, path, template):
             raise ValueError("module_sequence must be a list")
         if mix_mode == "balanced_count":
             normalized["defect_mix_mode"] = mix_mode
-            normalized["total_defects"] = total
+            if not has_density:
+                normalized["total_defects"] = total
+        if resolution:
+            normalized["_resolution"] = resolution
+        if has_density:
+            expected = density * (scatter_uc * uc)
+            if not math.isfinite(expected):
+                _fail(path, f"{label}: expected defect count must be finite")
+            normalized.update(defect_count_mode=count_mode, expected_defects_per_replica=expected)
+            normalized["defect_counts"] = assemble_replica_counts(normalized, 1)
+            maximum = sum(normalized["defect_counts"].values())
+            if count_mode == "balanced_count":
+                # A ceiling count occurs iff the requested prefix has at least one extra.
+                base = math.floor(expected)
+                replicas = normalized["replicas"]
+                maximum = base + int(_prefix_defects(expected, replicas) > base * replicas)
+            occupied = maximum * next((module["uc_count"] for module in defects.values()), 0)
+            if occupied > scatter_uc:
+                _fail(path, f"{label}: {maximum} defects occupy {occupied} UC, exceeding scatter_uc_count={scatter_uc}")
         assemble.plan(normalized, 0)
     except (OSError, ValueError, TypeError, KeyError) as exc:
         _fail(path, f"{label}: {exc}")
@@ -701,6 +755,24 @@ def validate_assemble_entry(entry, index, path, template):
     if normalized["self_energy_cache"] is not None:
         normalized["self_energy_cache"] = _validate_self_energy_cache(normalized["self_energy_cache"], f"{label}.self_energy_cache", path)
     return normalized
+
+
+def assemble_replica_counts(cfg, replica):
+    names = cfg["modules"]["defects"]
+    if "expected_defects_per_replica" in cfg:
+        expected = cfg["expected_defects_per_replica"]
+        if cfg["defect_count_mode"] == "balanced_count":
+            total = balanced_defect_count(expected, replica)
+            previous = _prefix_defects(expected, replica - 1)
+        else:
+            total = _same_count(cfg["_resolution"]["defect_density"], expected)
+            previous = (replica - 1) * total
+        if len(names) < 2:
+            return dict.fromkeys(names, total)
+        return balanced_module_counts(names, total, replica, previous_total=previous)
+    if cfg.get("defect_mix_mode") == "balanced_count":
+        return balanced_module_counts(names, cfg["total_defects"], replica)
+    return cfg["defect_counts"]
 
 
 def _validate_batch(raw, path):
@@ -1001,8 +1073,16 @@ def format_resolution_table(configs):
         resolution = cfg.get("_resolution") or {}
         if not resolution:
             continue
-        uc = cfg.get("uc_length_angstrom") or uc_length(cfg["m"], cfg["n"])
-        actual_length = cfg["l_def"] * uc
+        if "modules" in cfg:
+            uc = cfg["modules"]["perfect"]["length_angstrom"]
+            length_field = "scatter_uc_count"
+            count = sum(cfg["defect_counts"].values())
+        else:
+            uc = cfg.get("uc_length_angstrom") or uc_length(cfg["m"], cfg["n"])
+            length_field = "l_def"
+            count = cfg["N_defects"]
+        units = cfg[length_field]
+        actual_length = units * uc
         target_length = resolution.get("length_angstrom")
         target_density = resolution.get("defect_density")
         defect_count_mode = cfg.get("defect_count_mode", "same_count")
@@ -1026,29 +1106,29 @@ def format_resolution_table(configs):
                 f"{density_error(actual_density)}"
             )
         else:
-            actual_density = cfg["N_defects"] / actual_length
+            actual_density = count / actual_length
             density_text = (
                 f"密度 {target_density:.6f} Å^-1 -> "
-                f"same_count N_defects={cfg['N_defects']}, "
+                f"same_count N_defects={count}, "
                 f"实际 {actual_density:.6f} Å^-1 "
                 f"{density_error(actual_density)}"
                 if target_density is not None
-                else f"N_defects={cfg['N_defects']}（手写，{actual_density:.6f} Å^-1）"
+                else f"N_defects={count}（手写，{actual_density:.6f} Å^-1）"
             )
         rows.append(
             f"  ({cfg['m']},{cfg['n']}) UC={uc:.4f} Å: "
             + (
-                f"长度 {target_length:.1f} Å -> l_def={cfg['l_def']}, "
+                f"长度 {target_length:.1f} Å -> {length_field}={units}, "
                 f"实际 {actual_length:.1f} Å "
                 f"({(actual_length / target_length - 1) * 100:+.1f}%); "
                 if target_length is not None
-                else f"l_def={cfg['l_def']}（手写，{actual_length:.1f} Å）; "
+                else f"{length_field}={units}（手写，{actual_length:.1f} Å）; "
             )
             + density_text
         )
     if not rows:
         return None
-    header = "[INFO] Plan B 解析表（长度/密度 -> l_def/N_defects）:"
+    header = "[INFO] Plan B 解析表（目标长度/密度及对应的 UC 数/缺陷数）:"
     return "\n".join([header, *rows])
 
 
