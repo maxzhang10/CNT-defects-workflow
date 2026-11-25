@@ -1,13 +1,16 @@
 """Compute and report the band gap of this replica via the Python API."""
 
+import argparse
 import json
 from pathlib import Path
 
 from dpnegf.runner.cal_bandgap import BandGapCalculator
 
 HERE = Path(__file__).resolve().parent
-CHECKPOINT = HERE / "model.pth"
-STRUCTURE = HERE / "structure.xyz"
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument("--model", type=Path, required=True)
+parser.add_argument("--structure", type=Path, required=True)
+args = parser.parse_args()
 RESULTS = HERE / "output/results"
 NEL_ATOM = {"C": 4.0}  # Generated per replica from the XYZ and input template.
 
@@ -18,8 +21,8 @@ task_options["occupation_options"]["nel_atom"] = NEL_ATOM
 task_options.setdefault("cache_options", {}).setdefault("path", str(RESULTS / "hs_blocks.npz"))
 
 calculator = BandGapCalculator(
-    structure=str(STRUCTURE),
-    checkpoint=str(CHECKPOINT),
+    structure=str(HERE / args.structure),
+    checkpoint=str(HERE / args.model),
     dtype=settings["dtype"],
     task_options=task_options,
     results_path=str(RESULTS),

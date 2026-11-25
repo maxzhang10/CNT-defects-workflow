@@ -1,5 +1,6 @@
 import json
 import runpy
+import shlex
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -21,7 +22,20 @@ from dump2fdf_batch import write_siesta_fdf
 from fdf2xyz import parse_struct_fdf
 
 
-def test_scattering_replica_generation_and_handoff(tmp_path, monkeypatch):
+@pytest.fixture
+def model_link_support(tmp_path):
+    if sys.platform == "win32":
+        probe = tmp_path / "symlink_probe"
+        try:
+            probe.symlink_to(tmp_path / "target.pth")
+        except OSError as exc:
+            if exc.winerror == 1314:
+                pytest.skip("Windows account lacks the file symlink privilege")
+            raise
+        probe.unlink()
+
+
+def test_scattering_replica_generation_and_handoff(tmp_path, monkeypatch, request):
     batch_path = tmp_path / "batch.py"
     batch_path.write_text(
         'geometry_mode = "scattering_only"\ntemperatures = [300]\n'
@@ -74,6 +88,7 @@ def test_scattering_replica_generation_and_handoff(tmp_path, monkeypatch):
         split_workflow.load_manifest(tmp_path, imported=True)
 
     # Run the B batch entry twice with a stand-in for the CPU Slurm job.
+    request.getfixturevalue("model_link_support")
     templates = tmp_path / "software/input_files/cpu_cluster/band_gap"
     templates.mkdir(parents=True)
     template = ROOT / "input_files/cpu_cluster/band_gap"
@@ -83,8 +98,9 @@ def test_scattering_replica_generation_and_handoff(tmp_path, monkeypatch):
     jobs = []
     def submit(leaf, **kwargs):
         jobs.append(leaf)
-        assert (leaf / "model.pth").read_bytes() == b"test checkpoint"
-        assert (leaf / "structure.xyz").read_bytes() == (run / "dpnegf/5_5.xyz").read_bytes()
+        link = leaf / "electronic.pth"
+        assert link.is_symlink() and link.samefile(templates / "electronic.pth")
+        assert (leaf / "5_5.xyz").read_bytes() == (run / "dpnegf/5_5.xyz").read_bytes()
         expected = json.loads((template / "input.json").read_bytes())
         expected["task_options"]["occupation_options"]["nel_atom"]["H"] = 1.0
         assert json.loads((leaf / "input.json").read_bytes()) == expected
@@ -103,17 +119,21 @@ def test_scattering_replica_generation_and_handoff(tmp_path, monkeypatch):
     assert batch_generate.main() == 1
 
 
-def test_band_gap_pure_carbon_keeps_template(tmp_path):
+def test_band_gap_pure_carbon_keeps_template(tmp_path, monkeypatch):
     templates = tmp_path / "templates"
     templates.mkdir()
     options = {"task_options": {"occupation_options": {"nel_atom": {"C": 4.0}, "charge": 2}}}
     (templates / "input.json").write_text(json.dumps(options))
     (templates / "run.py").write_bytes((ROOT / "input_files/cpu_cluster/band_gap/run.py").read_bytes())
-    (templates / "run.sh").touch()
+    (templates / "run.sh").write_bytes((ROOT / "input_files/cpu_cluster/band_gap/run.sh").read_bytes())
     (templates / "test.pth").touch()
     xyz = tmp_path / "5_5.xyz"
     xyz.write_text('1\nProperties=species:S:1:pos:R:3\nC 0 0 0\n')
     leaf = tmp_path / "final"
+    # This input-generation test also runs on hosts without symlink privileges.
+    def verify_model_link(link, target):
+        assert link.name == "test.pth" and target == templates / "test.pth"
+    monkeypatch.setattr(Path, "symlink_to", verify_model_link)
     band_gap.prepare_inputs(leaf, xyz, templates)
     assert json.loads((leaf / "input.json").read_bytes()) == options
     assert "NEL_ATOM = {'C': 4.0}\n" in (leaf / "run.py").read_text()
@@ -123,17 +143,23 @@ def test_band_gap_python_api_receives_replica_options(tmp_path, monkeypatch, cap
     template = ROOT / "input_files/cpu_cluster/band_gap"
     for name in ("run.py", "run.sh", "input.json"):
         (tmp_path / name).write_bytes((template / name).read_bytes())
-    (tmp_path / "electronic.pth").touch()
-    xyz = tmp_path / "source.xyz"
+    model = tmp_path / "CNT's model.pth"
+    model.touch()
+    xyz = tmp_path / "8_2.xyz"
     xyz.write_text("2\n\nC 0 0 0\nH 0 0 1\n")
     leaf = tmp_path / "replica"
+    def verify_model_link(link, target):
+        assert link.name == model.name and target == model
+    monkeypatch.setattr(Path, "symlink_to", verify_model_link)
     band_gap.prepare_inputs(leaf, xyz, tmp_path)
-    assert "python -u run.py" in (leaf / "run.sh").read_text()
+    cmd, = [shlex.split(line) for line in (leaf / "run.sh").read_text().splitlines()
+            if line.startswith("python -u run.py")]
+    assert cmd == ["python", "-u", "run.py", "--model", "./" + model.name, "--structure", "./8_2.xyz"]
     assert "NEL_ATOM = {'C': 4.0, 'H': 1.0}\n" in (leaf / "run.py").read_text()
 
     def calculator(**kwargs):
-        assert Path(kwargs["checkpoint"]) == leaf / "model.pth"
-        assert Path(kwargs["structure"]) == leaf / "structure.xyz"
+        assert Path(kwargs["checkpoint"]) == leaf / model.name
+        assert Path(kwargs["structure"]) == leaf / xyz.name
         assert Path(kwargs["results_path"]) == leaf / "output/results"
         expected = json.loads((leaf / "input.json").read_bytes())["task_options"]
         expected.pop("task")
@@ -148,6 +174,7 @@ def test_band_gap_python_api_receives_replica_options(tmp_path, monkeypatch, cap
 
     monkeypatch.setitem(sys.modules, "dpnegf.runner.cal_bandgap",
                         SimpleNamespace(BandGapCalculator=calculator))
+    monkeypatch.setattr(sys, "argv", cmd[2:])
     runpy.run_path(str(leaf / "run.py"))
     assert "signed gap       : 1.0000 eV" in capsys.readouterr().out
 

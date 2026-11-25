@@ -13,6 +13,6 @@ if [[ -n "${CNT_BAND_GAP_SETUP:-}" ]]; then
 fi
 export OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK:-${OMP_NUM_THREADS:-1}}"
 export OPENBLAS_NUM_THREADS="$OMP_NUM_THREADS"
-python -u run.py
+python -u run.py __BAND_GAP_INPUTS__
 test -s output/results/gap.json
 touch band_gap_done.flag

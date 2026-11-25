@@ -278,12 +278,13 @@ def copy_or_link_file(src: Path, dst: Path, overwrite: bool = True):
     overwrite=True 时：
         如果目标已存在或是坏软链，先删除再重新创建。
     """
+    is_model = src.suffix == ".pth"
     src = src.resolve()
 
     if overwrite and (dst.exists() or dst.is_symlink()):
         dst.unlink()
 
-    if src.suffix == ".pth":
+    if is_model:
         dst.symlink_to(src)
         L.debug(f"软链接模型: {dst} -> {src}")
     else:
@@ -309,7 +310,7 @@ def collect_input_files(input_dir: Path, files_to_copy, model_file=None):
             raise FileNotFoundError(f"源文件不存在：{src}")
         input_files.append(src)
 
-    model_files = sorted(input_dir.glob("*.pth"))
+    model_files = sorted(path for path in input_dir.glob("*.pth") if path.is_file())
 
     if len(model_files) == 0:
         raise FileNotFoundError(f"未在 input_dir 中找到 .pth 模型文件：{input_dir}")
@@ -318,14 +319,13 @@ def collect_input_files(input_dir: Path, files_to_copy, model_file=None):
         selected_model = input_dir / model_file
         if not selected_model.is_file():
             raise FileNotFoundError(f"指定的模型文件不存在：{selected_model}")
-        selected_model = selected_model.resolve()
     else:
         if len(model_files) > 1:
             names = "\n".join(f"  {p.name}" for p in model_files)
             raise ValueError(
                 f"input_dir 中找到多个 .pth 模型文件，请用 --model-file 指定一个：\n{names}"
             )
-        selected_model = model_files[0].resolve()
+        selected_model = model_files[0]
 
     input_files.extend(model_files)
 
