@@ -15,7 +15,7 @@ import logkit as L
 from slurm_utils import SlurmQueryError, wait_for_jobs, check_flags, get_stage_state
 from negf_provenance import result_is_readable
 import cnt_geometry
-from geometry_mode import geometry_mode
+from geometry_mode import geometry_mode, uses_aligned_5775
 from cluster_inputs import input_directory, validate_templates
 
 def run_cmd(cmd, dry_run=False, env=None, cwd=None):
@@ -718,6 +718,11 @@ def main():
                 saved.get("target_defect_density_A_inv") != config.get("target_defect_density_A_inv")
             ):
                 raise ValueError(f"已有 LAMMPS 结构的缺陷布局或目标浓度与配置不符: {root}")
+            if uses_aligned_5775(config) and config["N_defects"] > 1:
+                records = saved.get("defect_log", [])
+                ranks = {record.get("neighbor_rank") for record in records}
+                if len(records) != config["N_defects"] or len(ranks) != 1 or not ranks <= {0, 1, 2}:
+                    raise ValueError(f"已有多 5775 结构缺少一致的近邻序号记录，请使用新目录生成: {root}")
             L.skip('Resume existing LAMMPS inputs')
         else:
             if run_lammps:

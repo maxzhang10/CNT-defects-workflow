@@ -13,3 +13,9 @@ def geometry_mode(config, phase=None):
     elif phase == "band_gap":
         raise ValueError("--phase band_gap 需要 geometry_mode=scattering_only 的交付结构")
     return mode
+
+
+def uses_aligned_5775(config):
+    return (config.get("geometry_mode") == "scattering_only"
+            and config.get("defect_layout") == "equidistant"
+            and set(config.get("structures", ())) == {"5775"})

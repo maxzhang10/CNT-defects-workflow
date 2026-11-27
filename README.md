@@ -24,6 +24,8 @@ CHIRAL_CONFIGS = [
 
 对长度 `L`、缺陷数 `N`，第 `i` 个目标中心在 `i × L / (N + 1)`。程序在各等分点附近寻找实际碳位点，优先让锚点的周向角集中，再减小轴向偏差。保留 1.42 Å 端部边距、4.26 Å 最小中心间距和配置的角度范围。离散位点无法完成布局时会报错。目标位置与实际锚点分别写入 `defects.json` 的 `target_z_angstrom` 和 `defect_log`。
 
+仅填浓度且缺陷类型只有 `5775` 时，每个 replica 用自己的结构 seed 选一次 C 近邻序号（按距离排序，取 0、1 或 2）。全部锚点共用该序号，并检查所选 C–C 键在展开管面上属于同一取向。若当前锚点没有同时满足两项要求的序号，生成时会报错。`defects.json` 的每条缺陷记录包含 `neighbor_rank`、从 1 开始的 `neighbor_index` 和旋转前的 `bond_angle_deg`（从 +z 朝周向测量，按 180° 等价）。
+
 ### 在 CPU 集群计算纯散射区能带
 
 1. A 集群使用 `geometry_mode="scattering_only"` 和 `BATCH_PHASE="lammps"`。按现有方式传输 `transfer_manifest.json` 及其列出的文件。

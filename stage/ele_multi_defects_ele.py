@@ -12,7 +12,7 @@ import exporters
 import lammps_io
 import logkit as L
 from defect_angles import normalize_angle_range
-from geometry_mode import geometry_mode
+from geometry_mode import geometry_mode, uses_aligned_5775
 
 
 def multi_defects_ele(tube, coords, type_list, seed=None):
@@ -49,6 +49,39 @@ def multi_defects_ele(tube, coords, type_list, seed=None):
         })
 
     return new_tube, defect_log
+
+
+def aligned_5775_defects(tube, coords, indices, seed):
+    if not indices:
+        return tube.copy(), []
+
+    # Plan all rotations on the pristine tube. SW rotations preserve atom indices.
+    cyl = cnt_geometry.tube_to_cyl(tube)
+    neighbors = np.array([[j for _, j in defects.find_nearest(tube, i)] for i in indices])
+    centers = np.asarray(indices)[:, None] - 1
+    arc = cnt_geometry.R0 * cnt_geometry.wrap_to_pi(cyl["theta"][neighbors] - cyl["theta"][centers])
+    dz = cyl["z"][neighbors] - cyl["z"][centers]
+    angles = np.arctan2(arc, dz) % np.pi  # undirected bond in the unrolled tube
+
+    # Distance ranks can exchange places for nearly equal C–C lengths.
+    # Keep ranks that select the same bond family as at the first anchor.
+    eligible = []
+    for rank, reference in enumerate(angles[0]):
+        alignment = np.abs(np.cos(angles - reference))
+        if np.all(np.argmax(alignment, axis=1) == rank):
+            eligible.append(rank)
+    if not eligible:
+        raise ValueError("这些等分点的三个 C 近邻序号都无法在全部 5775 缺陷上保持同一键取向")
+    rank = int(np.random.default_rng(seed).choice(eligible))
+    result = tube
+    defect_log = []
+    for row, (center, (theta, z)) in enumerate(zip(indices, coords)):
+        partner = int(neighbors[row, rank]) + 1
+        result = defects.add_57(result, center, partner)
+        defect_log.append(dict(no=row + 1, type="5775", theta=theta, z=z,
+                               index_when_created=center, neighbor_rank=rank,
+                               neighbor_index=partner, bond_angle_deg=float(np.rad2deg(angles[row, rank]))))
+    return result, defect_log
 
 
 def generate_defect_coords(
@@ -412,12 +445,14 @@ def main():
 
     type_list = list(config["structures"])
 
-    tube_multi_defects, defect_log = multi_defects_ele(
-        tube,
-        defects_coord_ind,
-        type_list,
-        seed=seed,
-    )
+    if uses_aligned_5775(config):
+        tube_multi_defects, defect_log = aligned_5775_defects(
+            tube, defects_coord_ind, pristine_indices, seed,
+        )
+    else:
+        tube_multi_defects, defect_log = multi_defects_ele(
+            tube, defects_coord_ind, type_list, seed=seed,
+        )
 
     L.info("实际生成缺陷记录：")
     for item in defect_log:

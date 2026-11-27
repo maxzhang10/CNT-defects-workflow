@@ -22,6 +22,44 @@ from dump2fdf_batch import write_siesta_fdf
 from fdf2xyz import parse_struct_fdf
 
 
+def test_density_only_5775_reuses_rank_and_direction(tmp_path, monkeypatch):
+    config = dict(chirality=[16, 2], geometry_mode="scattering_only", defect_density=0.18,
+                  structures=["5775"], seed=20261112, temperature=300, r_max=6.5,
+                  structure_root=str(tmp_path), lammps_seed=1, md_steps=0)
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps(config), encoding="utf-8")
+    monkeypatch.setenv("CNT_CONFIG", str(path))
+    monkeypatch.setenv("CNT_STRUCTURE_ROOT", str(tmp_path))
+    generator.main()
+    records = json.loads((tmp_path / "defects.json").read_text(encoding="utf-8"))["defect_log"]
+    assert len(records) > 1
+    assert len({r["neighbor_rank"] for r in records}) == 1
+    angles = np.deg2rad([r["bond_angle_deg"] for r in records])
+    np.testing.assert_allclose(abs(np.cos(angles - angles[0])), 1, atol=1e-9)
+
+    geometry = generator.cnt_geometry
+    units = batch_config.resolve_scattering_config(config)["l_def"]
+    expected = geometry.clean_cnt_by_shift_wrap_anchor(
+        geometry.build_unit_cnt(16, 2, vacuum=10.0)) * (1, 1, units)
+    geometry.set_reference_cyl(expected)
+    for r in records:
+        center, rank = r["index_when_created"], r["neighbor_rank"]
+        assert generator.defects.find_nearest(expected, center)[rank][1] + 1 == r["neighbor_index"]
+        expected = generator.defects.CNT_5775(expected, center, neighbor_rank=rank)
+    np.testing.assert_allclose(read(tmp_path / "lammps/POSCAR").positions, expected.positions, atol=1e-7)
+    generator.main()
+    assert json.loads((tmp_path / "defects.json").read_text(encoding="utf-8"))["defect_log"] == records
+
+
+@pytest.mark.parametrize("overrides", [
+    {"structures": ["MVH", "5775"]}, {"structures": ["DV"]},
+    {"defect_layout": None}, {"geometry_mode": "with_electrodes"},
+])
+def test_shared_5775_rank_scope(overrides):
+    config = dict(geometry_mode="scattering_only", defect_layout="equidistant", structures=["5775"])
+    assert not generator.uses_aligned_5775({**config, **overrides})
+
+
 @pytest.mark.parametrize("density", [0, 0.012, 0.04, 0.065])
 def test_density_only_uses_smallest_scattering_supercell(tmp_path, monkeypatch, density):
     path = tmp_path / "batch.json"
