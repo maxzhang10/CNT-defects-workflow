@@ -200,6 +200,8 @@ def build_tasks(batch, base_root):
                 density=configuration_density,
                 uc_sha256=cfg.get("uc_sha256"),
             )
+            if cfg.get("defect_layout") == "equidistant":
+                folder_name += f"_equidistant_{target_density}"
 
             # 每个 replica 使用独立的缺陷结构 seed，
             # 实现缺陷位置的随机采样。
@@ -282,6 +284,7 @@ def build_tasks(batch, base_root):
                     "uc_sha256": cfg.get("uc_sha256"),
                     "defect_count_mode": defect_count_mode,
                     "target_defect_density": target_density,
+                    "defect_layout": cfg.get("defect_layout"),
                     "expected_defects_per_replica": expected_defects,
                     "actual_density": actual_density,
                     "ensemble_total_defects": ensemble_total_defects,
@@ -398,6 +401,9 @@ def make_task_config(task, batch):
     # 缺省模式沿用旧配置格式，历史 replica 可以继续断点续跑。
     if batch.get("geometry_mode") == "scattering_only":
         config["geometry_mode"] = "scattering_only"
+        if task.get("defect_layout") == "equidistant":
+            config["defect_layout"] = "equidistant"
+            config["target_defect_density_A_inv"] = task["target_defect_density"]
 
     # conductance_options.mu 只写入字符串标签（非数值）：
     #   fermi          -> ["Ef"]      （以费米能级为化学势）

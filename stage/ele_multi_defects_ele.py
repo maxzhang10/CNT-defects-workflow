@@ -177,6 +177,60 @@ def far_enough_from_existing(candidate, existing_coords, min_sep):
     return True
 
 
+def equidistant_defect_coords(tube, count, length, angle_range, edge_margin, min_sep, seed):
+    """Snap the interior division points to carbon sites near a common azimuth."""
+    if count == 0:
+        return [], []
+    start, end = normalize_angle_range(angle_range)
+    cyl = cnt_geometry.tube_to_cyl(tube)
+    theta, z = cyl["theta"], cyl["z"]
+    allowed = (tube.numbers == 6) & (z >= edge_margin) & (z <= length - edge_margin)
+    if end - start < 360:
+        allowed &= (np.rad2deg(theta) - start) % 360 <= end - start
+    if count > np.count_nonzero(allowed):
+        raise ValueError(f"角度和边距范围内可用的碳位点不足 {count} 个")
+
+    step = length / (count + 1)
+    targets = step * np.arange(1, count + 1)
+    groups = []
+    for target in targets:
+        dz = np.abs(z - target)
+        # Give each division point its own axial interval. Prefer sites within
+        # one C–C bond of the ideal z, or the nearest layer in a sparse sector.
+        sites = np.flatnonzero(allowed & (dz <= step / 2))
+        if not len(sites):
+            raise ValueError(f"等分点 z={target:.4f} Å 附近没有满足角度和边距的碳位点")
+        cutoff = max(1.42, dz[sites].min()) + 1e-9
+        groups.append(sites[dz[sites] <= cutoff])
+
+    best_indices = None
+    best_score = None
+    for first in np.random.default_rng(seed).permutation(groups[0]):
+        chosen = [first]
+        for sites, target in zip(groups[1:], targets[1:]):
+            for prev in reversed(chosen):
+                # Axial minimum image includes the two ends of the supercell.
+                dz = np.abs(z[sites] - z[prev])
+                dz = np.minimum(dz, length - dz)
+                arc = cnt_geometry.R0 * cnt_geometry.wrap_to_pi(theta[sites] - theta[prev])
+                sites = sites[arc**2 + dz**2 >= min_sep**2 - 1e-10]
+            if not len(sites):
+                break
+            angles = np.abs(cnt_geometry.wrap_to_pi(theta[sites] - theta[first]))
+            order = np.lexsort((np.abs(z[sites] - target), angles.round(10)))
+            chosen.append(sites[order[0]])
+        if len(chosen) == count:
+            angles = np.sort(theta[chosen] % (2 * np.pi))
+            gaps = np.diff(angles, append=angles[0] + 2 * np.pi)
+            span = 2 * np.pi - gaps.max()
+            score = (round(span, 10), round(float(np.sum((z[chosen] - targets)**2)), 10))
+            if best_score is None or score < best_score:
+                best_indices, best_score = chosen, score
+    if best_indices is None:
+        raise ValueError(f"无法在 {count} 个等分点附近以至少 {min_sep} Å 的间距放置缺陷")
+    return [[float(theta[i]), float(z[i])] for i in best_indices], [int(i + 1) for i in best_indices]
+
+
 def load_config(config_path=None):
     if config_path is None:
         config_path = os.environ.get("CNT_CONFIG", "../config.json")
@@ -243,6 +297,9 @@ def main_assemble(config):
 def main():
     config = load_config()
     scattering_only = geometry_mode(config) == "scattering_only"
+    if scattering_only and "defect_density" in config:
+        from batch_config import resolve_scattering_config
+        config = resolve_scattering_config(config)
     if config.get("structure_mode") == "assemble":
         main_assemble(config)
         return
@@ -317,21 +374,18 @@ def main():
     min_defect_sep = 4.26
     edge_margin = 1.42
 
-    defects_coord_ind, pristine_indices = generate_defect_coords(
-        tube=tube,
-        N=N,
-        T=T,
-        l_PL=l_PL,
-        l_def=l_def,
-        m=m,
-        n=n,
-        min_sep=min_defect_sep,
-        edge_margin=edge_margin,
-        seed=seed,
-        buffer_pl=buffer_pl,
-        defect_angle_range_deg=config.get("defect_angle_range_deg", [0, 360]),
-        scattering_only=scattering_only,
-    )
+    angle_range = config.get("defect_angle_range_deg", [0, 360])
+    equidistant = scattering_only and config.get("defect_layout") == "equidistant"
+    if equidistant:
+        defects_coord_ind, pristine_indices = equidistant_defect_coords(
+            tube, N, l_def * T, angle_range, edge_margin, min_defect_sep, seed,
+        )
+    else:
+        defects_coord_ind, pristine_indices = generate_defect_coords(
+            tube, N, T, l_PL, l_def, m, n, min_sep=min_defect_sep,
+            edge_margin=edge_margin, seed=seed, buffer_pl=buffer_pl,
+            defect_angle_range_deg=angle_range, scattering_only=scattering_only,
+        )
 
     density = len(defects_coord_ind) / (l_def * T)
 
@@ -381,6 +435,8 @@ def main():
         f"_L{l_def:03d}"
         f"_{density:.4f}A-1"
     )
+    if equidistant:
+        folder_name += f"_equidistant_{config['target_defect_density_A_inv']}"
 
     structures = {
         folder_name: tube_multi_defects,
@@ -437,6 +493,10 @@ def main():
     defects_json_path = structure_root / "defects.json"
     if scattering_only:
         defects_meta["geometry_mode"] = "scattering_only"
+    if equidistant:
+        defects_meta.update(defect_layout="equidistant", l_def=l_def,
+                            length_angstrom=l_def * T,
+                            target_z_angstrom=[i * l_def * T / (N + 1) for i in range(1, N + 1)])
     with open(defects_json_path, "w", encoding="utf-8") as f:
         json.dump(defects_meta, f, indent=2, ensure_ascii=False)
     L.info(f"defects.json -> {defects_json_path}")

@@ -552,6 +552,9 @@ def main():
     with open(config_path, "r", encoding="utf-8") as f:
         config = json.load(f)
     scattering_only = geometry_mode(config, args.phase) == "scattering_only"
+    if scattering_only and "defect_density" in config:
+        from batch_config import resolve_scattering_config
+        config = resolve_scattering_config(config)
 
     if args.phase == 'band_gap':
         from band_gap import run_replica
@@ -710,6 +713,11 @@ def main():
             saved = json.loads(metadata.read_text(encoding="utf-8")) if metadata.is_file() else {}
             if geometry_mode(saved) != geometry_mode(config):
                 raise ValueError(f"已有 LAMMPS 结构的 geometry_mode 与配置不符: {root}")
+            if saved.get("defect_layout") != config.get("defect_layout") or (
+                config.get("defect_layout") == "equidistant" and
+                saved.get("target_defect_density_A_inv") != config.get("target_defect_density_A_inv")
+            ):
+                raise ValueError(f"已有 LAMMPS 结构的缺陷布局或目标浓度与配置不符: {root}")
             L.skip('Resume existing LAMMPS inputs')
         else:
             if run_lammps:

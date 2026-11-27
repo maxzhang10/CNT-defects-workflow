@@ -10,6 +10,20 @@
 
 纯散射管包含 `l_def` 个原胞，缺陷在整段内按原有边距与间距采样。MD 或优化时所有原子均可运动，末帧 FDF 和 XYZ 保留相同原子顺序。XYZ 的晶格后写入 `Properties=species:S:1:pos:R:3 pbc="F F T"`。该模式支持常规缺陷生成，末帧可以交给 CPU 集群的 `band_gap` 阶段。
 
+### 纯散射区按浓度自动选长度
+
+在 `geometry_mode = "scattering_only"` 下，只填线密度 `defect_density`（Å⁻¹），省略 `l_def`、`length_angstrom` 和 `N_defects`。例如在批配置中使用
+
+```python
+CHIRAL_CONFIGS = [
+    dict(m=10, n=3, defect_density=0.04, structures=["MVH"], replicas=1),
+]
+```
+
+每根管单独满足目标密度的 ±20%。以实际单胞周期 `T` 计算 `N / (l_def × T)`，先选最少缺陷数，同一缺陷数下选最短整数单胞长度。外部 `uc_file` 使用 POSCAR 中的轴向周期。零浓度生成一个原胞的完整管。
+
+对长度 `L`、缺陷数 `N`，第 `i` 个目标中心在 `i × L / (N + 1)`。程序在各等分点附近寻找实际碳位点，优先让锚点的周向角集中，再减小轴向偏差。保留 1.42 Å 端部边距、4.26 Å 最小中心间距和配置的角度范围。离散位点无法完成布局时会报错。目标位置与实际锚点分别写入 `defects.json` 的 `target_z_angstrom` 和 `defect_log`。
+
 ### 在 CPU 集群计算纯散射区能带
 
 1. A 集群使用 `geometry_mode="scattering_only"` 和 `BATCH_PHASE="lammps"`。按现有方式传输 `transfer_manifest.json` 及其列出的文件。
@@ -156,7 +170,7 @@ python batch_generate.py --config batch.py --pool-status
 
 说明：
 
-- `chirality`、`structures`、`replicas` 是每个配置的必需字段；长度维度必须从 `l_def` / `length_angstrom` 中选择一个，缺陷维度必须从 `N_defects` / `defect_density` 中选择一个；
+- `chirality`、`structures`、`replicas` 是每个配置的必需字段。除上述纯散射区自动长度接口外，长度从 `l_def` / `length_angstrom` 中选择一个，缺陷从 `N_defects` / `defect_density` 中选择一个；
 - `buffer_pl` 是每侧缓冲层厚度，单位为 PL，可在每个 `configs` 配置中单独指定；省略时沿用按手性选择的默认值（金属管 2 PL，半导体管 4 PL）；
 - `lammps_mode` 为 `opt`（结构优化）或 `md`（分子动力学）；
 - `N_defects` 或 `defect_density` 可以设为 0，生成无缺陷管。使用 `defect_density` 时，`defect_count_mode` 可设为 `same_count` 或 `balanced_count`。`same_count` 在密度为正时保持至少 1 个缺陷；`balanced_count` 在相邻两个整数间分配，使 replica 的平均密度逼近目标值；

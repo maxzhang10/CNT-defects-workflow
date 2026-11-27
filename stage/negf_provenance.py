@@ -43,6 +43,7 @@ NEGF_CONFIG_KEYS = (
     "uc_sha256",
     "l_def",
     "N_defects",
+    "defect_layout",
     "structures",
     "seed",
     "seed_scheme",

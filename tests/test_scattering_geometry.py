@@ -22,6 +22,71 @@ from dump2fdf_batch import write_siesta_fdf
 from fdf2xyz import parse_struct_fdf
 
 
+@pytest.mark.parametrize("density", [0, 0.012, 0.04, 0.065])
+def test_density_only_uses_smallest_scattering_supercell(tmp_path, monkeypatch, density):
+    path = tmp_path / "batch.json"
+    entry = dict(m=10, n=3, defect_density=density, structures=["DV"], replicas=2)
+    path.write_text(json.dumps(dict(geometry_mode="scattering_only", temperatures=[300],
+                                    template=dict(md_steps=0, defect_count_mode="balanced_count"),
+                                    configs=[entry])), encoding="utf-8")
+    batch = batch_config.load(path)
+    first, second = batch_generate.build_tasks(batch, tmp_path)
+    config = batch_generate.make_task_config(first, batch)
+    period = first["T"]
+    pairs = [(count, units) for count in range(6) for units in range(1, 12)
+             if abs(count / (units * period) - density) <= density * 0.2]
+    count, units = min(pairs)
+    assert (config["N_defects"], config["l_def"]) == (count, units)
+    assert (second["N_defects"], second["l_def"]) == (count, units)
+    root = first["run_root"]
+    root.mkdir(parents=True)
+    config_path = root / "workflow_config.json"
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+    monkeypatch.setenv("CNT_CONFIG", str(config_path))
+    monkeypatch.setenv("CNT_STRUCTURE_ROOT", str(root))
+    generator.main()
+    meta = json.loads((root / "defects.json").read_text(encoding="utf-8"))
+    assert meta["target_defect_density_A_inv"] == density
+    assert meta["actual_density_A_inv"] == pytest.approx(count / (units * period))
+    targets = np.arange(1, count + 1) * units * period / (count + 1)
+    np.testing.assert_allclose(meta["target_z_angstrom"], targets)
+    np.testing.assert_allclose([d["z"] for d in meta["defect_log"]], targets, atol=1.42)
+    assert len(read(root / "lammps/POSCAR")) == units * first["N_uc"] - 2 * count
+
+
+def test_equal_angles_and_exact_thirds_when_lattice_allows():
+    geometry = generator.cnt_geometry
+    cell = geometry.clean_cnt_by_shift_wrap_anchor(geometry.build_unit_cnt(8, 2))
+    tube = cell * (1, 1, 6)
+    geometry.set_reference_cyl(tube)
+    length = tube.cell[2, 2]
+    coords, indices = generator.equidistant_defect_coords(tube, 2, length, [330, 390], 1.42, 4.26, 41)
+    assert len(set(indices)) == 2
+    angles, positions = np.array(coords).T
+    np.testing.assert_allclose(positions, [length / 3, 2 * length / 3], atol=1e-8)
+    assert angles[0] == pytest.approx(angles[1])
+    assert all((np.rad2deg(angles) - 330) % 360 <= 60)
+
+
+def test_density_only_single_run_uses_external_period(tmp_path, monkeypatch):
+    uc = ROOT / "input_files/uc_POSCAR/8_2/POSCAR"
+    period = batch_config.read_poscar_metadata(uc)["length_angstrom"]
+    # At the upper (inclusive) density bound, one defect in three UCs suffices.
+    density = 1 / (3 * period * 1.2)
+    config = dict(chirality=[8, 2], uc_file=str(uc), geometry_mode="scattering_only",
+                  defect_density=density, structures=["MVH"], r_max=6.5,
+                  structure_root=str(tmp_path), temperature=300, lammps_seed=42, md_steps=0)
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps(config), encoding="utf-8")
+    monkeypatch.setenv("CNT_CONFIG", str(path))
+    monkeypatch.setenv("CNT_STRUCTURE_ROOT", str(tmp_path))
+    generator.main()
+    meta = json.loads((tmp_path / "defects.json").read_text(encoding="utf-8"))
+    assert (meta["l_def"], meta["N_defects"]) == (3, 1)
+    assert meta["length_angstrom"] == pytest.approx(3 * period)
+    assert meta["actual_density_A_inv"] == pytest.approx(density * 1.2)
+
+
 @pytest.fixture
 def model_link_support(tmp_path):
     if sys.platform == "win32":

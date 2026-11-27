@@ -244,6 +244,37 @@ def _same_count(density, expected):
     return 0 if density == 0 else max(1, _round_positive(expected))
 
 
+def scattering_dimensions(density, uc):
+    """Return the fewest defects, then shortest integer-UC tube within ±20%."""
+    if density == 0:
+        return 1, 0
+    # A positive count needs room for the two 1.42 Å edge margins.
+    min_units = max(1, math.ceil(2.84 / uc))
+    low, high = 0.8 * density * uc, 1.2 * density * uc
+    count = max(1, math.ceil(math.nextafter(low * min_units, -math.inf)))
+    while True:
+        units = max(min_units, math.ceil(math.nextafter(count / high, -math.inf)))
+        if count >= math.nextafter(low * units, -math.inf):
+            return units, count
+        count += 1
+
+
+def resolve_scattering_config(config):
+    """Resolve a density-only single-run JSON using the same rule as a batch."""
+    if 'defect_density' not in config or 'l_def' in config or 'length_angstrom' in config:
+        return config
+    if geometry_mode(config) != 'scattering_only' or 'N_defects' in config:
+        raise ValueError("仅给 defect_density 时需要 scattering_only，并应省略 N_defects")
+    if config.get('defect_count_mode') == 'balanced_count':
+        raise ValueError("自动长度模式要求每个 replica 独立满足目标浓度，请使用 same_count")
+    density = _target_density(config['defect_density'], 'defect_density', 'config')
+    uc = (read_poscar_metadata(config["uc_file"])["length_angstrom"] if config.get("uc_file")
+          else uc_length(*config["chirality"]))
+    units, count = scattering_dimensions(density, uc)
+    return dict(config, l_def=units, N_defects=count, defect_layout="equidistant",
+                target_defect_density_A_inv=density)
+
+
 def _require_positive_finite(value, name, path):
     """Plan B 目标值（length_angstrom / defect_density）为有限正数。"""
     if (
@@ -354,6 +385,7 @@ def validate_config_entry(
     path,
     default_defect_count_mode="same_count",
     default_uc_file=None,
+    scattering_only=False,
 ):
     """校验单个物理配置条目，返回补齐 chirality 后的新 dict。"""
     if not isinstance(entry, dict):
@@ -389,7 +421,8 @@ def validate_config_entry(
     # 缺陷维度 N_defects / defect_density 二选一，可跨维度混搭。
     has_l_def = "l_def" in entry
     has_length = "length_angstrom" in entry
-    if has_l_def == has_length:
+    auto_length = scattering_only and "defect_density" in entry and not (has_l_def or has_length)
+    if has_l_def == has_length and not auto_length:
         _fail(
             path,
             f"configs[{index}] 长度维度必须且只能提供 "
@@ -414,7 +447,11 @@ def validate_config_entry(
             path,
         )
 
-    if has_n_defects:
+    if auto_length:
+        if entry_defect_count_mode == "balanced_count":
+            _fail(path, "自动长度模式要求每个 replica 独立满足目标浓度，请使用 same_count")
+        defect_count_mode = "same_count"
+    elif has_n_defects:
         if entry_defect_count_mode == "balanced_count":
             _fail(
                 path,
@@ -456,7 +493,11 @@ def validate_config_entry(
     else:
         uc = uc_length(m, n)
 
-    if has_length:
+    if auto_length:
+        target_density = _target_density(entry["defect_density"], f"configs[{index}].defect_density", path)
+        l_def, n_defects = scattering_dimensions(target_density, uc)
+        resolution["defect_density"] = target_density
+    elif has_length:
         target_length = _require_positive_finite(
             entry["length_angstrom"], f"configs[{index}].length_angstrom", path
         )
@@ -466,7 +507,7 @@ def validate_config_entry(
         l_def = _require_int(entry["l_def"], f"configs[{index}].l_def", path)
 
     actual_length = l_def * uc
-    if has_density:
+    if has_density and not auto_length:
         target_density = _target_density(entry["defect_density"], f"configs[{index}].defect_density", path)
         expected_defects = target_density * actual_length
         if defect_count_mode == "balanced_count":
@@ -476,7 +517,7 @@ def validate_config_entry(
         else:
             n_defects = _same_count(target_density, expected_defects)
         resolution["defect_density"] = target_density
-    else:
+    elif not auto_length:
         n_defects = _require_int(
             entry["N_defects"], f"configs[{index}].N_defects", path, minimum=0
         )
@@ -522,6 +563,8 @@ def validate_config_entry(
         entry_cache = None
 
     out = dict(entry)
+    if auto_length:
+        out["defect_layout"] = "equidistant"
     if "e_fermi" in entry:
         out["e_fermi"] = normalize_e_fermi(entry["e_fermi"])
     out["m"] = m
@@ -889,6 +932,7 @@ def _validate_batch(raw, path):
                 entry, i, path,
                 default_defect_count_mode=template["defect_count_mode"],
                 default_uc_file=template["uc_file"],
+                scattering_only=mode == "scattering_only",
             ) for i, entry in enumerate(configs_raw)
         ]
 
@@ -1122,6 +1166,8 @@ def format_resolution_table(configs):
                 f"实际 {actual_length:.1f} Å "
                 f"({(actual_length / target_length - 1) * 100:+.1f}%); "
                 if target_length is not None
+                else f"{length_field}={units}（自动，{actual_length:.1f} Å）; "
+                if cfg.get("defect_layout") == "equidistant"
                 else f"{length_field}={units}（手写，{actual_length:.1f} Å）; "
             )
             + density_text
